@@ -54,7 +54,7 @@ agent-misc/
 ├── LICENSE                            # MIT License
 ├── README.md                          # Project index
 ├── AGENTS.md                          # Repository layout rules (one self-contained folder per project)
-├── .gitignore                         # Ignored build output and local secrets
+├── .gitattributes, .gitignore         # LF line endings on every OS; ignored build output and local secrets
 ├── .markdownlint.json                 # Shared Markdown lint config (rumdl / markdownlint)
 ├── .github/workflows/utcp-rs.yml      # Linux + Windows tests; static Linux (musl) + Windows release archives (Run workflow)
 └── utcp-rs/                           # Cargo Workspace root

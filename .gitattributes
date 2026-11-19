@@ -1,0 +1,3 @@
+# Check out text files with LF on every OS. The skill templates and operating.md are compiled into the binary,
+# so CRLF from a Windows checkout would change what utcp writes. packaging/windows/.gitattributes keeps *.cmd CRLF.
+* text=auto eol=lf
