@@ -1,0 +1,38 @@
+[package]
+name = "utcp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Fast cross-platform UTCP CLI, optional local IPC daemon, and interactive Ratatui companion TUI."
+
+[[bin]]
+name = "utcp"
+path = "src/main.rs"
+
+[features]
+default = ["mcp"]
+mcp = ["utcp-core/mcp"]
+grpc = ["utcp-core/grpc"]
+webrtc = ["utcp-core/webrtc"]
+codemode = ["utcp-core/codemode"]
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+notify.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+utcp-core = { path = "../utcp-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[dev-dependencies]
+axum = "0.7"
+tempfile.workspace = true

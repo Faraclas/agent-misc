@@ -1,0 +1,744 @@
+// Provider loading from JSON files
+use anyhow::{anyhow, Result};
+use serde_json::Value;
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::call_templates;
+use crate::config::UtcpClientConfig;
+use crate::migration::{migrate_v01_config, validate_v1_config, validate_v1_manual};
+use crate::providers::base::Provider;
+use crate::providers::cli::CliProvider;
+use crate::providers::graphql::GraphqlProvider;
+use crate::providers::grpc::GrpcProvider;
+use crate::providers::http::HttpProvider;
+use crate::providers::http_stream::StreamableHttpProvider;
+use crate::providers::mcp::McpProvider;
+use crate::providers::sse::SseProvider;
+use crate::providers::tcp::TcpProvider;
+use crate::providers::text::TextProvider;
+use crate::providers::udp::UdpProvider;
+use crate::providers::webrtc::WebRtcProvider;
+use crate::providers::websocket::WebSocketProvider;
+use crate::spec::ManualV1;
+
+/// Parse a providers JSON file
+/// Supports multiple formats:
+/// - Array: [{"provider_type": "http", ...}, ...]
+/// - Object with providers array: {"providers": [{...}, ...]}
+/// - Object with single provider: {"providers": {...}}
+/// - Single provider: {"provider_type": "http", ...}
+pub async fn load_providers_from_file(
+    path: impl AsRef<Path>,
+    config: &UtcpClientConfig,
+) -> Result<Vec<Arc<dyn Provider>>> {
+    Ok(load_providers_with_tools_from_file(path, config)
+        .await?
+        .into_iter()
+        .map(|p| p.provider)
+        .collect())
+}
+
+/// LoadedProvider represents a provider that has been loaded from a configuration file,
+/// optionally including a list of tools if they were defined in the file (e.g. in a manual).
+pub struct LoadedProvider {
+    /// The loaded provider instance.
+    pub provider: Arc<dyn Provider>,
+    /// Optional list of tools associated with this provider.
+    pub tools: Option<Vec<crate::tools::Tool>>,
+}
+
+/// Load providers or manuals (v0.1 or v1.0), returning providers and any embedded tools.
+pub async fn load_providers_with_tools_from_file(
+    path: impl AsRef<Path>,
+    config: &UtcpClientConfig,
+) -> Result<Vec<LoadedProvider>> {
+    let contents = tokio::fs::read_to_string(path).await?;
+    let json_raw: Value = serde_json::from_str(&contents)?;
+    // Apply v0.1 -> v1.0 migration for configs if needed
+    let json = migrate_v01_config(&json_raw);
+
+    // Validate v1.0 shapes when applicable
+    if let Some(obj) = json.as_object() {
+        if obj.contains_key("manual_call_templates") {
+            validate_v1_config(&json)?;
+        }
+        if obj.contains_key("tools") {
+            validate_v1_manual(&json)?;
+        }
+    }
+
+    // If this is a manual with tools, collect tools per provider
+    if let Some(obj) = json.as_object() {
+        if obj.get("tools").is_some() {
+            let _manual: ManualV1 = serde_json::from_value(json.clone())
+                .map_err(|e| anyhow!("Invalid v1.0 manual: {}", e))?;
+
+            let (providers, tools) = parse_manual_tools_with_providers(json.clone(), config)?;
+            return Ok(providers
+                .into_iter()
+                .zip(tools.into_iter())
+                .map(|(provider, tools)| LoadedProvider {
+                    provider,
+                    tools: Some(tools),
+                })
+                .collect());
+        }
+    }
+
+    let provider_values = parse_providers_json(json)?;
+
+    let mut providers = Vec::new();
+    for (index, mut provider_value) in provider_values.into_iter().enumerate() {
+        // Perform variable substitution
+        substitute_variables(&mut provider_value, config);
+
+        // Create provider
+        let provider = create_provider_from_value(provider_value, index)?;
+        providers.push(LoadedProvider {
+            provider,
+            tools: None,
+        });
+    }
+
+    Ok(providers)
+}
+
+/// Parses the raw JSON value into a list of provider JSON objects.
+/// Handles various formats: array, object with "providers", object with "manual_call_templates", or single provider object.
+fn parse_providers_json(json: Value) -> Result<Vec<Value>> {
+    match json {
+        // Direct array of providers
+        Value::Array(arr) => Ok(arr),
+
+        // Object that might contain providers
+        Value::Object(obj) => {
+            if obj.get("tools").is_some() {
+                return parse_manual_tools(Value::Object(obj));
+            }
+
+            // v1.0 migration: manual_call_templates -> providers
+            if let Some(templates_value) = obj.get("manual_call_templates") {
+                if let Some(arr) = templates_value.as_array() {
+                    let mut providers = Vec::new();
+                    for template in arr {
+                        providers
+                            .push(call_templates::call_template_to_provider(template.clone())?);
+                    }
+                    return Ok(providers);
+                }
+            }
+
+            if let Some(providers_value) = obj.get("providers") {
+                match providers_value {
+                    // providers is an array
+                    Value::Array(arr) => Ok(arr.clone()),
+                    // providers is a single object
+                    Value::Object(_) => Ok(vec![providers_value.clone()]),
+                    _ => Err(anyhow!("'providers' field must be an array or object")),
+                }
+            } else {
+                // Single provider object (no "providers" wrapper)
+                Ok(vec![Value::Object(obj)])
+            }
+        }
+
+        _ => Err(anyhow!("JSON root must be array or object")),
+    }
+}
+
+/// Parse a manual (v0.1 or v1.0) into a list of providers by lifting tool_call_templates.
+fn parse_manual_tools(json: Value) -> Result<Vec<Value>> {
+    let obj = json
+        .as_object()
+        .ok_or_else(|| anyhow!("Manual must be an object"))?;
+    let tools = obj
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("Manual missing tools array"))?;
+
+    let mut providers = Vec::new();
+    for tool in tools {
+        if let Some(provider) = tool_to_provider(tool)? {
+            providers.push(provider);
+        }
+    }
+    Ok(providers)
+}
+
+/// Parses a manual JSON object to extract both providers and their associated tools.
+/// Returns a tuple of (providers, tools_per_provider).
+fn parse_manual_tools_with_providers(
+    json: Value,
+    config: &UtcpClientConfig,
+) -> Result<(Vec<Arc<dyn Provider>>, Vec<Vec<crate::tools::Tool>>)> {
+    let obj = json
+        .as_object()
+        .ok_or_else(|| anyhow!("Manual must be an object"))?;
+    let tools = obj
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("Manual missing tools array"))?;
+
+    // Extract allowed_communication_protocols from manual
+    let manual_allowed_protocols: Option<Vec<String>> = obj
+        .get("allowed_communication_protocols")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+
+    let mut providers = Vec::new();
+    let mut tools_per_provider = Vec::new();
+
+    for (idx, tool_val) in tools.iter().enumerate() {
+        if let Some(provider_val) = tool_to_provider(tool_val)? {
+            let mut provider_val = provider_val.clone();
+            substitute_variables(&mut provider_val, config);
+
+            // If missing provider_type, derive from call_template_type
+            let provider_obj = provider_val
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("Provider must be object"))?;
+
+            let provider_type_str = if provider_obj
+                .get("provider_type")
+                .or_else(|| provider_obj.get("type"))
+                .is_none()
+            {
+                if let Some(ct) = provider_obj.get("call_template_type").cloned() {
+                    provider_obj.insert("provider_type".to_string(), ct.clone());
+                    provider_obj.insert("type".to_string(), ct.clone());
+                    ct.as_str().unwrap_or("http").to_string()
+                } else {
+                    if provider_obj
+                        .get("allowed_communication_protocols")
+                        .is_none()
+                    {
+                        provider_obj.insert(
+                            "allowed_communication_protocols".to_string(),
+                            serde_json::to_value("http".to_string())?,
+                        );
+                    }
+                    provider_obj.insert("type".to_string(), Value::String("http".to_string()));
+                    "http".to_string()
+                }
+            } else {
+                provider_obj
+                    .get("provider_type")
+                    .or_else(|| provider_obj.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("http")
+                    .to_string()
+            };
+
+            // When the tool_call_template has no explicit "name" field, normalize_common_template
+            // defaults the provider name to the call_template_type string (e.g. "cli"). This means
+            // multiple tools of the same type would all get the same provider name and overwrite each
+            // other in the repository (issue #28). Fix: if the provider's current name equals the
+            // bare call_template_type, replace it with the tool's outer name so that every tool gets
+            // its own unique provider slot.
+            let tool_outer_name = tool_val.get("name").and_then(|v| v.as_str());
+            if let Some(outer_name) = tool_outer_name {
+                let current_prov_name = provider_obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // Only override when the name was auto-defaulted to the type string (not explicitly set).
+                if current_prov_name == provider_type_str || current_prov_name.is_empty() {
+                    provider_obj.insert("name".to_string(), Value::String(outer_name.to_string()));
+                }
+            }
+
+            // Propagate manual's allowed_communication_protocols to provider if set
+            if let Some(ref allowed) = manual_allowed_protocols {
+                if !allowed.is_empty() {
+                    // Skip tools using disallowed communication protocols silently so library calls never pollute stderr.
+                    if !allowed.contains(&provider_type_str) {
+                        continue; // Skip this tool
+                    }
+
+                    // Add allowed_communication_protocols to provider
+                    provider_obj.insert(
+                        "allowed_communication_protocols".to_string(),
+                        serde_json::to_value(allowed.clone())?,
+                    );
+                }
+            }
+
+            let provider = create_provider_from_value(provider_val, idx)?;
+            let prov_name = provider.name();
+            providers.push(provider);
+
+            let mut tool_value = tool_val.clone();
+            if let Some(obj) = tool_value.as_object_mut() {
+                obj.entry("tags")
+                    .or_insert_with(|| Value::Array(Vec::new()));
+            }
+            let mut tool: crate::tools::Tool = serde_json::from_value(tool_value)?;
+            // Prefix tool name with provider to keep existing naming
+            if !tool.name.starts_with(&format!("{}.", prov_name)) {
+                tool.name = format!("{}.{}", prov_name, tool.name);
+            }
+            tools_per_provider.push(vec![tool]);
+        }
+    }
+
+    Ok((providers, tools_per_provider))
+}
+
+/// Extracts a provider definition from a tool JSON object.
+/// Checks for "tool_call_template" or "provider" fields.
+pub fn tool_to_provider(tool: &Value) -> Result<Option<Value>> {
+    let tool_obj = tool
+        .as_object()
+        .ok_or_else(|| anyhow!("Tool must be an object"))?;
+
+    if let Some(tmpl) = tool_obj.get("tool_call_template") {
+        Ok(Some(call_templates::call_template_to_provider(
+            with_call_template_type(tmpl),
+        )?))
+    } else if let Some(prov) = tool_obj.get("provider") {
+        Ok(Some(call_templates::call_template_to_provider(
+            with_call_template_type(prov),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Returns `value` with `call_template_type` filled in from a legacy `provider_type` (or `type`) when it is
+/// missing. Legacy v0.1 `provider` objects, and manuals written by older `utcp import-mcp` builds, name
+/// the protocol only in `provider_type`, which `call_template_to_provider` would reject (`issues/012`).
+pub fn with_call_template_type(value: &Value) -> Value {
+    let mut out = value.clone();
+    if let Some(obj) = out.as_object_mut() {
+        if !obj.contains_key("call_template_type") {
+            let legacy = obj
+                .get("provider_type")
+                .or_else(|| obj.get("type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let Some(kind) = legacy {
+                obj.insert("call_template_type".to_string(), Value::String(kind));
+            }
+        }
+    }
+    out
+}
+
+/// Creates a Provider instance from a JSON value.
+/// Handles type normalization and defaults.
+pub fn create_provider_from_value(mut value: Value, index: usize) -> Result<Arc<dyn Provider>> {
+    // Normalize type field: accept both "type" and "provider_type"
+    let provider_type = {
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("Provider must be an object"))?;
+
+        if obj.get("provider_type").is_none() && obj.get("type").is_none() {
+            obj.insert(
+                "provider_type".to_string(),
+                Value::String("http".to_string()),
+            );
+            obj.insert("type".to_string(), Value::String("http".to_string()));
+        }
+
+        let ptype = obj
+            .get("provider_type")
+            .or_else(|| obj.get("type"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing provider_type field"))?
+            .to_string();
+
+        // Ensure both fields exist
+        obj.insert("type".to_string(), Value::String(ptype.clone()));
+        obj.insert("provider_type".to_string(), Value::String(ptype.clone()));
+
+        // Ensure name field exists
+        if !obj.contains_key("name") {
+            obj.insert(
+                "name".to_string(),
+                Value::String(format!("{}_{}", ptype, index)),
+            );
+        }
+
+        ptype
+    };
+
+    // Create provider based on type
+    match provider_type.as_str() {
+        "http" => {
+            if !value
+                .get("http_method")
+                .or_else(|| value.get("method"))
+                .is_some()
+            {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("http_method".to_string(), Value::String("GET".to_string()));
+                }
+            }
+            if !value.get("url").is_some() {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "url".to_string(),
+                        Value::String("http://localhost".to_string()),
+                    );
+                }
+            }
+            let provider: HttpProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "cli" => {
+            let provider: CliProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "sse" => {
+            let provider: SseProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "websocket" => {
+            let provider: WebSocketProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "grpc" => {
+            let provider: GrpcProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "graphql" => {
+            let provider: GraphqlProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "tcp" => {
+            let provider: TcpProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "udp" => {
+            let provider: UdpProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "http_stream" => {
+            let provider: StreamableHttpProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "mcp" => {
+            let provider: McpProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "webrtc" => {
+            let provider: WebRtcProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        "text" => {
+            let provider: TextProvider = serde_json::from_value(value)?;
+            Ok(Arc::new(provider))
+        }
+        // Add more provider types as they are implemented
+        _ => Err(anyhow!("Unsupported provider type: {}", provider_type)),
+    }
+}
+
+/// Substitutes variables in the JSON value using the provided configuration.
+/// Replaces ${VAR} and $VAR with values from config or environment.
+fn substitute_variables(value: &mut Value, config: &UtcpClientConfig) {
+    match value {
+        Value::String(s) => {
+            // Replace ${VAR} or $VAR patterns
+            let mut result = s.clone();
+
+            // Replace from config variables
+            for (key, val) in &config.variables {
+                result = result.replace(&format!("${{{}}}", key), val);
+                result = result.replace(&format!("${}", key), val);
+            }
+
+            // Also check environment variables for remaining variables
+            if result.contains('$') {
+                for key in config.variables.keys() {
+                    if let Ok(env_val) = std::env::var(key) {
+                        result = result.replace(&format!("${}", key), &env_val);
+                        result = result.replace(&format!("${{{}}}", key), &env_val);
+                    }
+                }
+            }
+
+            *s = result;
+        }
+        Value::Object(obj) => {
+            for (_, v) in obj.iter_mut() {
+                substitute_variables(v, config);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                substitute_variables(item, config);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_parse_providers_array() {
+        let json = serde_json::json!([
+            {"provider_type": "http", "url": "http://example.com"},
+            {"provider_type": "cli", "command_name": "ls"}
+        ]);
+
+        let result = parse_providers_json(json).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    // issues/012: a legacy `provider` object names its protocol only in `provider_type`.
+    #[test]
+    fn tool_to_provider_accepts_legacy_provider_without_call_template_type() {
+        let tool = serde_json::json!({
+            "name": "resolve",
+            "provider": {"name": "ctx", "provider_type": "mcp", "url": "http://127.0.0.1:1/mcp"}
+        });
+        let prov = tool_to_provider(&tool).unwrap().expect("provider");
+        assert_eq!(
+            prov.get("provider_type").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+    }
+
+    // issues/012: cached manuals from older `utcp import-mcp` builds stored the provider JSON as
+    // `tool_call_template`, so it lacks `call_template_type`.
+    #[test]
+    fn tool_to_provider_accepts_call_template_without_call_template_type() {
+        let tool = serde_json::json!({
+            "name": "resolve",
+            "tool_call_template": {"name": "ctx", "provider_type": "mcp", "url": "http://127.0.0.1:1/mcp"}
+        });
+        let prov = tool_to_provider(&tool).unwrap().expect("provider");
+        assert_eq!(
+            prov.get("provider_type").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+    }
+
+    #[test]
+    fn with_call_template_type_keeps_an_explicit_value() {
+        let v = serde_json::json!({"call_template_type": "http", "provider_type": "mcp"});
+        assert_eq!(with_call_template_type(&v), v);
+        let filled = with_call_template_type(&serde_json::json!({"type": "cli"}));
+        assert_eq!(filled["call_template_type"], "cli");
+    }
+
+    #[test]
+    fn test_parse_providers_object_with_array() {
+        let json = serde_json::json!({
+            "providers": [
+                {"provider_type": "http", "url": "http://example.com"}
+            ]
+        });
+
+        let result = parse_providers_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_single_provider() {
+        let json = serde_json::json!({
+            "provider_type": "http",
+            "url": "http://example.com"
+        });
+
+        let result = parse_providers_json(json).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_manual_call_templates_converts_to_providers() {
+        let json = serde_json::json!({
+            "manual_call_templates": [
+                {
+                    "name": "weather_service",
+                    "call_template_type": "http",
+                    "url": "http://example.com",
+                    "http_method": "GET"
+                },
+                {
+                    "name": "cli_tool",
+                    "call_template_type": "cli",
+                    "command": "echo hi",
+                    "working_dir": "/tmp"
+                }
+            ]
+        });
+
+        let result = parse_providers_json(json).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0]
+                .get("provider_type")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "http"
+        );
+        assert_eq!(
+            result[1]
+                .get("command_name")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "echo hi"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_providers_supports_multiple_types() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "providers": [
+                    {{ "provider_type": "sse", "name": "events", "url": "http://example.com/sse" }},
+                    {{ "provider_type": "http_stream", "name": "stream", "url": "http://example.com/stream" }}
+                ]
+            }}"#
+        )
+        .unwrap();
+
+        let config = UtcpClientConfig::default();
+        let providers = load_providers_from_file(file.path(), &config)
+            .await
+            .unwrap();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(
+            providers[0].type_(),
+            crate::providers::base::ProviderType::Sse
+        );
+        assert_eq!(
+            providers[1].type_(),
+            crate::providers::base::ProviderType::HttpStream
+        );
+    }
+
+    #[tokio::test]
+    async fn load_manual_with_tools_returns_tools() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "manual_version": "1.0.0",
+                "utcp_version": "0.2.0",
+                "info": {{ "title": "demo", "version": "1.0.0" }},
+                "tools": [
+                    {{
+                        "name": "echo",
+                        "description": "Echo",
+                        "inputs": {{ "type": "object" }},
+                        "outputs": {{ "type": "object" }},
+                        "tool_call_template": {{
+                            "call_template_type": "http",
+                            "name": "http_tool",
+                            "url": "http://example.com",
+                            "http_method": "GET"
+                        }}
+                    }}
+                ]
+            }}"#
+        )
+        .unwrap();
+
+        let config = UtcpClientConfig::default();
+        let loaded = load_providers_with_tools_from_file(file.path(), &config)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].tools.as_ref().unwrap()[0]
+            .name
+            .starts_with(&loaded[0].provider.name()));
+    }
+
+    /// Regression test for issue #28:
+    /// Multiple tools with the same call_template_type and no explicit name in their
+    /// tool_call_template should each get a unique provider name derived from the tool's
+    /// outer name, preventing them from overwriting each other in the repository.
+    #[tokio::test]
+    async fn load_manual_multiple_tools_same_type_no_template_name_each_get_unique_provider() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "utcp_version": "1.0.1",
+                "manual_version": "1.0.0",
+                "info": {{ "title": "Bug Reproduction", "version": "1.0.0" }},
+                "tools": [
+                    {{
+                        "name": "tool1",
+                        "description": "First CLI tool",
+                        "inputs": {{ "type": "object", "properties": {{}} }},
+                        "outputs": {{ "type": "string" }},
+                        "tool_call_template": {{
+                            "call_template_type": "cli",
+                            "commands": [{{"command": "echo 'tool1'", "append_to_final_output": true}}]
+                        }}
+                    }},
+                    {{
+                        "name": "tool2",
+                        "description": "Second CLI tool",
+                        "inputs": {{ "type": "object", "properties": {{}} }},
+                        "outputs": {{ "type": "string" }},
+                        "tool_call_template": {{
+                            "call_template_type": "cli",
+                            "commands": [{{"command": "echo 'tool2'", "append_to_final_output": true}}]
+                        }}
+                    }},
+                    {{
+                        "name": "tool3",
+                        "description": "Third CLI tool",
+                        "inputs": {{ "type": "object", "properties": {{}} }},
+                        "outputs": {{ "type": "string" }},
+                        "tool_call_template": {{
+                            "call_template_type": "cli",
+                            "commands": [{{"command": "echo 'tool3'", "append_to_final_output": true}}]
+                        }}
+                    }}
+                ]
+            }}"#
+        )
+        .unwrap();
+
+        let config = UtcpClientConfig::default();
+        let loaded = load_providers_with_tools_from_file(file.path(), &config)
+            .await
+            .unwrap();
+
+        // All 3 tools must be present as separate providers
+        assert_eq!(loaded.len(), 3, "Expected 3 providers, one per tool");
+
+        // Each provider must have a distinct name
+        let names: Vec<String> = loaded.iter().map(|p| p.provider.name()).collect();
+        let mut unique_names = names.clone();
+        unique_names.dedup();
+        assert_eq!(
+            unique_names.len(),
+            names.len(),
+            "Provider names are not unique: {:?}",
+            names
+        );
+
+        // Every loaded entry must carry exactly 1 tool
+        for lp in &loaded {
+            let tools = lp.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 1, "Expected exactly 1 tool per provider");
+            // Tool name must be prefixed with the provider name
+            assert!(
+                tools[0].name.starts_with(&lp.provider.name()),
+                "Tool name '{}' should start with provider name '{}'",
+                tools[0].name,
+                lp.provider.name()
+            );
+        }
+    }
+}

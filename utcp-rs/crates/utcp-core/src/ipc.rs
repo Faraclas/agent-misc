@@ -1,0 +1,1474 @@
+use crate::activity::{
+    activity_detail, append_activity_entry, batch_activity_summary, is_logging_enabled,
+    read_recent_activity, ActivityEntry,
+};
+use crate::catalog::{
+    dry_run_tool_from_manual, execute_loaded_tool, load_daemon_startup_env_map,
+    load_or_build_index_sync, load_single_cached_manual, manual_env_var_names, project_json_fields,
+    query_systemd_user_unit_state, release_manual_connections, resolve_manual_and_tool,
+    resolve_secret_var, retain_allowed_env, BatchRequestItem, BatchResultItem, CachedUtcpManual,
+    CredentialStatus,
+};
+#[cfg(feature = "mcp")]
+use crate::catalog::{manual_stdio_mcp_servers, ManualStdioServer};
+use crate::index::{SearchIndex, ToolSchemaDetail, ToolSummary};
+use crate::media::{inspect_media_spool, prune_media_spool, MediaSpoolStatus};
+use crate::paths::{UtcpPaths, UtcpSettings};
+use crate::security::build_secure_http_client;
+use crate::transports::registry::CommunicationProtocolRegistry;
+use crate::transports::McpServerState;
+use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
+use futures::stream::{self, StreamExt};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::{mpsc, watch, RwLock};
+
+const MAX_IPC_FRAME_BYTES: usize = 32 * 1024 * 1024;
+/// How many recent calls the daemon keeps in memory (TUI Tab 5, `utcp log recent`).
+pub const RING_BUFFER_CAPACITY: usize = 500;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcRequest {
+    pub caller: String,
+    pub force_log: bool,
+    pub command: IpcCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IpcCommand {
+    Ping,
+    Status,
+    Reload,
+    ReloadEnv {
+        caller_env: HashMap<String, String>,
+    },
+    Shutdown,
+    List {
+        manual: Option<String>,
+    },
+    Search {
+        query: String,
+        limit: usize,
+        include_schemas: bool,
+    },
+    Schema {
+        target: String,
+    },
+    Call {
+        target: String,
+        args: HashMap<String, Value>,
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fields: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        caller_env: HashMap<String, String>,
+    },
+    Batch {
+        items: Vec<BatchRequestItem>,
+        concurrency: usize,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        caller_env: HashMap<String, String>,
+    },
+    RecentActivity {
+        limit: usize,
+    },
+    /// Local (stdio) MCP servers of registered manuals and what they are doing.
+    Servers,
+    /// Stop a manual's local MCP server now; its next call starts it again.
+    StopServer {
+        manual: String,
+    },
+    /// Stop and start a manual's local MCP server now.
+    RestartServer {
+        manual: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum IpcResponse {
+    Ok { data: IpcPayload },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum IpcPayload {
+    Pong,
+    DaemonStatus(DaemonStatusInfo),
+    Reloaded { manuals: usize, tools: usize },
+    EnvReloaded { total_vars: usize },
+    ShuttingDown,
+    Tools(Vec<ToolSummary>),
+    Schema(ToolSchemaDetail),
+    CallResult(Value),
+    BatchResults(Vec<BatchResultItem>),
+    Activity(Vec<ActivityEntry>),
+    Servers(Vec<McpServerInfo>),
+    ServerStopped { manual: String, was_running: bool },
+}
+
+/// One local (stdio) MCP server the daemon runs for a registered manual.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerInfo {
+    pub manual: String,
+    /// The transport's name for the server; the manual name for `import-mcp` manuals.
+    pub server: String,
+    /// The program only (never its arguments or environment, which may hold secrets).
+    pub command: String,
+    pub state: McpServerState,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
+    /// Starts after the first: crash recovery, changed settings, `restart-server`.
+    pub restarts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatusInfo {
+    pub pid: u32,
+    pub socket_endpoint: String,
+    pub uptime_secs: u64,
+    pub manual_count: usize,
+    pub tool_count: usize,
+    pub requests_served: u64,
+    pub logging_enabled: bool,
+    pub env_var_count: usize,
+    pub systemd_user_state: Option<String>,
+    pub credentials: Vec<CredentialStatus>,
+    pub media_spool: MediaSpoolStatus,
+}
+
+struct InMemoryCatalog {
+    index: SearchIndex,
+    manuals: HashMap<String, CachedUtcpManual>,
+    /// Only the variables registered manuals can read (see `allowed_env`), never a whole environment.
+    env_map: HashMap<String, String>,
+    /// Allowed shell variables pushed via `utcp daemon reload-env` or absorbed from callers
+    /// (retained across file reloads)
+    pushed_shell_env: HashMap<String, String>,
+    /// Every env var name a loaded manual may resolve; anything else is dropped on receipt.
+    allowed_env: BTreeSet<String>,
+    env_mtime: Option<SystemTime>,
+}
+
+/// The daemon's env map: the allowed part of its startup environment, overlaid with the allowed
+/// pushed shell variables.
+fn build_env_map(
+    mut base: HashMap<String, String>,
+    pushed_shell_env: &HashMap<String, String>,
+    allowed_env: &BTreeSet<String>,
+) -> HashMap<String, String> {
+    retain_allowed_env(&mut base, allowed_env);
+    for (k, v) in pushed_shell_env {
+        if allowed_env.contains(k) {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    base
+}
+
+pub struct DaemonServerState {
+    paths: UtcpPaths,
+    started_at: Instant,
+    catalog: RwLock<InMemoryCatalog>,
+    protocols: CommunicationProtocolRegistry,
+    /// The registry's `mcp` transport, kept typed for server management.
+    #[cfg(feature = "mcp")]
+    mcp: Arc<crate::transports::mcp::McpTransport>,
+    recent_ring: RwLock<VecDeque<ActivityEntry>>,
+    log_tx: mpsc::UnboundedSender<ActivityEntry>,
+    requests_served: AtomicU64,
+    last_activity_unix_secs: AtomicU64,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_in_memory_catalog(
+    paths: &UtcpPaths,
+    pushed_shell_env: HashMap<String, String>,
+) -> Result<InMemoryCatalog> {
+    let index = load_or_build_index_sync(paths)?;
+    let mut manuals = HashMap::with_capacity(index.manuals.len());
+    for m in &index.manuals {
+        if let Ok(loaded) = load_single_cached_manual(paths, &m.name) {
+            manuals.insert(m.name.clone(), loaded);
+        }
+    }
+    let env_mtime = std::fs::metadata(&paths.env_file)
+        .and_then(|m| m.modified())
+        .ok();
+    let mut allowed_env = index.env_var_names();
+    allowed_env.extend(manual_env_var_names(
+        manuals.iter().map(|(n, m)| (n.as_str(), m)),
+    ));
+    let mut pushed_shell_env = pushed_shell_env;
+    retain_allowed_env(&mut pushed_shell_env, &allowed_env);
+    let env_map = build_env_map(
+        load_daemon_startup_env_map(paths),
+        &pushed_shell_env,
+        &allowed_env,
+    );
+    Ok(InMemoryCatalog {
+        index,
+        manuals,
+        env_map,
+        pushed_shell_env,
+        allowed_env,
+        env_mtime,
+    })
+}
+
+impl DaemonServerState {
+    fn new(
+        paths: UtcpPaths,
+        log_tx: mpsc::UnboundedSender<ActivityEntry>,
+        shutdown_tx: watch::Sender<bool>,
+    ) -> Result<Self> {
+        let catalog = load_in_memory_catalog(&paths, HashMap::new())?;
+        let initial_recent: VecDeque<ActivityEntry> =
+            read_recent_activity(&paths, RING_BUFFER_CAPACITY)
+                .into_iter()
+                .collect();
+        let client = build_secure_http_client();
+        let protocols = CommunicationProtocolRegistry::with_shared_http_client(client.clone());
+        #[cfg(feature = "mcp")]
+        let mcp = Arc::new(crate::transports::mcp::McpTransport::with_client(client));
+        #[cfg(feature = "mcp")]
+        protocols.register("mcp", mcp.clone());
+        #[cfg(not(feature = "mcp"))]
+        drop(client);
+
+        Ok(Self {
+            paths,
+            started_at: Instant::now(),
+            catalog: RwLock::new(catalog),
+            protocols,
+            #[cfg(feature = "mcp")]
+            mcp,
+            recent_ring: RwLock::new(initial_recent),
+            log_tx,
+            requests_served: AtomicU64::new(0),
+            last_activity_unix_secs: AtomicU64::new(now_unix_secs()),
+            shutdown_tx,
+        })
+    }
+
+    pub async fn reload(&self) -> Result<(usize, usize)> {
+        let pushed = {
+            let guard = self.catalog.read().await;
+            guard.pushed_shell_env.clone()
+        };
+        let fresh = load_in_memory_catalog(&self.paths, pushed)?;
+        let counts = (fresh.index.manuals.len(), fresh.index.tools.len());
+        let removed: Vec<CachedUtcpManual> = {
+            let mut guard = self.catalog.write().await;
+            let old = std::mem::replace(&mut *guard, fresh);
+            old.manuals
+                .into_iter()
+                .filter(|(name, _)| !guard.manuals.contains_key(name))
+                .map(|(_, manual)| manual)
+                .collect()
+        };
+        // Stop servers of deregistered manuals (a changed manual's server is replaced on its
+        // next call, when the transport sees different launch settings).
+        for manual in &removed {
+            release_manual_connections(manual, &self.protocols).await;
+        }
+        Ok(counts)
+    }
+
+    /// Re-reads the daemon's own environment and keeps the caller's allowed variables. Returns the
+    /// number of variables held afterwards (only names registered manuals use).
+    pub async fn reload_env(&self, caller_env: HashMap<String, String>) -> usize {
+        let base = load_daemon_startup_env_map(&self.paths);
+        let mut guard = self.catalog.write().await;
+        for (k, v) in caller_env {
+            if guard.allowed_env.contains(&k) {
+                guard.pushed_shell_env.insert(k, v);
+            }
+        }
+        guard.env_mtime = std::fs::metadata(&self.paths.env_file)
+            .and_then(|m| m.modified())
+            .ok();
+        guard.env_map = build_env_map(base, &guard.pushed_shell_env, &guard.allowed_env);
+        guard.env_map.len()
+    }
+
+    /// Absorb non-empty variables a registered manual needs from a caller's shell when they were
+    /// missing when `systemd --user` started the daemon at login/boot (eliminating cold-boot 401s).
+    /// Every other caller variable is ignored and never stored.
+    async fn merge_missing_caller_env(&self, caller_env: HashMap<String, String>) {
+        let is_new = |guard: &InMemoryCatalog, k: &String, v: &String| {
+            !v.is_empty() && guard.allowed_env.contains(k) && !guard.env_map.contains_key(k)
+        };
+        let has_new = {
+            let guard = self.catalog.read().await;
+            caller_env.iter().any(|(k, v)| is_new(&guard, k, v))
+        };
+        if has_new {
+            let mut guard = self.catalog.write().await;
+            for (k, v) in caller_env {
+                if is_new(&guard, &k, &v) {
+                    guard.pushed_shell_env.insert(k.clone(), v.clone());
+                    guard.env_map.insert(k, v);
+                }
+            }
+        }
+    }
+
+    async fn refresh_env_if_modified(&self) {
+        let current_mtime = std::fs::metadata(&self.paths.env_file)
+            .and_then(|m| m.modified())
+            .ok();
+        let needs_reload = {
+            let guard = self.catalog.read().await;
+            guard.env_mtime != current_mtime
+        };
+        if needs_reload {
+            let fresh_env = load_daemon_startup_env_map(&self.paths);
+            let mut guard = self.catalog.write().await;
+            guard.env_map = build_env_map(fresh_env, &guard.pushed_shell_env, &guard.allowed_env);
+            guard.env_mtime = current_mtime;
+        }
+    }
+
+    async fn record_activity(&self, entry: ActivityEntry, force_log: bool) {
+        {
+            let mut ring = self.recent_ring.write().await;
+            ring.push_front(entry.clone());
+            while ring.len() > RING_BUFFER_CAPACITY {
+                ring.pop_back();
+            }
+        }
+        if force_log || is_logging_enabled(&self.paths) {
+            let _ = self.log_tx.send(entry);
+        }
+    }
+
+    async fn handle_request(&self, req: IpcRequest) -> IpcResponse {
+        if matches!(
+            req.command,
+            IpcCommand::List { .. }
+                | IpcCommand::Search { .. }
+                | IpcCommand::Schema { .. }
+                | IpcCommand::Call { .. }
+                | IpcCommand::Batch { .. }
+        ) {
+            self.requests_served.fetch_add(1, Ordering::Relaxed);
+            self.last_activity_unix_secs
+                .store(now_unix_secs(), Ordering::Relaxed);
+        }
+
+        let started = Instant::now();
+        let caller = req.caller;
+        let force_log = req.force_log;
+
+        match req.command {
+            IpcCommand::Ping => IpcResponse::Ok {
+                data: IpcPayload::Pong,
+            },
+            IpcCommand::Status => {
+                self.refresh_env_if_modified().await;
+                let guard = self.catalog.read().await;
+                let mut credentials = Vec::new();
+                for m in &guard.index.manuals {
+                    for req_var in &m.required_env_vars {
+                        let resolved = resolve_secret_var(&m.name, req_var, &guard.env_map);
+                        let is_set = resolved.is_some();
+                        credentials.push(CredentialStatus {
+                            manual: m.name.clone(),
+                            env_var: req_var.clone(),
+                            resolved_via: resolved.map(|(_, via)| via),
+                            is_set,
+                        });
+                    }
+                }
+                IpcResponse::Ok {
+                    data: IpcPayload::DaemonStatus(DaemonStatusInfo {
+                        pid: std::process::id(),
+                        socket_endpoint: self.paths.socket_endpoint.clone(),
+                        uptime_secs: self.started_at.elapsed().as_secs(),
+                        manual_count: guard.index.manuals.len(),
+                        tool_count: guard.index.tools.len(),
+                        requests_served: self.requests_served.load(Ordering::Relaxed),
+                        logging_enabled: is_logging_enabled(&self.paths),
+                        env_var_count: guard.env_map.len(),
+                        systemd_user_state: query_systemd_user_unit_state(),
+                        credentials,
+                        media_spool: inspect_media_spool(&self.paths),
+                    }),
+                }
+            }
+            IpcCommand::Reload => match self.reload().await {
+                Ok((manuals, tools)) => IpcResponse::Ok {
+                    data: IpcPayload::Reloaded { manuals, tools },
+                },
+                Err(e) => IpcResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            IpcCommand::ReloadEnv { caller_env } => {
+                let total_vars = self.reload_env(caller_env).await;
+                IpcResponse::Ok {
+                    data: IpcPayload::EnvReloaded { total_vars },
+                }
+            }
+            // The stop itself is triggered in `handle_async_stream` once this reply is sent:
+            // stopping now would end the daemon before the caller hears back.
+            IpcCommand::Shutdown => IpcResponse::Ok {
+                data: IpcPayload::ShuttingDown,
+            },
+            IpcCommand::List { manual } => {
+                let tools = {
+                    let guard = self.catalog.read().await;
+                    guard.index.list_tools(manual.as_deref())
+                };
+                self.record_activity(
+                    ActivityEntry {
+                        timestamp: Utc::now().to_rfc3339(),
+                        mode: "daemon".into(),
+                        caller,
+                        command: "list".into(),
+                        target: manual.unwrap_or_else(|| "*".into()),
+                        ok: true,
+                        status: "OK".into(),
+                        latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                        detail: None,
+                    },
+                    force_log,
+                )
+                .await;
+                IpcResponse::Ok {
+                    data: IpcPayload::Tools(tools),
+                }
+            }
+            IpcCommand::Search {
+                query,
+                limit,
+                include_schemas,
+            } => {
+                let results = {
+                    let guard = self.catalog.read().await;
+                    guard.index.search(&query, limit, include_schemas)
+                };
+                self.record_activity(
+                    ActivityEntry {
+                        timestamp: Utc::now().to_rfc3339(),
+                        mode: "daemon".into(),
+                        caller,
+                        command: "search".into(),
+                        target: query,
+                        ok: true,
+                        status: format!("{} hits", results.len()),
+                        latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                        detail: None,
+                    },
+                    force_log,
+                )
+                .await;
+                IpcResponse::Ok {
+                    data: IpcPayload::Tools(results),
+                }
+            }
+            IpcCommand::Schema { target } => {
+                let schema_opt = {
+                    let guard = self.catalog.read().await;
+                    guard.index.get_schema(&target)
+                };
+                match schema_opt {
+                    Some(schema) => {
+                        self.record_activity(
+                            ActivityEntry {
+                                timestamp: Utc::now().to_rfc3339(),
+                                mode: "daemon".into(),
+                                caller,
+                                command: "schema".into(),
+                                target,
+                                ok: true,
+                                status: "OK".into(),
+                                latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                                detail: None,
+                            },
+                            force_log,
+                        )
+                        .await;
+                        IpcResponse::Ok {
+                            data: IpcPayload::Schema(schema),
+                        }
+                    }
+                    None => IpcResponse::Error {
+                        message: format!("Tool '{}' not found in registered manuals", target),
+                    },
+                }
+            }
+            IpcCommand::Call {
+                target,
+                args,
+                dry_run,
+                fields,
+                caller_env,
+            } => {
+                self.refresh_env_if_modified().await;
+                if !caller_env.is_empty() {
+                    self.merge_missing_caller_env(caller_env).await;
+                }
+                let resolved = {
+                    let guard = self.catalog.read().await;
+                    resolve_manual_and_tool(&target, Some(&guard.index), &self.paths).and_then(
+                        |(mname, tname)| {
+                            let m = guard
+                                .manuals
+                                .get(&mname)
+                                .cloned()
+                                .ok_or_else(|| anyhow!("Manual '{}' not loaded", mname))?;
+                            Ok((m, mname, tname, guard.env_map.clone()))
+                        },
+                    )
+                };
+
+                let outcome = match resolved {
+                    Ok((manual, mname, tname, env_map)) => {
+                        if dry_run {
+                            dry_run_tool_from_manual(&manual, &mname, &tname, &args, &env_map)
+                        } else {
+                            execute_loaded_tool(
+                                &manual,
+                                &mname,
+                                &tname,
+                                args,
+                                &env_map,
+                                &self.protocols,
+                                &self.paths,
+                            )
+                            .await
+                            .map(|val| match fields.as_deref() {
+                                Some(f) if !f.is_empty() => project_json_fields(val, f),
+                                _ => val,
+                            })
+                        }
+                    }
+                    Err(e) => Err(e),
+                };
+
+                let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+                match outcome {
+                    Ok(val) => {
+                        self.record_activity(
+                            ActivityEntry {
+                                timestamp: Utc::now().to_rfc3339(),
+                                mode: "daemon".into(),
+                                caller,
+                                command: if dry_run { "dry-run" } else { "call" }.into(),
+                                target,
+                                ok: true,
+                                status: "OK".into(),
+                                latency_ms,
+                                detail: None,
+                            },
+                            force_log,
+                        )
+                        .await;
+                        IpcResponse::Ok {
+                            data: IpcPayload::CallResult(val),
+                        }
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        let detail = {
+                            let guard = self.catalog.read().await;
+                            activity_detail(&format!("{:#}", err), &guard.env_map)
+                        };
+                        self.record_activity(
+                            ActivityEntry {
+                                timestamp: Utc::now().to_rfc3339(),
+                                mode: "daemon".into(),
+                                caller,
+                                command: if dry_run { "dry-run" } else { "call" }.into(),
+                                target,
+                                ok: false,
+                                status: "ERR".into(),
+                                latency_ms,
+                                detail: Some(detail),
+                            },
+                            force_log,
+                        )
+                        .await;
+                        IpcResponse::Error { message: msg }
+                    }
+                }
+            }
+            IpcCommand::Batch {
+                items,
+                concurrency,
+                caller_env,
+            } => {
+                self.refresh_env_if_modified().await;
+                if !caller_env.is_empty() {
+                    self.merge_missing_caller_env(caller_env).await;
+                }
+                let (index_snap, manuals_snap, env_snap) = {
+                    let guard = self.catalog.read().await;
+                    (
+                        guard.index.clone(),
+                        guard.manuals.clone(),
+                        guard.env_map.clone(),
+                    )
+                };
+                let max_conc = concurrency.max(1);
+                let count = items.len();
+                let results: Vec<(usize, BatchResultItem)> =
+                    stream::iter(items.into_iter().enumerate())
+                        .map(|(idx, item)| {
+                            let protocols = self.protocols.clone();
+                            let index = &index_snap;
+                            let manuals = &manuals_snap;
+                            let env_map = &env_snap;
+                            let paths = &self.paths;
+                            async move {
+                                let item_start = Instant::now();
+                                let item_fields = item.fields.clone();
+                                let res = async {
+                                    let (mname, tname) =
+                                        resolve_manual_and_tool(&item.tool, Some(index), paths)?;
+                                    let manual = manuals
+                                        .get(&mname)
+                                        .ok_or_else(|| anyhow!("Manual '{}' not loaded", mname))?;
+                                    let val = execute_loaded_tool(
+                                        manual, &mname, &tname, item.args, env_map, &protocols,
+                                        paths,
+                                    )
+                                    .await?;
+                                    Ok::<Value, anyhow::Error>(match item_fields.as_deref() {
+                                        Some(f) if !f.is_empty() => project_json_fields(val, f),
+                                        _ => val,
+                                    })
+                                }
+                                .await;
+                                let latency_ms = item_start.elapsed().as_secs_f64() * 1000.0;
+                                match res {
+                                    Ok(v) => (
+                                        idx,
+                                        BatchResultItem {
+                                            id: item.id,
+                                            tool: item.tool,
+                                            ok: true,
+                                            status: "OK".into(),
+                                            result: Some(v),
+                                            error: None,
+                                            latency_ms,
+                                        },
+                                    ),
+                                    Err(e) => (
+                                        idx,
+                                        BatchResultItem {
+                                            id: item.id,
+                                            tool: item.tool,
+                                            ok: false,
+                                            status: "ERR".into(),
+                                            result: None,
+                                            error: Some(e.to_string()),
+                                            latency_ms,
+                                        },
+                                    ),
+                                }
+                            }
+                        })
+                        .buffer_unordered(max_conc)
+                        .collect()
+                        .await;
+
+                let mut ordered = results;
+                ordered.sort_by_key(|(i, _)| *i);
+                let final_items: Vec<BatchResultItem> =
+                    ordered.into_iter().map(|(_, r)| r).collect();
+
+                let (all_ok, status, detail) = batch_activity_summary(&final_items, &env_snap);
+                self.record_activity(
+                    ActivityEntry {
+                        timestamp: Utc::now().to_rfc3339(),
+                        mode: "daemon".into(),
+                        caller,
+                        command: "batch".into(),
+                        target: format!("{} calls", count),
+                        ok: all_ok,
+                        status,
+                        latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                        detail,
+                    },
+                    force_log,
+                )
+                .await;
+
+                IpcResponse::Ok {
+                    data: IpcPayload::BatchResults(final_items),
+                }
+            }
+            IpcCommand::RecentActivity { limit } => {
+                let ring = self.recent_ring.read().await;
+                let items: Vec<ActivityEntry> = ring.iter().take(limit).cloned().collect();
+                IpcResponse::Ok {
+                    data: IpcPayload::Activity(items),
+                }
+            }
+            cmd @ (IpcCommand::Servers
+            | IpcCommand::StopServer { .. }
+            | IpcCommand::RestartServer { .. }) => {
+                self.manage_servers(cmd, caller, force_log).await
+            }
+        }
+    }
+
+    /// The local MCP servers of one manual (an error when it has none), or of every manual.
+    #[cfg(feature = "mcp")]
+    async fn stdio_servers(
+        &self,
+        manual: Option<&str>,
+    ) -> Result<Vec<(String, ManualStdioServer)>> {
+        self.refresh_env_if_modified().await;
+        let guard = self.catalog.read().await;
+        let mut names: Vec<&String> = match manual {
+            Some(name) => vec![
+                guard
+                    .manuals
+                    .get_key_value(name)
+                    .ok_or_else(|| anyhow!("Manual '{}' is not registered", name))?
+                    .0,
+            ],
+            None => guard.manuals.keys().collect(),
+        };
+        names.sort();
+        let mut found = Vec::new();
+        for name in names {
+            for server in manual_stdio_mcp_servers(&guard.manuals[name], name, &guard.env_map) {
+                found.push((name.clone(), server));
+            }
+        }
+        if let (Some(name), true) = (manual, found.is_empty()) {
+            return Err(anyhow!(
+                "Manual '{}' has no local MCP server to manage: only manuals imported with \
+                 `utcp import-mcp --command` run one",
+                name
+            ));
+        }
+        Ok(found)
+    }
+
+    /// `utcp daemon servers`, `stop-server` and `restart-server`.
+    #[cfg(feature = "mcp")]
+    async fn manage_servers(
+        &self,
+        cmd: IpcCommand,
+        caller: String,
+        force_log: bool,
+    ) -> IpcResponse {
+        let started = Instant::now();
+        let (verb, manual) = match &cmd {
+            IpcCommand::StopServer { manual } => ("stop-server", Some(manual.clone())),
+            IpcCommand::RestartServer { manual } => ("restart-server", Some(manual.clone())),
+            _ => ("servers", None),
+        };
+        let outcome: Result<IpcPayload> = async {
+            let servers = self.stdio_servers(manual.as_deref()).await?;
+            match cmd {
+                IpcCommand::StopServer { manual } => {
+                    let mut was_running = false;
+                    for (_, s) in &servers {
+                        was_running |= self.mcp.stop_stdio_server(&s.provider.base.name).await;
+                    }
+                    Ok(IpcPayload::ServerStopped {
+                        manual,
+                        was_running,
+                    })
+                }
+                IpcCommand::RestartServer { .. } => {
+                    let mut infos = Vec::new();
+                    for (m, s) in servers {
+                        let status = self
+                            .mcp
+                            .restart_stdio_server(&s.provider)
+                            .await
+                            .with_context(|| {
+                                format!("could not restart the MCP server of '{m}'")
+                            })?;
+                        infos.push(server_info(m, &s, status));
+                    }
+                    Ok(IpcPayload::Servers(infos))
+                }
+                _ => {
+                    let mut infos = Vec::new();
+                    for (m, s) in servers {
+                        let status = self.mcp.stdio_server_status(&s.provider.base.name).await;
+                        infos.push(server_info(m, &s, status));
+                    }
+                    Ok(IpcPayload::Servers(infos))
+                }
+            }
+        }
+        .await;
+
+        // Listing is read-only; stop and restart go in the recent-calls list, so a call that
+        // failed because its server was stopped can be explained with `utcp log recent`.
+        if let Some(target) = manual {
+            let detail = match &outcome {
+                Ok(_) => None,
+                Err(e) => {
+                    let guard = self.catalog.read().await;
+                    Some(activity_detail(&format!("{:#}", e), &guard.env_map))
+                }
+            };
+            self.record_activity(
+                ActivityEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    mode: "daemon".into(),
+                    caller,
+                    command: verb.into(),
+                    target,
+                    ok: outcome.is_ok(),
+                    status: if outcome.is_ok() { "OK" } else { "ERR" }.into(),
+                    latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    detail,
+                },
+                force_log,
+            )
+            .await;
+        }
+        match outcome {
+            Ok(data) => IpcResponse::Ok { data },
+            Err(e) => IpcResponse::Error {
+                message: format!("{:#}", e),
+            },
+        }
+    }
+
+    #[cfg(not(feature = "mcp"))]
+    async fn manage_servers(
+        &self,
+        cmd: IpcCommand,
+        _caller: String,
+        _force_log: bool,
+    ) -> IpcResponse {
+        match cmd {
+            IpcCommand::Servers => IpcResponse::Ok {
+                data: IpcPayload::Servers(Vec::new()),
+            },
+            _ => IpcResponse::Error {
+                message: "this utcp was built without MCP support (cargo feature `mcp`)".into(),
+            },
+        }
+    }
+}
+
+#[cfg(feature = "mcp")]
+fn server_info(
+    manual: String,
+    server: &ManualStdioServer,
+    status: crate::transports::McpServerStatus,
+) -> McpServerInfo {
+    McpServerInfo {
+        manual,
+        server: server.provider.base.name.clone(),
+        command: server.command.clone(),
+        state: status.state,
+        pid: status.pid,
+        uptime_secs: status.uptime_secs,
+        restarts: status.restarts,
+    }
+}
+
+async fn handle_async_stream<S>(stream: S, state: Arc<DaemonServerState>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let mut len_buf = [0u8; 4];
+    if reader.read_exact(&mut len_buf).await.is_err() {
+        return Ok(());
+    }
+    let frame_len = u32::from_le_bytes(len_buf) as usize;
+    if frame_len == 0 || frame_len > MAX_IPC_FRAME_BYTES {
+        return Err(anyhow!("Invalid IPC frame size: {}", frame_len));
+    }
+
+    let mut payload = vec![0u8; frame_len];
+    reader.read_exact(&mut payload).await?;
+    let req: IpcRequest = serde_json::from_slice(&payload)?;
+
+    let shutting_down = matches!(req.command, IpcCommand::Shutdown);
+    let resp = state.handle_request(req).await;
+    let resp_bytes = serde_json::to_vec(&resp)?;
+    let resp_len = (resp_bytes.len() as u32).to_le_bytes();
+    let sent = async {
+        writer.write_all(&resp_len).await?;
+        writer.write_all(&resp_bytes).await?;
+        writer.flush().await
+    }
+    .await;
+    if shutting_down {
+        // Stop only once the caller has its answer: a written reply can still sit in a pipe
+        // buffer, so wait (briefly) for the caller to read it and hang up.
+        let mut byte = [0u8; 1];
+        let _ = tokio::time::timeout(Duration::from_secs(1), reader.read(&mut byte)).await;
+        let _ = state.shutdown_tx.send(true);
+    }
+    sent?;
+    Ok(())
+}
+
+/// Synchronous, zero-Tokio IPC client call!
+pub fn try_send_ipc_sync(paths: &UtcpPaths, req: &IpcRequest) -> Result<Option<IpcResponse>> {
+    let payload = serde_json::to_vec(req)?;
+    let len_bytes = (payload.len() as u32).to_le_bytes();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        let sock_path = Path::new(&paths.socket_endpoint);
+        if !sock_path.exists() {
+            return Ok(None);
+        }
+        let mut stream = match UnixStream::connect(sock_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(DaemonUnreachable(format!(
+                    "Cannot use the utcp daemon at {}: permission denied. Another account (for example \
+                     root, through sudo) started it, so this process may not use it. Nothing was sent. \
+                     Stop it as that account and start it as yourself, or run `utcp --direct ...`.",
+                    paths.socket_endpoint
+                ))
+                .into());
+            }
+            Err(_) => return Ok(None),
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+        stream.write_all(&len_bytes)?;
+        stream.write_all(&payload)?;
+        stream.flush()?;
+
+        let mut rlen = [0u8; 4];
+        stream.read_exact(&mut rlen)?;
+        let resp_len = u32::from_le_bytes(rlen) as usize;
+        if resp_len > MAX_IPC_FRAME_BYTES {
+            return Err(anyhow!("IPC response exceeded maximum frame size"));
+        }
+        let mut rbuf = vec![0u8; resp_len];
+        stream.read_exact(&mut rbuf)?;
+        let resp: IpcResponse = serde_json::from_slice(&rbuf)?;
+        Ok(Some(resp))
+    }
+
+    #[cfg(windows)]
+    {
+        use std::fs::OpenOptions;
+        // The daemon creates its next pipe instance right after a client connects; a client
+        // that arrives in that gap gets ERROR_PIPE_BUSY. That means "daemon busy", not "no
+        // daemon", so retry briefly instead of silently falling back to direct mode.
+        const ERROR_PIPE_BUSY: i32 = 231;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut pipe = loop {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&paths.socket_endpoint)
+            {
+                Ok(p) => break p,
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // The pipe exists but its default permissions shut us out: a daemon started as
+                // administrator (elevated) admits only elevated callers, another account's admits
+                // only that account. Say so instead of quietly running in direct mode.
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                    return Err(DaemonUnreachable(format!(
+                        "Cannot use the utcp daemon at {}: access denied. It was started as \
+                         administrator (elevated) or by another account, so this process may not use \
+                         it. Nothing was sent. Stop it where it was started (`utcp daemon stop` in an \
+                         elevated shell) and start it from a normal shell, or run `utcp --direct ...`.",
+                        paths.socket_endpoint
+                    ))
+                    .into());
+                }
+                Err(_) => return Ok(None),
+            }
+        };
+        if !pipe_owned_by_current_user(&pipe) {
+            return Err(DaemonUnreachable(format!(
+                "Refusing to use {}: another account created it, so it is not your utcp daemon. \
+                 Nothing was sent. Run `utcp --direct ...`, or set UTCP_SOCKET_PATH to another \
+                 pipe name and restart the daemon.",
+                paths.socket_endpoint
+            ))
+            .into());
+        }
+        pipe.write_all(&len_bytes)?;
+        pipe.write_all(&payload)?;
+        pipe.flush()?;
+
+        let mut rlen = [0u8; 4];
+        pipe.read_exact(&mut rlen)?;
+        let resp_len = u32::from_le_bytes(rlen) as usize;
+        if resp_len > MAX_IPC_FRAME_BYTES {
+            return Err(anyhow!("IPC response exceeded maximum frame size"));
+        }
+        let mut rbuf = vec![0u8; resp_len];
+        pipe.read_exact(&mut rbuf)?;
+        let resp: IpcResponse = serde_json::from_slice(&rbuf)?;
+        Ok(Some(resp))
+    }
+}
+
+/// Named pipe names are machine-wide, so another account could create ours before our daemon
+/// does and receive our requests (arguments, and API keys on `reload-env`). Only talk to a pipe
+/// owned by this account: the token's user, or its default owner (Administrators in an elevated
+/// shell).
+#[cfg(windows)]
+fn pipe_owned_by_current_user(pipe: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenOwner, TokenUser, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // SAFETY: TOKEN_USER and TOKEN_OWNER both start with the SID pointer, which points into
+    // the same (8-byte aligned) buffer and is only used while the buffer lives.
+    unsafe fn token_sid_is(token: HANDLE, class: TOKEN_INFORMATION_CLASS, sid: PSID) -> bool {
+        let mut len = 0u32;
+        GetTokenInformation(token, class, null_mut(), 0, &mut len);
+        if len == 0 {
+            return false;
+        }
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        if GetTokenInformation(token, class, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
+            return false;
+        }
+        EqualSid(*(buf.as_ptr() as *const PSID), sid) != 0
+    }
+
+    // SAFETY: documented Win32 calls; the security descriptor and token are freed below.
+    unsafe {
+        let mut owner: PSID = null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        let status = GetSecurityInfo(
+            pipe.as_raw_handle() as HANDLE,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        );
+        if status != 0 {
+            return false;
+        }
+        if owner.is_null() {
+            // Windows always gives a kernel object an owner (the creator's default owner when
+            // none is set), so this only happens under Wine, whose pipes carry no owner and
+            // where every process runs as the same Unix user anyway.
+            LocalFree(descriptor);
+            return true;
+        }
+        let mut token: HANDLE = null_mut();
+        let owned = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0 && {
+            let matches =
+                token_sid_is(token, TokenUser, owner) || token_sid_is(token, TokenOwner, owner);
+            CloseHandle(token);
+            matches
+        };
+        LocalFree(descriptor);
+        owned
+    }
+}
+
+/// A daemon endpoint exists but this process may not use it (another account's, or an elevated
+/// daemon seen from a normal shell). Unlike "no daemon", this is never a reason to fall back to
+/// direct mode quietly or to start a second daemon.
+#[derive(Debug)]
+pub struct DaemonUnreachable(pub String);
+
+impl std::fmt::Display for DaemonUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DaemonUnreachable {}
+
+/// Probe whether the daemon is reachable and return its `DaemonStatusInfo` if running.
+pub fn query_daemon_status(paths: &UtcpPaths) -> Option<DaemonStatusInfo> {
+    query_daemon_status_checked(paths).unwrap_or(None)
+}
+
+/// Like [`query_daemon_status`], but a daemon this process may not use is an error
+/// ([`DaemonUnreachable`]) instead of "not running". For `daemon status|start|stop`.
+pub fn query_daemon_status_checked(paths: &UtcpPaths) -> Result<Option<DaemonStatusInfo>> {
+    let req = IpcRequest {
+        caller: "cli".into(),
+        force_log: false,
+        command: IpcCommand::Status,
+    };
+    match try_send_ipc_sync(paths, &req) {
+        Ok(Some(IpcResponse::Ok {
+            data: IpcPayload::DaemonStatus(info),
+        })) => Ok(Some(info)),
+        Err(e) if e.is::<DaemonUnreachable>() => Err(e),
+        _ => Ok(None),
+    }
+}
+
+/// Push the current caller's live shell environment variables into the running daemon's RAM.
+/// The part of this process's environment a registered manual may read: the only variables the
+/// CLI sends to the daemon (`call`, `batch`, `reload-env`). Sends nothing when the index cannot be
+/// read, rather than falling back to the whole environment.
+pub fn manual_caller_env(paths: &UtcpPaths) -> HashMap<String, String> {
+    let Ok(index) = load_or_build_index_sync(paths) else {
+        return HashMap::new();
+    };
+    let allowed = index.env_var_names();
+    std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let k = k.into_string().ok()?;
+            if !allowed.contains(&k) {
+                return None;
+            }
+            Some((k, v.into_string().ok()?))
+        })
+        .collect()
+}
+
+pub fn sync_caller_env_to_daemon(paths: &UtcpPaths) -> Result<Option<usize>> {
+    let caller_env = manual_caller_env(paths);
+    let req = IpcRequest {
+        caller: "cli".into(),
+        force_log: false,
+        command: IpcCommand::ReloadEnv { caller_env },
+    };
+    match try_send_ipc_sync(paths, &req)? {
+        Some(IpcResponse::Ok {
+            data: IpcPayload::EnvReloaded { total_vars },
+        }) => Ok(Some(total_vars)),
+        Some(IpcResponse::Error { message }) => Err(anyhow!(message)),
+        _ => Ok(None),
+    }
+}
+
+/// Notify a running daemon to reload its in-memory catalog (no-op if daemon is stopped).
+pub fn notify_daemon_reload(paths: &UtcpPaths) {
+    let req = IpcRequest {
+        caller: "cli".into(),
+        force_log: false,
+        command: IpcCommand::Reload,
+    };
+    let _ = try_send_ipc_sync(paths, &req);
+}
+
+/// Run the local IPC daemon in the foreground until shutdown signal or optional idle timeout.
+pub async fn run_daemon_foreground(
+    paths: UtcpPaths,
+    idle_timeout_override_mins: Option<u64>,
+) -> Result<()> {
+    paths.ensure_dirs()?;
+    // Held until the socket is gone, so two daemons started at once cannot both bind (the second
+    // would delete the first's socket file). Windows needs no lock: the pipe is first-instance-only.
+    #[cfg(unix)]
+    let start_lock = acquire_daemon_lock(&paths).await?;
+    if query_daemon_status(&paths).is_some() {
+        return Err(anyhow!(
+            "utcp daemon is already running at {}",
+            paths.socket_endpoint
+        ));
+    }
+
+    let settings = UtcpSettings::load(&paths);
+    let idle_mins = idle_timeout_override_mins.unwrap_or(settings.daemon_idle_timeout_mins);
+
+    let (log_tx, mut log_rx) = mpsc::unbounded_channel::<ActivityEntry>();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    // Single-writer background task for opt-in disk activity logs
+    let log_paths = paths.clone();
+    tokio::spawn(async move {
+        while let Some(entry) = log_rx.recv().await {
+            let _ = append_activity_entry(&log_paths, &entry);
+        }
+    });
+
+    // Periodic media spool TTL sweeper (every 5 minutes) so expired tmpfs screenshots are cleaned up
+    let sweep_paths = paths.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            prune_media_spool(&sweep_paths);
+        }
+    });
+
+    let state = Arc::new(DaemonServerState::new(
+        paths.clone(),
+        log_tx,
+        shutdown_tx.clone(),
+    )?);
+
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel::<()>();
+    let mut _watcher: Option<RecommendedWatcher> =
+        notify::recommended_watcher(move |res: notify::Result<Event>| {
+            if let Ok(ev) = res {
+                if ev.kind.is_modify() || ev.kind.is_create() || ev.kind.is_remove() {
+                    let _ = watch_tx.send(());
+                }
+            }
+        })
+        .ok();
+
+    if let Some(w) = _watcher.as_mut() {
+        let _ = w.watch(&paths.config_dir, RecursiveMode::NonRecursive);
+        let _ = w.watch(&paths.manuals_dir, RecursiveMode::NonRecursive);
+    }
+
+    let reload_state = state.clone();
+    tokio::spawn(async move {
+        while watch_rx.recv().await.is_some() {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            while watch_rx.try_recv().is_ok() {}
+            let _ = reload_state.reload().await;
+        }
+    });
+
+    if idle_mins > 0 {
+        let idle_state = state.clone();
+        let idle_shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                ticker.tick().await;
+                let last = idle_state.last_activity_unix_secs.load(Ordering::Relaxed);
+                if now_unix_secs().saturating_sub(last) >= idle_mins * 60 {
+                    let _ = idle_shutdown.send(true);
+                    break;
+                }
+            }
+        });
+    }
+
+    let sig_shutdown = shutdown_tx.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).ok();
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = async {
+                    match sigterm.as_mut() {
+                        Some(s) => { s.recv().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+            let _ = sig_shutdown.send(true);
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = sig_shutdown.send(true);
+            }
+        }
+    });
+
+    #[cfg(unix)]
+    {
+        let sock_path = Path::new(&paths.socket_endpoint);
+        if let Some(parent) = sock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Any socket file here is stale: we hold the lock, and a running daemon from a build
+        // without it was caught by the status probe above.
+        if sock_path.exists() {
+            let _ = std::fs::remove_file(sock_path);
+        }
+        let listener = tokio::net::UnixListener::bind(sock_path)
+            .with_context(|| format!("Failed to bind Unix socket {}", sock_path.display()))?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600));
+        }
+        let bound_socket = unix_file_id(sock_path);
+        write_daemon_pid_file(&paths);
+
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                accept_res = listener.accept() => {
+                    if let Ok((stream, _)) = accept_res {
+                        let st = state.clone();
+                        tokio::spawn(async move {
+                            let _ = handle_async_stream(stream, st).await;
+                        });
+                    }
+                }
+            }
+        }
+
+        if bound_socket.is_some() && unix_file_id(sock_path) == bound_socket {
+            let _ = std::fs::remove_file(sock_path);
+        }
+        remove_daemon_pid_file_if_ours(&paths);
+        // Released as soon as the socket is gone: `daemon restart` starts the next daemon then.
+        drop(start_lock);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let mut server = match ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&paths.socket_endpoint)
+        {
+            Ok(server) => server,
+            Err(e) => return Err(pipe_create_error(&paths, e).await),
+        };
+        write_daemon_pid_file(&paths);
+
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                conn_res = server.connect() => {
+                    conn_res?;
+                    let connected = server;
+                    server = ServerOptions::new().create(&paths.socket_endpoint)?;
+                    let st = state.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_async_stream(connected, st).await;
+                    });
+                }
+            }
+        }
+
+        remove_daemon_pid_file_if_ours(&paths);
+        Ok(())
+    }
+}
+
+fn write_daemon_pid_file(paths: &UtcpPaths) {
+    let _ = std::fs::write(&paths.daemon_pid_file, format!("{}\n", std::process::id()));
+}
+
+/// A first-instance pipe that already exists is "access denied". When two daemons start at once,
+/// the loser gets here before the winner answers, so wait briefly for it and say what holds the
+/// pipe: our running daemon, or (the error `status` gives) another account's or an elevated one.
+#[cfg(windows)]
+async fn pipe_create_error(paths: &UtcpPaths, err: std::io::Error) -> anyhow::Error {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match query_daemon_status_checked(paths) {
+                Ok(Some(_)) => {
+                    return anyhow!(
+                        "utcp daemon is already running at {}",
+                        paths.socket_endpoint
+                    )
+                }
+                Err(e) => return e,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(40)).await,
+            }
+        }
+    }
+    anyhow::Error::new(err).context(format!(
+        "Failed to create Named Pipe {}",
+        paths.socket_endpoint
+    ))
+}
+
+fn remove_daemon_pid_file_if_ours(paths: &UtcpPaths) {
+    let ours = std::fs::read_to_string(&paths.daemon_pid_file)
+        .is_ok_and(|s| s.trim() == std::process::id().to_string());
+    if ours {
+        let _ = std::fs::remove_file(&paths.daemon_pid_file);
+    }
+}
+
+/// `<socket>.lock`, exclusively locked for the daemon's life. The OS releases it when the process
+/// ends, crash included. A daemon that just deleted its socket is about to release it, so a busy
+/// lock is retried briefly before giving up.
+#[cfg(unix)]
+async fn acquire_daemon_lock(paths: &UtcpPaths) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock_path = std::path::PathBuf::from(format!("{}.lock", paths.socket_endpoint));
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open {}", lock_path.display()))?;
+    let contended = fs2::lock_contended_error().raw_os_error();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(file),
+            Err(e) if e.raw_os_error() == contended => {
+                // Wait only for a daemon that is shutting down; a running one will not let go.
+                if Instant::now() >= deadline || query_daemon_status(paths).is_some() {
+                    return Err(anyhow!(
+                        "utcp daemon is already running at {} (another daemon holds {})",
+                        paths.socket_endpoint,
+                        lock_path.display()
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to lock {}", lock_path.display()))
+            }
+        }
+    }
+}
+
+/// Device and inode, so a daemon removes only the socket file it created itself.
+#[cfg(unix)]
+fn unix_file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
+}

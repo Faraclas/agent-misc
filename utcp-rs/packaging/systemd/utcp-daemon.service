@@ -1,0 +1,17 @@
+[Unit]
+Description=UTCP Local IPC Tool-Calling Daemon (utcp-rs)
+Documentation=https://github.com/Faraclas/agent-misc/tree/main/utcp-rs
+
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/utcp daemon run
+KillMode=mixed
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

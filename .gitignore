@@ -1,0 +1,22 @@
+# Rust target directory
+**/target/
+
+# Local environment & secret files
+**/.env
+**/.env.*
+!**/.env.example
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# UTCP local state/cache (if generated inside workspace during tests)
+**/.utcp/
+**/*.utcp.tmp

@@ -1,0 +1,121 @@
+use serde::{Deserialize, Serialize};
+
+use crate::auth::AuthConfig;
+
+/// Provider categories supported by UTCP transports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    Http,
+    Sse,
+    HttpStream,
+    Cli,
+    Websocket,
+    Grpc,
+    Graphql,
+    Tcp,
+    Udp,
+    Webrtc,
+    Mcp,
+    Text,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ProviderType {
+    /// Transport registry key used to look up the matching communication protocol.
+    pub fn as_key(&self) -> &'static str {
+        match self {
+            ProviderType::Http => "http",
+            ProviderType::Sse => "sse",
+            ProviderType::HttpStream => "http_stream",
+            ProviderType::Cli => "cli",
+            ProviderType::Websocket => "websocket",
+            ProviderType::Grpc => "grpc",
+            ProviderType::Graphql => "graphql",
+            ProviderType::Tcp => "tcp",
+            ProviderType::Udp => "udp",
+            ProviderType::Webrtc => "webrtc",
+            ProviderType::Mcp => "mcp",
+            ProviderType::Text => "text",
+            ProviderType::Unknown => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderType;
+
+    #[test]
+    fn provider_type_keys_match_transport_names() {
+        assert_eq!(ProviderType::Http.as_key(), "http");
+        assert_eq!(ProviderType::Sse.as_key(), "sse");
+        assert_eq!(ProviderType::HttpStream.as_key(), "http_stream");
+        assert_eq!(ProviderType::Cli.as_key(), "cli");
+        assert_eq!(ProviderType::Websocket.as_key(), "websocket");
+        assert_eq!(ProviderType::Grpc.as_key(), "grpc");
+        assert_eq!(ProviderType::Graphql.as_key(), "graphql");
+        assert_eq!(ProviderType::Tcp.as_key(), "tcp");
+        assert_eq!(ProviderType::Udp.as_key(), "udp");
+        assert_eq!(ProviderType::Webrtc.as_key(), "webrtc");
+        assert_eq!(ProviderType::Mcp.as_key(), "mcp");
+        assert_eq!(ProviderType::Text.as_key(), "text");
+        assert_eq!(ProviderType::Unknown.as_key(), "unknown");
+    }
+}
+
+/// Common interface each provider implementation must expose.
+pub trait Provider: Send + Sync + std::fmt::Debug + std::any::Any {
+    /// Return the provider type used to pick the right transport.
+    fn type_(&self) -> ProviderType;
+    /// Human readable provider name used for discovery and namespacing tools.
+    fn name(&self) -> String;
+
+    /// Downcast helper for transports that need the concrete provider type.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Returns the list of allowed communication protocols for this provider.
+    /// If not configured (None or empty), defaults to only the provider's own protocol type.
+    fn allowed_protocols(&self) -> Vec<String> {
+        // Default implementation - providers can override this
+        vec![self.type_().as_key().to_string()]
+    }
+}
+
+/// Minimal provider shape shared by most transport-specific provider structs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaseProvider {
+    pub name: String,
+    pub provider_type: ProviderType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthConfig>,
+    /// List of allowed communication protocol types (e.g., ["http", "cli"]).
+    /// If undefined, null, or empty, defaults to only allowing this provider's own protocol type.
+    /// This provides secure-by-default behavior where a provider can only register/call tools
+    /// that use its own protocol unless explicitly configured otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub allowed_communication_protocols: Option<Vec<String>>,
+}
+
+impl Provider for BaseProvider {
+    fn type_(&self) -> ProviderType {
+        self.provider_type.clone()
+    }
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn allowed_protocols(&self) -> Vec<String> {
+        if let Some(ref protocols) = self.allowed_communication_protocols {
+            if !protocols.is_empty() {
+                return protocols.clone();
+            }
+        }
+        // Default to only allowing this provider's own protocol
+        vec![self.provider_type.as_key().to_string()]
+    }
+}
