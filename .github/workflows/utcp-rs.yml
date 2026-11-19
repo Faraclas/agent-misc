@@ -33,7 +33,7 @@ jobs:
       version: ${{ steps.read.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Read version from Cargo.toml
         id: read
@@ -93,7 +93,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -114,7 +114,7 @@ jobs:
       # Tests run local mock servers with `node <file>` (no npm packages, no network).
       - name: Install Node.js for test mock servers
         if: matrix.test
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: lts/*
 
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload build artifact
         if: matrix.archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: utcp-rs/${{ matrix.archive }}
@@ -209,7 +209,7 @@ jobs:
       group: utcp-rs-release
     steps:
       - name: Download release archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -240,7 +240,7 @@ jobs:
           fi
 
       - name: Publish release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: utcp-rs-v${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
