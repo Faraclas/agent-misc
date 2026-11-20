@@ -18,6 +18,12 @@ pub struct HttpClientTransport {
     pub client: Client,
 }
 
+impl Default for HttpClientTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpClientTransport {
     /// Build a new HTTP client transport with tuned defaults and SSRF protection.
     pub fn new() -> Self {

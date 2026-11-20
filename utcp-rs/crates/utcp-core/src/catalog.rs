@@ -2221,9 +2221,9 @@ pub async fn batch_call_direct(
     let mut manual_cache: HashMap<String, CachedUtcpManual> = HashMap::new();
     for item in &items {
         if let Ok((mname, _)) = resolve_manual_and_tool(&item.tool, Some(&index), paths) {
-            if !manual_cache.contains_key(&mname) {
-                if let Ok(m) = load_single_cached_manual(paths, &mname) {
-                    manual_cache.insert(mname, m);
+            if let std::collections::hash_map::Entry::Vacant(slot) = manual_cache.entry(mname) {
+                if let Ok(m) = load_single_cached_manual(paths, slot.key()) {
+                    slot.insert(m);
                 }
             }
         }

@@ -154,6 +154,7 @@ fn save_media_bytes(paths: &UtcpPaths, bytes: &[u8], mime: &str) -> Result<PathB
 /// Recursively inspect a tool response JSON value and intercept MCP-style inline base64 media blocks:
 /// - `{ "type": "image" | "audio", "data": "<base64>", "mimeType": "image/png" }`
 /// - `{ "blob": "<base64>", "mimeType": "..." }`
+///
 /// Writes decoded bytes to `paths.media_dir` (`tmpfs` on Linux) and replaces the inline base64 string
 /// with a compact `media_file` object so LLM context windows are never flooded with megabytes of base64.
 pub fn intercept_inline_media(value: &mut Value, paths: &UtcpPaths) {

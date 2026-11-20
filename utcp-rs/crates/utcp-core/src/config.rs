@@ -14,7 +14,7 @@ pub trait UtcpVariablesConfig: Send + Sync {
 }
 
 /// Configuration for the UTCP client, including variables and provider file paths.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct UtcpClientConfig {
     /// Map of inline variables.
     pub variables: HashMap<String, String>,
@@ -22,16 +22,6 @@ pub struct UtcpClientConfig {
     pub providers_file_path: Option<PathBuf>,
     /// List of variable loaders to use.
     pub load_variables_from: Vec<Arc<dyn UtcpVariablesConfig>>,
-}
-
-impl Default for UtcpClientConfig {
-    fn default() -> Self {
-        Self {
-            variables: HashMap::new(),
-            providers_file_path: None,
-            load_variables_from: Vec::new(),
-        }
-    }
 }
 
 impl UtcpClientConfig {

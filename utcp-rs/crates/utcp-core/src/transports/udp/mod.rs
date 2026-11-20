@@ -14,6 +14,12 @@ use crate::transports::{stream::StreamResult, ClientTransport};
 /// Datagram-based transport for lightweight request/response tools.
 pub struct UdpTransport;
 
+impl Default for UdpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UdpTransport {
     /// Create a UDP transport instance.
     pub fn new() -> Self {

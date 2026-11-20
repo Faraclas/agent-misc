@@ -29,6 +29,12 @@ use crate::transports::{
 /// Transport that communicates with tools over WebSocket connections.
 pub struct WebSocketTransport;
 
+impl Default for WebSocketTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebSocketTransport {
     /// Create a WebSocket transport.
     pub fn new() -> Self {
@@ -71,11 +77,11 @@ impl WebSocketTransport {
     fn apply_auth_headers(&self, req: &mut Request<()>, auth: &AuthConfig) -> Result<()> {
         match auth {
             AuthConfig::ApiKey(api_key) => {
-                if api_key.location.to_ascii_lowercase() == "header" {
+                if api_key.location.eq_ignore_ascii_case("header") {
                     let name = HeaderName::from_str(&api_key.var_name)?;
                     req.headers_mut()
                         .insert(name, HeaderValue::from_str(&api_key.api_key)?);
-                } else if api_key.location.to_ascii_lowercase() == "cookie" {
+                } else if api_key.location.eq_ignore_ascii_case("cookie") {
                     let cookie_val = format!("{}={}", api_key.var_name, api_key.api_key);
                     req.headers_mut()
                         .insert("cookie", HeaderValue::from_str(&cookie_val)?);
@@ -134,33 +140,31 @@ impl ClientTransport for WebSocketTransport {
 
         // Request manual/tool list
         ws_stream.send(Message::Text("manual".to_string())).await?;
-        if let Some(msg) = ws_stream.next().await {
-            if let Ok(Message::Text(text)) = msg {
-                if let Ok(manifest) = serde_json::from_str::<Value>(&text) {
-                    if let Some(tools) = manifest.get("tools").and_then(|v| v.as_array()) {
-                        let mut parsed = Vec::new();
-                        for t in tools {
-                            if let Ok(tool) = serde_json::from_value::<Tool>(t.clone()) {
-                                parsed.push(tool);
-                            } else if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
-                                let schema = Self::default_schema();
-                                parsed.push(Tool {
-                                    name: name.to_string(),
-                                    description: t
-                                        .get("description")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    inputs: schema.clone(),
-                                    outputs: schema,
-                                    tags: vec![],
-                                    average_response_size: None,
-                                    provider: None,
-                                });
-                            }
+        if let Some(Ok(Message::Text(text))) = ws_stream.next().await {
+            if let Ok(manifest) = serde_json::from_str::<Value>(&text) {
+                if let Some(tools) = manifest.get("tools").and_then(|v| v.as_array()) {
+                    let mut parsed = Vec::new();
+                    for t in tools {
+                        if let Ok(tool) = serde_json::from_value::<Tool>(t.clone()) {
+                            parsed.push(tool);
+                        } else if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
+                            let schema = Self::default_schema();
+                            parsed.push(Tool {
+                                name: name.to_string(),
+                                description: t
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                inputs: schema.clone(),
+                                outputs: schema,
+                                tags: vec![],
+                                average_response_size: None,
+                                provider: None,
+                            });
                         }
-                        return Ok(parsed);
                     }
+                    return Ok(parsed);
                 }
             }
         }
@@ -208,14 +212,13 @@ impl ClientTransport for WebSocketTransport {
         while let Some(msg) = ws_stream.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    let value = serde_json::from_str::<Value>(&text)
-                        .unwrap_or_else(|_| Value::String(text));
+                    let value = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
                     results.push(value);
                 }
                 Ok(Message::Binary(bin)) => {
                     if let Ok(text) = String::from_utf8(bin) {
-                        let value = serde_json::from_str::<Value>(&text)
-                            .unwrap_or_else(|_| Value::String(text));
+                        let value =
+                            serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
                         results.push(value);
                     }
                 }
@@ -416,7 +419,7 @@ mod tests {
                         1 => {
                             if let Some(Ok(Message::Text(text))) = ws.next().await {
                                 let parsed: Value =
-                                    serde_json::from_str(&text).unwrap_or_else(|_| Value::Null);
+                                    serde_json::from_str(&text).unwrap_or(Value::Null);
                                 let reply = json!({ "echo": parsed });
                                 let _ = ws.send(Message::Text(reply.to_string())).await;
                                 let _ = ws.close(None).await;
@@ -492,6 +495,8 @@ mod tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 let seen_paths = seen_paths_clone.clone();
                 tokio::spawn(async move {
+                    // tungstenite sets the callback's error type; it is large but not ours to change.
+                    #[allow(clippy::result_large_err)]
                     let cb = |req: &Request, resp: Response| {
                         if let Ok(mut guard) = seen_paths.lock() {
                             guard.push(req.uri().path().to_string());
@@ -519,8 +524,7 @@ mod tests {
                         }
                     } else {
                         if let Some(Ok(Message::Text(text))) = ws.next().await {
-                            let val: Value =
-                                serde_json::from_str(&text).unwrap_or_else(|_| Value::Null);
+                            let val: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                             let _ = ws
                                 .send(Message::Text(json!({ "echo": val }).to_string()))
                                 .await;

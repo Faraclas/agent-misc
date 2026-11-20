@@ -161,8 +161,8 @@ impl UtcpClient {
     fn call_name_for_provider(tool_name: &str, provider_type: &ProviderType) -> String {
         match provider_type {
             ProviderType::Mcp | ProviderType::Text => tool_name
-                .splitn(2, '.')
-                .nth(1)
+                .split_once('.')
+                .map(|(_, rest)| rest)
                 .unwrap_or(tool_name)
                 .to_string(),
             _ => tool_name.to_string(),

@@ -22,6 +22,8 @@ documentation, embedded skills, or packaging behind the code:
      New tests that start `utcp` or a fixture must go through `utcp_bin()` / `mock_mcp_script()` (or
      `node_mcp_provider` in `utcp-core`) so these overrides keep working.
    - Run `cargo test --workspace` and ensure all tests pass with 0 compiler warnings and 0 workspace `diagnostics`.
+     CI also requires `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` to pass
+     (on Linux and Windows), so run both before pushing.
    - `tests/load/hammer.py` is an on-demand load test, not part of `cargo test` or CI. Keep it working whenever CLI
      output, flags, `register`/`import-mcp`/`daemon` behavior, or the MCP fixture change, and run it
      (`python3 tests/load/hammer.py`) after changes to the daemon, concurrency, or transports.

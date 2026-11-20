@@ -77,7 +77,7 @@ pub async fn load_providers_with_tools_from_file(
             let (providers, tools) = parse_manual_tools_with_providers(json.clone(), config)?;
             return Ok(providers
                 .into_iter()
-                .zip(tools.into_iter())
+                .zip(tools)
                 .map(|(provider, tools)| LoadedProvider {
                     provider,
                     tools: Some(tools),
@@ -166,12 +166,15 @@ fn parse_manual_tools(json: Value) -> Result<Vec<Value>> {
     Ok(providers)
 }
 
+/// Providers from a manual, plus the tools that belong to each one (same order).
+type ProvidersWithTools = (Vec<Arc<dyn Provider>>, Vec<Vec<crate::tools::Tool>>);
+
 /// Parses a manual JSON object to extract both providers and their associated tools.
 /// Returns a tuple of (providers, tools_per_provider).
 fn parse_manual_tools_with_providers(
     json: Value,
     config: &UtcpClientConfig,
-) -> Result<(Vec<Arc<dyn Provider>>, Vec<Vec<crate::tools::Tool>>)> {
+) -> Result<ProvidersWithTools> {
     let obj = json
         .as_object()
         .ok_or_else(|| anyhow!("Manual must be an object"))?;

@@ -1,7 +1,7 @@
+//! Security utilities for validating inputs and preventing common vulnerabilities.
+
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
-
-/// Security utilities for validating inputs and preventing common vulnerabilities.
 
 /// Validates that a file path is safe and doesn't allow directory traversal.
 ///
@@ -154,13 +154,11 @@ pub fn is_blocked_metadata_host(host: &str) -> bool {
     ) {
         return true;
     }
-    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
-        if let std::net::IpAddr::V4(v4) = ip {
-            // Link-local 169.254.0.0/16 metadata range
-            let octets = v4.octets();
-            if octets[0] == 169 && octets[1] == 254 {
-                return true;
-            }
+    if let Ok(std::net::IpAddr::V4(v4)) = trimmed.parse::<std::net::IpAddr>() {
+        // Link-local 169.254.0.0/16 metadata range
+        let octets = v4.octets();
+        if octets[0] == 169 && octets[1] == 254 {
+            return true;
         }
     }
     false

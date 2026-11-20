@@ -59,6 +59,12 @@ fn split_command_line(line: &str) -> Result<Vec<String>> {
 /// Transport that shells out to a CLI binary which exposes UTCP-compatible commands.
 pub struct CliTransport;
 
+impl Default for CliTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CliTransport {
     /// Create a CLI transport.
     pub fn new() -> Self {

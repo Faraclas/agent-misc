@@ -21,6 +21,12 @@ pub struct StreamableHttpTransport {
     client: Client,
 }
 
+impl Default for StreamableHttpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamableHttpTransport {
     /// Create a streaming HTTP transport with a secure default client.
     pub fn new() -> Self {

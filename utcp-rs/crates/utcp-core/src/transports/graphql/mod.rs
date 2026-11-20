@@ -23,6 +23,12 @@ pub struct GraphQLTransport {
     client: Client,
 }
 
+impl Default for GraphQLTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphQLTransport {
     /// Create a GraphQL transport using a secure reqwest client.
     pub fn new() -> Self {
@@ -350,7 +356,7 @@ impl ClientTransport for GraphQLTransport {
 
         // Handle query-based authentication
         if let Some(AuthConfig::ApiKey(api_key)) = &gql_prov.base.auth {
-            if api_key.location.to_ascii_lowercase() == "query" {
+            if api_key.location.eq_ignore_ascii_case("query") {
                 let separator = if ws_url.contains('?') { "&" } else { "?" };
                 ws_url = format!(
                     "{}{}{}={}",
@@ -747,6 +753,8 @@ mod tests {
 
         tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
+                // tungstenite sets the callback's error type; it is large but not ours to change.
+                #[allow(clippy::result_large_err)]
                 let cb = |req: &Request, mut resp: Response| {
                     if let Some(proto) = req.headers().get("Sec-WebSocket-Protocol").cloned() {
                         resp.headers_mut().insert("Sec-WebSocket-Protocol", proto);

@@ -24,6 +24,12 @@ enum ScriptKind {
     Python,
 }
 
+impl Default for TextTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextTransport {
     /// Create a text transport without a default base path.
     pub fn new() -> Self {
@@ -221,16 +227,15 @@ mod tests {
         // Create a tool script
         let tool_script_path = base_path.join("test_tool.js");
         let mut tool_script_file = File::create(&tool_script_path).unwrap();
-        writeln!(
-            tool_script_file,
-            "{}",
-            r#"
+        tool_script_file
+            .write_all(
+                br#"
             const args = JSON.parse(process.argv[2]);
             const result = { message: `Hello, ${args.name}!` };
             console.log(JSON.stringify(result));
-            "#
-        )
-        .unwrap();
+            "#,
+            )
+            .unwrap();
 
         // Make the script executable (on Unix-like systems)
         #[cfg(unix)]

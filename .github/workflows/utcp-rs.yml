@@ -99,6 +99,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: ${{ matrix.test && 'clippy, rustfmt' || '' }}
 
       # `ring` compiles C code; for the musl target that needs `musl-gcc`.
       - name: Install musl C toolchain
@@ -117,6 +118,14 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: lts/*
+
+      # Runs on Linux and Windows, so code behind cfg(windows) is linted too.
+      - name: Check formatting and lints
+        if: matrix.test
+        working-directory: utcp-rs
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run full workspace unit & dual-mode integration tests
         if: matrix.test

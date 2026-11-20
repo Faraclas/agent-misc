@@ -1976,15 +1976,14 @@ fn handle_key(app: &mut AppState, code: KeyCode) {
             KeyCode::Enter => app.open_activity_detail(),
             _ => {}
         },
-        5 => match code {
-            KeyCode::Char('m') => {
+        5 => {
+            if let KeyCode::Char('m') = code {
                 if let Ok(cleared) = clear_media_spool(&app.paths) {
                     app.reload_snapshots();
                     app.status_message = format!("Cleared {} spooled media file(s).", cleared);
                 }
             }
-            _ => {}
-        },
+        }
         _ => {}
     }
 }

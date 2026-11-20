@@ -627,7 +627,7 @@ impl OpenApiConverter {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             items: None,
-            enum_: map.get("enum").and_then(|v| interface_slice(v)),
+            enum_: map.get("enum").and_then(interface_slice),
             minimum: cast_float(map.get("minimum")),
             maximum: cast_float(map.get("maximum")),
             format: map
@@ -759,10 +759,8 @@ fn cast_float(value: Option<&Value>) -> Option<f64> {
     value.and_then(|v| {
         if let Some(n) = v.as_f64() {
             Some(n)
-        } else if let Some(i) = v.as_i64() {
-            Some(i as f64)
         } else {
-            None
+            v.as_i64().map(|i| i as f64)
         }
     })
 }
@@ -820,7 +818,7 @@ mod tests {
         let converter = build_test_converter();
         let api_key = converter
             .create_auth_from_scheme(
-                &json!({"type": "apiKey", "in": "header", "name": "X"})
+                json!({"type": "apiKey", "in": "header", "name": "X"})
                     .as_object()
                     .unwrap(),
             )
@@ -836,7 +834,7 @@ mod tests {
 
         let basic = converter
             .create_auth_from_scheme(
-                &json!({"type": "http", "scheme": "basic"})
+                json!({"type": "http", "scheme": "basic"})
                     .as_object()
                     .unwrap(),
             )
@@ -845,7 +843,7 @@ mod tests {
 
         let bearer = converter
             .create_auth_from_scheme(
-                &json!({"type": "http", "scheme": "bearer"})
+                json!({"type": "http", "scheme": "bearer"})
                     .as_object()
                     .unwrap(),
             )

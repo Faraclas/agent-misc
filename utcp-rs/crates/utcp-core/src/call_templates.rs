@@ -120,7 +120,7 @@ fn cli_call_template_handler(template: Value) -> Result<Value> {
         obj.insert("command_name".to_string(), cmd);
     } else if let Some(commands) = obj.get("commands").and_then(|v| v.as_array()) {
         let first = commands
-            .get(0)
+            .first()
             .and_then(|c| c.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or("bash -c \"\"");

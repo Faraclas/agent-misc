@@ -13,6 +13,12 @@ pub struct InMemoryToolRepository {
     providers: RwLock<HashMap<String, Arc<dyn Provider>>>, // provider_name -> Provider
 }
 
+impl Default for InMemoryToolRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryToolRepository {
     /// Create an empty repository instance.
     pub fn new() -> Self {

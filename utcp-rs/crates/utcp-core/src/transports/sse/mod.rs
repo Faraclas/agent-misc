@@ -22,6 +22,12 @@ pub struct SseTransport {
     client: Client,
 }
 
+impl Default for SseTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SseTransport {
     /// Create an SSE transport backed by a secure reqwest client.
     pub fn new() -> Self {
@@ -147,31 +153,23 @@ impl SseTransport {
                 match chunk_res {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        loop {
-                            if let Some(pos) = buffer.find('\n') {
-                                let mut line = buffer[..pos].to_string();
-                                buffer.drain(..=pos);
-                                line = line.trim_end_matches('\r').to_string();
+                        while let Some(pos) = buffer.find('\n') {
+                            let mut line = buffer[..pos].to_string();
+                            buffer.drain(..=pos);
+                            line = line.trim_end_matches('\r').to_string();
 
-                                if line.starts_with("data: ") {
-                                    if !data_buf.is_empty() {
-                                        data_buf.push('\n');
-                                    }
-                                    data_buf.push_str(&line[6..]);
-                                } else if line.is_empty() {
-                                    if !data_buf.is_empty() {
-                                        let parsed = serde_json::from_str::<Value>(&data_buf)
-                                            .map_err(|e| {
-                                                anyhow!("Failed to parse SSE data: {}", e)
-                                            });
-                                        if tx.send(parsed).await.is_err() {
-                                            return;
-                                        }
-                                        data_buf.clear();
-                                    }
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if !data_buf.is_empty() {
+                                    data_buf.push('\n');
                                 }
-                            } else {
-                                break;
+                                data_buf.push_str(data);
+                            } else if line.is_empty() && !data_buf.is_empty() {
+                                let parsed = serde_json::from_str::<Value>(&data_buf)
+                                    .map_err(|e| anyhow!("Failed to parse SSE data: {}", e));
+                                if tx.send(parsed).await.is_err() {
+                                    return;
+                                }
+                                data_buf.clear();
                             }
                         }
                     }

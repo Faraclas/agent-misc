@@ -398,6 +398,12 @@ pub struct McpTransport {
     stdio_request_timeout: Duration,
 }
 
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpTransport {
     /// Create an MCP transport with a secure reqwest client.
     pub fn new() -> Self {
