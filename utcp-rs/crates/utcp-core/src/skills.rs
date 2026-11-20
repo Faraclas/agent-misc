@@ -570,7 +570,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = test_paths(&tmp.path().join("utcp"));
         let ws = tmp.path().join("ws");
-        let root = ws.join(".agents/skills");
+        let root = ws.join(".agents").join("skills");
 
         let before = inspect_skill_targets(&paths, false, Some(&ws));
         assert_eq!(before.len(), 1);
