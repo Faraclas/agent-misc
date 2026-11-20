@@ -122,7 +122,7 @@ Stop-UtcpDaemon
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # Any running utcp.exe (utcp ui, an agent's call) blocks overwriting the file, but Windows lets it be renamed. Move
-# the old one aside; a later install deletes the leftover once nothing runs it.
+# the old one aside and delete it after the copy; if something still runs it, a later install deletes it.
 Get-ChildItem -Path $InstallDir -Filter 'utcp.exe.old-*' |
     Remove-Item -Force -ErrorAction SilentlyContinue
 $Old = $null
@@ -137,6 +137,9 @@ try {
         Move-Item -Force $Old $Exe
     }
     throw
+}
+if ($Old) {
+    Remove-Item -Force $Old -ErrorAction SilentlyContinue
 }
 Unblock-File $Exe
 foreach ($doc in 'operating.md', 'SKILL.md', 'LICENSE', 'NOTICE', 'LICENSE-UPSTREAM-RS-UTCP') {

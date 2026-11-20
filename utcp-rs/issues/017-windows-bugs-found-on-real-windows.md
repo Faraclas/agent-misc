@@ -66,7 +66,9 @@ scheduled task, a normal (non-elevated) token. None of these showed up under Win
    agent's call in progress still locks `utcp.exe`, so `Copy-Item` failed and the upgrade stopped after stopping the
    daemon. Found when upgrading the VM while a `utcp ui` was open. **Fix:** Windows lets a running program be renamed,
    so the installer renames the old file to `utcp.exe.old-<id>` before copying (and moves it back if the copy fails).
-   The next install deletes leftovers that nothing runs any more.
+   The next install deletes leftovers that nothing runs any more. Follow-up (0.1.0 release test): the old file was
+   kept even when nothing ran it, so every upgrade left a 12 MB copy. The installer now deletes it right after the
+   copy; only a file that is still running waits for the next install.
 
 ## Tests
 

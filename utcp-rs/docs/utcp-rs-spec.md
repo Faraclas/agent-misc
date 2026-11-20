@@ -1026,9 +1026,9 @@ they follow.
       are gone.
 - **`packaging/windows/install.ps1`** (Windows PowerShell 5.1 and later, no admin rights): copies `utcp.exe` to
   `%LOCALAPPDATA%\Programs\utcp` (stopping a running daemon first, and renaming the old `utcp.exe` to
-  `utcp.exe.old-<id>` because any running `utcp` process, such as `utcp ui`, still locks it; the next install deletes
-  leftovers that are no longer running), copies `operating.md`, `SKILL.md`, `LICENSE`, `NOTICE` and
-  `LICENSE-UPSTREAM-RS-UTCP` next to it, adds that folder to the
+  `utcp.exe.old-<id>` because any running `utcp` process, such as `utcp ui`, still locks it; the old file is deleted
+  after the copy, or by the next install if something still runs it), copies `operating.md`, `SKILL.md`, `LICENSE`,
+  `NOTICE` and `LICENSE-UPSTREAM-RS-UTCP` next to it, adds that folder to the
   user `PATH` (read and written raw as `REG_EXPAND_SZ`, so other entries keep their `%VAR%` references), runs
   `utcp sync-ides --global`, and registers the `utcp daemon` scheduled task (logon trigger, `Interactive` logon,
   `Limited` run level, runs `utcp daemon start`, which detaches without a console window). It then starts the daemon
