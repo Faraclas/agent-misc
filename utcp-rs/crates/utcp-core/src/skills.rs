@@ -216,17 +216,18 @@ pub fn resolve_skill_targets(
     let mut targets = Vec::new();
     if include_global {
         if let Some(home) = home_dir() {
-            targets.push(("Zed".to_string(), home.join(".agents/skills")));
+            // One component per `join`, so Windows prints `\` throughout instead of `...\.agents/skills`.
+            targets.push(("Zed".to_string(), home.join(".agents").join("skills")));
             targets.push((
                 "VS Code + Copilot CLI".to_string(),
-                home.join(".copilot/skills"),
+                home.join(".copilot").join("skills"),
             ));
             targets.push((
                 "Antigravity (agy)".to_string(),
-                home.join(".gemini/antigravity-cli/skills"),
+                home.join(".gemini").join("antigravity-cli").join("skills"),
             ));
 
-            let hermes_skills_root = home.join(".hermes/skills");
+            let hermes_skills_root = home.join(".hermes").join("skills");
             if hermes_skills_root.is_dir() {
                 targets.push((
                     "Hermes Agent".to_string(),
@@ -239,7 +240,7 @@ pub fn resolve_skill_targets(
         // Agents that open `ws` as a project (Zed, Copilot CLI, agy) also read its `.agents/skills/`.
         // VS Code's Copilot harness documents `.github/skills/` as its project folder; a root
         // `.agents/skills/` appears to load too, but that is observed, not documented.
-        let root = ws.join(".agents/skills");
+        let root = ws.join(".agents").join("skills");
         // In the home folder this is Zed's global folder; list it once.
         let already_listed = targets
             .iter()
