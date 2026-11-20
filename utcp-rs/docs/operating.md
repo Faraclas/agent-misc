@@ -94,6 +94,10 @@ agent loads, so agents know what an unclear name such as `context7` is for.
 
   Discovery waits up to 60 s, so a first `npx` or `uvx` run has time to download the package.
 
+  On Windows a bare name such as `npx` or `az` is looked up on `PATH` with the extensions in `PATHEXT`, as a shell
+  does, so `npx` finds `npx.cmd`. If the manual sets its own `PATH` with `-e`, that `PATH` is searched. The same
+  lookup applies to `cli` tools and to the secrets command.
+
 - **Write a manual file without registering it** (to review or share it; `utcp register <name> <file>` later). With
   `--register`, `-o` writes a copy next to the registered manual:
 
@@ -267,6 +271,7 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
    | `Secrets command failed: ...` (`reload-env`, `doctor`, `daemon.log`) | The `[secrets]` command did not run cleanly; the daemon keeps the values of its last good run. | Run the command by hand to see its own error output (it prints secrets, so not where others can see), fix it, then `utcp daemon reload-env`. |
    | `Tool 'x.y' not found` | No such manual or tool is registered. | `utcp search` or `utcp list` for the right name. |
    | `MCP server 'x' did not answer ... within 60s` | The local server is stuck or very slow. | `utcp daemon restart-server x`. |
+   | `failed to start MCP server command 'x': program not found` | `x` is not on the `PATH` of the process that starts it (the daemon, or your shell with `--direct`). | Give the full path to `--command`, or put its folder on `PATH` and restart the daemon. Before 0.1.3, Windows also needed `npx.cmd` instead of `npx`. |
    | `MCP server 'x' was stopped on request` | Someone ran `stop-server` or `restart-server` during the call. | Call again. |
    | `utcp daemon exited before listening` or `did not start listening within N seconds` | `utcp daemon start` failed. | Read the lines it quotes from `daemon.log`; `utcp daemon status` names the file. |
    | `utcp daemon is not running` or `is not currently running` | From `daemon servers`, `stop-server`, `restart-server` and `reload-env` (`daemon stop` prints it as information). | `utcp daemon start`. Calls work without it. |

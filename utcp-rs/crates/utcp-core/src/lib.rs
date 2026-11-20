@@ -16,6 +16,7 @@ pub mod migration;
 pub mod openapi;
 pub mod paths;
 pub mod plugins;
+pub mod program;
 pub mod providers;
 pub mod repository;
 pub mod secrets;

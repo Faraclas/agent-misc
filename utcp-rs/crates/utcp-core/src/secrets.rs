@@ -101,7 +101,7 @@ fn run_inner(
     let Some((program, args)) = settings.command.split_first() else {
         return Err("`command` in [secrets] is empty".into());
     };
-    let mut cmd = Command::new(expand_home(program));
+    let mut cmd = Command::new(crate::program::resolve(&expand_home(program)));
     cmd.args(args.iter().map(|a| expand_home(a)))
         .args(wanted)
         .stdin(Stdio::null())

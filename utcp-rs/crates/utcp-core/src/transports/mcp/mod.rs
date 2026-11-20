@@ -281,7 +281,10 @@ impl McpStdioProcess {
             crate::security::validate_command_args(args_vec)?;
         }
 
-        let mut cmd = Command::new(command);
+        let mut cmd = Command::new(crate::program::resolve_with_env(
+            std::path::Path::new(command),
+            env_vars.as_ref(),
+        ));
 
         if let Some(args_vec) = args {
             cmd.args(args_vec);

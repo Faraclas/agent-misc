@@ -1865,6 +1865,87 @@ fn node_in_folder_with_awkward_name(env: &IsolatedEnv) -> String {
     linked.display().to_string()
 }
 
+/// On Windows a bare `--command` name finds a `.cmd` launcher on `PATH`, as `npx` (`npx.cmd`)
+/// needs. Rust's `Command` alone only looks for `mocknode.exe`. A manual that sets its own `PATH`
+/// (`-e PATH=...`) is looked up on that `PATH`.
+#[cfg(windows)]
+#[test]
+fn bare_command_name_finds_cmd_launcher_on_windows_path() {
+    let env = IsolatedEnv::new();
+    let orig_path = std::env::var_os("PATH").unwrap_or_default();
+    let node = std::env::split_paths(&orig_path)
+        .map(|dir| dir.join("node.exe"))
+        .find(|p| p.is_file())
+        .expect("node on PATH");
+    let path_with = |dir: &std::path::Path| {
+        let mut dirs = vec![dir.to_path_buf()];
+        dirs.extend(std::env::split_paths(&orig_path));
+        std::env::join_paths(dirs).unwrap()
+    };
+    let launcher = |folder: &str, name: &str| {
+        let dir = env.tmp.path().join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.cmd")),
+            format!("@\"{}\" %*\r\n", node.display()),
+        )
+        .unwrap();
+        dir
+    };
+    // `mocknode` is on utcp's own PATH; `ownnode` only on the PATH the manual sets.
+    let utcp_path = path_with(&launcher("bin", "mocknode"));
+    let own_path = path_with(&launcher("own", "ownnode"));
+    let own_env = format!("PATH={}", own_path.to_string_lossy());
+    let script = mock_mcp_script();
+    let run = |args: &[&str]| -> String {
+        let out = env
+            .cmd()
+            .env("PATH", &utcp_path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "utcp {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    run(&[
+        "import-mcp",
+        "cmdmock",
+        "--command",
+        "mocknode",
+        "--arg",
+        &script,
+        "--register",
+    ]);
+    run(&[
+        "import-mcp",
+        "ownpath",
+        "--command",
+        "ownnode",
+        "--arg",
+        &script,
+        "-e",
+        &own_env,
+        "--register",
+    ]);
+    for server in ["cmdmock", "ownpath"] {
+        for mode in [&["--direct"][..], &[][..]] {
+            let tool = format!("{server}.echo");
+            let mut args = mode.to_vec();
+            args.extend(["call", tool.as_str(), r#"{"tag":1}"#]);
+            let out: Value = serde_json::from_str(&run(&args)).unwrap();
+            assert_eq!(out["tag"], 1, "{server} {mode:?}: {out}");
+        }
+    }
+    run(&["daemon", "stop"]);
+}
+
 fn wait_until_stopped(pid: u64, what: &str) {
     for _ in 0..250 {
         if !process_running(pid) {

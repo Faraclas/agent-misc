@@ -149,6 +149,12 @@ upstream's core engine and outbound transports active out of the box:
       shell tool, would wait until the daemon exits), null standard handles, `CREATE_NO_WINDOW | DETACHED_PROCESS`,
       and `CREATE_BREAKAWAY_FROM_JOB`, so the daemon outlives a host that kills its job when the session ends
       (Windows OpenSSH). A job that forbids breakaway refuses it; the daemon then starts inside the job.
+    - **Program lookup on Windows:** a bare program name (a stdio MCP server's `command`, a `cli` tool's program, the
+      `[secrets]` command) is looked up on `PATH` with the extensions in `PATHEXT` that Windows starts without a file
+      association (`.com`, `.exe`, `.bat`, `.cmd`), first folder first, `PATHEXT` order within a folder, so `npx`
+      finds `npx.cmd` and `az` finds `az.cmd`. Rust's `Command` alone only finds `.exe` files. When the manual sets
+      `PATH` in its environment, that `PATH` is searched. A name with a folder or one of those extensions, or one
+      that is not found, is passed on unchanged (issue 020).
     - **`cli` tool command line:** a `cli` call template's `command_name` is split into the program and its arguments.
       `"..."` or `'...'` groups words (the quotes are removed), `""` gives an empty argument, backslashes are literal
       (so Windows paths work), and an unclosed quote is an error. There are no variables, globs or pipes.

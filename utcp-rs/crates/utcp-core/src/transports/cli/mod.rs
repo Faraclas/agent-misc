@@ -89,7 +89,10 @@ impl CliTransport {
         working_dir: &Option<String>,
         stdin_input: Option<&str>,
     ) -> Result<(String, String, i32)> {
-        let mut cmd = Command::new(cmd_path);
+        let mut cmd = Command::new(crate::program::resolve_with_env(
+            std::path::Path::new(cmd_path),
+            env_vars.as_ref(),
+        ));
         cmd.args(args);
 
         // Set environment variables
