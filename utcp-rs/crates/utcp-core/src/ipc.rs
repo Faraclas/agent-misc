@@ -7,13 +7,14 @@ use crate::catalog::{
     load_or_build_index_sync, load_single_cached_manual, manual_env_var_names, project_json_fields,
     query_systemd_user_unit_state, release_manual_connections, resolve_manual_and_tool,
     resolve_secret_var, retain_allowed_env, BatchRequestItem, BatchResultItem, CachedUtcpManual,
-    CredentialStatus,
+    CredentialStatus, SOURCE_CALLER_SHELL, SOURCE_DAEMON_ENV, SOURCE_SECRETS_COMMAND,
 };
 #[cfg(feature = "mcp")]
 use crate::catalog::{manual_stdio_mcp_servers, ManualStdioServer};
 use crate::index::{SearchIndex, ToolSchemaDetail, ToolSummary};
 use crate::media::{inspect_media_spool, prune_media_spool, MediaSpoolStatus};
 use crate::paths::{UtcpPaths, UtcpSettings};
+use crate::secrets::{run_secrets_command, SecretsCommandStatus};
 use crate::security::build_secure_http_client;
 use crate::transports::registry::CommunicationProtocolRegistry;
 use crate::transports::McpServerState;
@@ -108,9 +109,17 @@ pub enum IpcResponse {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum IpcPayload {
     Pong,
-    DaemonStatus(DaemonStatusInfo),
-    Reloaded { manuals: usize, tools: usize },
-    EnvReloaded { total_vars: usize },
+    DaemonStatus(Box<DaemonStatusInfo>),
+    Reloaded {
+        manuals: usize,
+        tools: usize,
+    },
+    EnvReloaded {
+        total_vars: usize,
+        /// The secrets command's run during this reload; `None` when none is configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secrets_command: Option<SecretsCommandStatus>,
+    },
     ShuttingDown,
     Tools(Vec<ToolSummary>),
     Schema(ToolSchemaDetail),
@@ -118,7 +127,10 @@ pub enum IpcPayload {
     BatchResults(Vec<BatchResultItem>),
     Activity(Vec<ActivityEntry>),
     Servers(Vec<McpServerInfo>),
-    ServerStopped { manual: String, was_running: bool },
+    ServerStopped {
+        manual: String,
+        was_running: bool,
+    },
 }
 
 /// One local (stdio) MCP server the daemon runs for a registered manual.
@@ -149,6 +161,9 @@ pub struct DaemonStatusInfo {
     pub systemd_user_state: Option<String>,
     pub credentials: Vec<CredentialStatus>,
     pub media_spool: MediaSpoolStatus,
+    /// The last run of `[secrets] command`; `None` when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_command: Option<SecretsCommandStatus>,
 }
 
 struct InMemoryCatalog {
@@ -162,17 +177,76 @@ struct InMemoryCatalog {
     /// Every env var name a loaded manual may resolve; anything else is dropped on receipt.
     allowed_env: BTreeSet<String>,
     env_mtime: Option<SystemTime>,
+    /// The secrets command's values (allowed names only). They win over every other source.
+    secrets: DaemonSecrets,
+}
+
+/// What the daemon holds from `[secrets] command` in `settings.toml`.
+#[derive(Clone, Default)]
+struct DaemonSecrets {
+    values: HashMap<String, String>,
+    /// The last run; `None` when no command is configured.
+    status: Option<SecretsCommandStatus>,
+}
+
+/// Runs the secrets command for the `allowed` names. A failed run (or an unreadable
+/// `settings.toml`) keeps the `previous` values, so a passing problem does not drop working
+/// credentials. Blocks for up to the command's timeout: call it outside the catalog lock.
+fn load_daemon_secrets(
+    paths: &UtcpPaths,
+    allowed: &BTreeSet<String>,
+    previous: &DaemonSecrets,
+) -> DaemonSecrets {
+    let kept = |status: Option<SecretsCommandStatus>| {
+        let mut values = previous.values.clone();
+        retain_allowed_env(&mut values, allowed);
+        DaemonSecrets { values, status }
+    };
+    let secrets = match UtcpSettings::load_checked(&paths.settings_file) {
+        Ok(settings) => settings.secrets,
+        Err(_) => return kept(previous.status.clone()),
+    };
+    let Some(secrets) = secrets else {
+        return DaemonSecrets::default();
+    };
+    if allowed.is_empty() {
+        return DaemonSecrets {
+            values: HashMap::new(),
+            status: Some(SecretsCommandStatus {
+                command: secrets.command.join(" "),
+                error: None,
+                provided: Vec::new(),
+            }),
+        };
+    }
+    let run = run_secrets_command(&secrets, allowed);
+    match run.status.error {
+        None => DaemonSecrets {
+            values: run.values,
+            status: Some(run.status),
+        },
+        Some(ref error) if !previous.values.is_empty() => {
+            let mut status = run.status.clone();
+            status.error = Some(format!("{error} (kept the values from its last good run)"));
+            kept(Some(status))
+        }
+        Some(_) => DaemonSecrets {
+            values: HashMap::new(),
+            status: Some(run.status),
+        },
+    }
 }
 
 /// The daemon's env map: the allowed part of its startup environment, overlaid with the allowed
-/// pushed shell variables.
+/// pushed shell variables, then with the secrets command's values.
 fn build_env_map(
     mut base: HashMap<String, String>,
     pushed_shell_env: &HashMap<String, String>,
+    secrets: &DaemonSecrets,
     allowed_env: &BTreeSet<String>,
 ) -> HashMap<String, String> {
     retain_allowed_env(&mut base, allowed_env);
-    for (k, v) in pushed_shell_env {
+    for (k, v) in pushed_shell_env.iter().chain(&secrets.values) {
         if allowed_env.contains(k) {
             base.insert(k.clone(), v.clone());
         }
@@ -202,9 +276,12 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Loads the catalog and runs the secrets command (keeping `previous_secrets` if it fails). Blocks
+/// for up to the command's timeout.
 fn load_in_memory_catalog(
     paths: &UtcpPaths,
     pushed_shell_env: HashMap<String, String>,
+    previous_secrets: &DaemonSecrets,
 ) -> Result<InMemoryCatalog> {
     let index = load_or_build_index_sync(paths)?;
     let mut manuals = HashMap::with_capacity(index.manuals.len());
@@ -222,9 +299,11 @@ fn load_in_memory_catalog(
     ));
     let mut pushed_shell_env = pushed_shell_env;
     retain_allowed_env(&mut pushed_shell_env, &allowed_env);
+    let secrets = load_daemon_secrets(paths, &allowed_env, previous_secrets);
     let env_map = build_env_map(
         load_daemon_startup_env_map(paths),
         &pushed_shell_env,
+        &secrets,
         &allowed_env,
     );
     Ok(InMemoryCatalog {
@@ -234,7 +313,101 @@ fn load_in_memory_catalog(
         pushed_shell_env,
         allowed_env,
         env_mtime,
+        secrets,
     })
+}
+
+/// The daemon's required credentials, with where each value came from.
+fn daemon_credentials(catalog: &InMemoryCatalog) -> Vec<CredentialStatus> {
+    let mut credentials = Vec::new();
+    for m in &catalog.index.manuals {
+        for req_var in &m.required_env_vars {
+            let resolved = resolve_secret_var(&m.name, req_var, &catalog.env_map);
+            let source = resolved.as_ref().map(|(value, via)| {
+                let from = |map: &HashMap<String, String>| {
+                    map.get(via).map(String::as_str) == Some(*value)
+                };
+                if from(&catalog.secrets.values) {
+                    SOURCE_SECRETS_COMMAND
+                } else if from(&catalog.pushed_shell_env) {
+                    SOURCE_CALLER_SHELL
+                } else {
+                    SOURCE_DAEMON_ENV
+                }
+                .to_string()
+            });
+            credentials.push(CredentialStatus {
+                manual: m.name.clone(),
+                env_var: req_var.clone(),
+                is_set: resolved.is_some(),
+                resolved_via: resolved.map(|(_, via)| via),
+                source,
+            });
+        }
+    }
+    credentials
+}
+
+/// Writes a line to stderr (the journal under systemd) and to `daemon.log`.
+fn daemon_notice(paths: &UtcpPaths, message: &str) {
+    eprintln!("utcp daemon: {message}");
+    let _ = crate::daemon_log::append(paths, message);
+}
+
+/// Logs a secrets command failure when it is new (not on every reload while it keeps failing), and
+/// its recovery.
+fn log_secrets_change(
+    paths: &UtcpPaths,
+    before: Option<&SecretsCommandStatus>,
+    after: Option<&SecretsCommandStatus>,
+) {
+    let before_error = before.and_then(|s| s.error.as_deref());
+    let Some(status) = after else {
+        return;
+    };
+    match status.error.as_deref() {
+        Some(error) if before_error != Some(error) => daemon_notice(
+            paths,
+            &format!("secrets command `{}` failed: {error}", status.command),
+        ),
+        None if before_error.is_some() => daemon_notice(
+            paths,
+            &format!("secrets command `{}` works again", status.command),
+        ),
+        _ => {}
+    }
+}
+
+/// What the daemon reports when it starts: an invalid `settings.toml`, a failed secrets command,
+/// and every required variable that is still not set (with its manual). Empty when all is well.
+fn startup_warnings(paths: &UtcpPaths, catalog: &InMemoryCatalog) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Err(e) = UtcpSettings::load_checked(&paths.settings_file) {
+        warnings.push(format!(
+            "settings.toml is not used, the defaults apply: {e:#}"
+        ));
+    }
+    if let Some(SecretsCommandStatus {
+        command,
+        error: Some(error),
+        ..
+    }) = &catalog.secrets.status
+    {
+        warnings.push(format!("secrets command `{command}` failed: {error}"));
+    }
+    let missing: Vec<String> = daemon_credentials(catalog)
+        .into_iter()
+        .filter(|c| !c.is_set)
+        .map(|c| format!("{} ({})", c.env_var, c.manual))
+        .collect();
+    if !missing.is_empty() {
+        warnings.push(format!(
+            "not set, so calls that need them will fail: {}. Have the secrets command print them \
+             (`[secrets]` in settings.toml), or run `utcp daemon reload-env` from a shell that has them",
+            missing.join(", ")
+        ));
+    }
+    warnings
 }
 
 impl DaemonServerState {
@@ -243,7 +416,7 @@ impl DaemonServerState {
         log_tx: mpsc::UnboundedSender<ActivityEntry>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Result<Self> {
-        let catalog = load_in_memory_catalog(&paths, HashMap::new())?;
+        let catalog = load_in_memory_catalog(&paths, HashMap::new(), &DaemonSecrets::default())?;
         let initial_recent: VecDeque<ActivityEntry> =
             read_recent_activity(&paths, RING_BUFFER_CAPACITY)
                 .into_iter()
@@ -273,11 +446,21 @@ impl DaemonServerState {
     }
 
     pub async fn reload(&self) -> Result<(usize, usize)> {
-        let pushed = {
+        let (pushed, previous_secrets) = {
             let guard = self.catalog.read().await;
-            guard.pushed_shell_env.clone()
+            (guard.pushed_shell_env.clone(), guard.secrets.clone())
         };
-        let fresh = load_in_memory_catalog(&self.paths, pushed)?;
+        let paths = self.paths.clone();
+        let previous = previous_secrets.clone();
+        let fresh =
+            tokio::task::spawn_blocking(move || load_in_memory_catalog(&paths, pushed, &previous))
+                .await
+                .map_err(|e| anyhow!("reload task failed: {e}"))??;
+        log_secrets_change(
+            &self.paths,
+            previous_secrets.status.as_ref(),
+            fresh.secrets.status.as_ref(),
+        );
         let counts = (fresh.index.manuals.len(), fresh.index.tools.len());
         let removed: Vec<CachedUtcpManual> = {
             let mut guard = self.catalog.write().await;
@@ -296,10 +479,32 @@ impl DaemonServerState {
         Ok(counts)
     }
 
-    /// Re-reads the daemon's own environment and keeps the caller's allowed variables. Returns the
-    /// number of variables held afterwards (only names registered manuals use).
-    pub async fn reload_env(&self, caller_env: HashMap<String, String>) -> usize {
-        let base = load_daemon_startup_env_map(&self.paths);
+    /// Re-reads the daemon's own environment, runs the secrets command again and keeps the caller's
+    /// allowed variables. Returns the number of variables held afterwards (only names registered
+    /// manuals use) and the secrets command's run.
+    pub async fn reload_env(
+        &self,
+        caller_env: HashMap<String, String>,
+    ) -> (usize, Option<SecretsCommandStatus>) {
+        let (allowed, previous) = {
+            let guard = self.catalog.read().await;
+            (guard.allowed_env.clone(), guard.secrets.clone())
+        };
+        let paths = self.paths.clone();
+        let prev = previous.clone();
+        let (base, secrets) = tokio::task::spawn_blocking(move || {
+            (
+                load_daemon_startup_env_map(&paths),
+                load_daemon_secrets(&paths, &allowed, &prev),
+            )
+        })
+        .await
+        .unwrap_or_else(|_| (HashMap::new(), previous.clone()));
+        log_secrets_change(
+            &self.paths,
+            previous.status.as_ref(),
+            secrets.status.as_ref(),
+        );
         let mut guard = self.catalog.write().await;
         for (k, v) in caller_env {
             if guard.allowed_env.contains(&k) {
@@ -309,8 +514,14 @@ impl DaemonServerState {
         guard.env_mtime = std::fs::metadata(&self.paths.env_file)
             .and_then(|m| m.modified())
             .ok();
-        guard.env_map = build_env_map(base, &guard.pushed_shell_env, &guard.allowed_env);
-        guard.env_map.len()
+        guard.secrets = secrets;
+        guard.env_map = build_env_map(
+            base,
+            &guard.pushed_shell_env,
+            &guard.secrets,
+            &guard.allowed_env,
+        );
+        (guard.env_map.len(), guard.secrets.status.clone())
     }
 
     /// Absorb non-empty variables a registered manual needs from a caller's shell when they were
@@ -346,7 +557,12 @@ impl DaemonServerState {
         if needs_reload {
             let fresh_env = load_daemon_startup_env_map(&self.paths);
             let mut guard = self.catalog.write().await;
-            guard.env_map = build_env_map(fresh_env, &guard.pushed_shell_env, &guard.allowed_env);
+            guard.env_map = build_env_map(
+                fresh_env,
+                &guard.pushed_shell_env,
+                &guard.secrets,
+                &guard.allowed_env,
+            );
             guard.env_mtime = current_mtime;
         }
     }
@@ -389,21 +605,9 @@ impl DaemonServerState {
             IpcCommand::Status => {
                 self.refresh_env_if_modified().await;
                 let guard = self.catalog.read().await;
-                let mut credentials = Vec::new();
-                for m in &guard.index.manuals {
-                    for req_var in &m.required_env_vars {
-                        let resolved = resolve_secret_var(&m.name, req_var, &guard.env_map);
-                        let is_set = resolved.is_some();
-                        credentials.push(CredentialStatus {
-                            manual: m.name.clone(),
-                            env_var: req_var.clone(),
-                            resolved_via: resolved.map(|(_, via)| via),
-                            is_set,
-                        });
-                    }
-                }
+                let credentials = daemon_credentials(&guard);
                 IpcResponse::Ok {
-                    data: IpcPayload::DaemonStatus(DaemonStatusInfo {
+                    data: IpcPayload::DaemonStatus(Box::new(DaemonStatusInfo {
                         pid: std::process::id(),
                         socket_endpoint: self.paths.socket_endpoint.clone(),
                         uptime_secs: self.started_at.elapsed().as_secs(),
@@ -415,7 +619,8 @@ impl DaemonServerState {
                         systemd_user_state: query_systemd_user_unit_state(),
                         credentials,
                         media_spool: inspect_media_spool(&self.paths),
-                    }),
+                        secrets_command: guard.secrets.status.clone(),
+                    })),
                 }
             }
             IpcCommand::Reload => match self.reload().await {
@@ -427,9 +632,12 @@ impl DaemonServerState {
                 },
             },
             IpcCommand::ReloadEnv { caller_env } => {
-                let total_vars = self.reload_env(caller_env).await;
+                let (total_vars, secrets_command) = self.reload_env(caller_env).await;
                 IpcResponse::Ok {
-                    data: IpcPayload::EnvReloaded { total_vars },
+                    data: IpcPayload::EnvReloaded {
+                        total_vars,
+                        secrets_command,
+                    },
                 }
             }
             // The stop itself is triggered in `handle_async_stream` once this reply is sent:
@@ -1136,7 +1344,7 @@ pub fn query_daemon_status_checked(paths: &UtcpPaths) -> Result<Option<DaemonSta
     match try_send_ipc_sync(paths, &req) {
         Ok(Some(IpcResponse::Ok {
             data: IpcPayload::DaemonStatus(info),
-        })) => Ok(Some(info)),
+        })) => Ok(Some(*info)),
         Err(e) if e.is::<DaemonUnreachable>() => Err(e),
         _ => Ok(None),
     }
@@ -1162,7 +1370,18 @@ pub fn manual_caller_env(paths: &UtcpPaths) -> HashMap<String, String> {
         .collect()
 }
 
-pub fn sync_caller_env_to_daemon(paths: &UtcpPaths) -> Result<Option<usize>> {
+/// What `utcp daemon reload-env` did in the daemon.
+#[derive(Debug, Clone)]
+pub struct EnvReloadSummary {
+    /// Variables held afterwards (only names registered manuals use).
+    pub total_vars: usize,
+    /// The secrets command's run; `None` when none is configured.
+    pub secrets_command: Option<SecretsCommandStatus>,
+}
+
+/// Pushes this shell's allowed variables to the running daemon, which also re-reads its own
+/// environment and runs the secrets command again. `None` when no daemon runs.
+pub fn sync_caller_env_to_daemon(paths: &UtcpPaths) -> Result<Option<EnvReloadSummary>> {
     let caller_env = manual_caller_env(paths);
     let req = IpcRequest {
         caller: "cli".into(),
@@ -1171,8 +1390,15 @@ pub fn sync_caller_env_to_daemon(paths: &UtcpPaths) -> Result<Option<usize>> {
     };
     match try_send_ipc_sync(paths, &req)? {
         Some(IpcResponse::Ok {
-            data: IpcPayload::EnvReloaded { total_vars },
-        }) => Ok(Some(total_vars)),
+            data:
+                IpcPayload::EnvReloaded {
+                    total_vars,
+                    secrets_command,
+                },
+        }) => Ok(Some(EnvReloadSummary {
+            total_vars,
+            secrets_command,
+        })),
         Some(IpcResponse::Error { message }) => Err(anyhow!(message)),
         _ => Ok(None),
     }
@@ -1234,6 +1460,12 @@ pub async fn run_daemon_foreground(
         log_tx,
         shutdown_tx.clone(),
     )?);
+    {
+        let catalog = state.catalog.read().await;
+        for warning in startup_warnings(&paths, &catalog) {
+            daemon_notice(&paths, &warning);
+        }
+    }
 
     let (watch_tx, mut watch_rx) = mpsc::unbounded_channel::<()>();
     let mut _watcher: Option<RecommendedWatcher> =

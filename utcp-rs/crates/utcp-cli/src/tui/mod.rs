@@ -1195,10 +1195,17 @@ impl AppState {
 
     fn sync_env_to_daemon(&mut self) {
         match sync_caller_env_to_daemon(&self.paths) {
-            Ok(Some(total)) => {
+            Ok(Some(summary)) => {
+                let secrets = match summary.secrets_command {
+                    Some(s) if s.error.is_some() => {
+                        " Secrets command failed (see the Daemon Monitor)."
+                    }
+                    Some(_) => " Secrets command re-run.",
+                    None => "",
+                };
                 self.status_message = format!(
-                    "Synced the variables manuals use from this shell into daemon RAM ({} held).",
-                    total
+                    "Synced the variables manuals use from this shell into daemon RAM ({} held).{}",
+                    summary.total_vars, secrets
                 );
             }
             Ok(None) => {
@@ -3741,6 +3748,16 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
                 d.manual_count, d.tool_count, d.env_var_count
             )),
             Line::from(format!(
+                "  Secrets Command     : {}",
+                match &d.secrets_command {
+                    None => "not configured ([secrets] in settings.toml)".to_string(),
+                    Some(s) => match &s.error {
+                        Some(error) => format!("FAILED: {error}"),
+                        None => format!("OK ({} names printed)", s.provided.len()),
+                    },
+                }
+            )),
+            Line::from(format!(
                 "  systemd --user unit : utcp-daemon.service ({})",
                 systemd_label
             )),
@@ -3802,6 +3819,7 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
                     Cell::from(c.env_var.clone()),
                     status_cell,
                     Cell::from(c.resolved_via.clone().unwrap_or_else(|| "-".into())),
+                    Cell::from(c.source.clone().unwrap_or_else(|| "-".into())),
                 ])
             })
             .collect()
@@ -3818,10 +3836,11 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
     let cred_table = Table::new(
         cred_rows,
         [
+            Constraint::Percentage(15),
+            Constraint::Percentage(25),
             Constraint::Percentage(20),
-            Constraint::Percentage(30),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
         ],
     )
     .header(
@@ -3830,6 +3849,7 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
             "Required Var",
             "Daemon Status",
             "Resolved Via",
+            "Source",
         ])
         .style(Style::default().fg(Color::Yellow)),
     )

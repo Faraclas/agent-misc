@@ -95,9 +95,10 @@ it needs secrets, a `Required credentials` line.
 
 - **Secrets:** always write `${VAR}` placeholders in `-H` / `-e` (single-quoted so your shell keeps them), never
   literal tokens: the manual stores the placeholder and the value is resolved at call time. Ask the user to put the
-  value in `{{ENV_PATH}}` as `VAR=value` (or export it in the shell and run `{{BIN_NAME}} daemon reload-env`).
-  Do not ask the user to paste secret values into the chat. If discovery fails, the error names any unset
-  placeholder.
+  value in `{{ENV_PATH}}` as `VAR=value`, or where their secrets command (`[secrets]` in `settings.toml`) reads it
+  from, or to export it in the shell; then run `{{BIN_NAME}} daemon reload-env`. Do not ask the user to paste secret
+  values into the chat, and never run the secrets command yourself (it prints the values). If discovery fails, the
+  error names any unset placeholder.
 - **Verify an import:**
 
   ```sh
@@ -119,7 +120,8 @@ it needs secrets, a `Required credentials` line.
   {{BIN_NAME}} refresh [<name>]
   ```
 
-- **Check status (`{{ENV_PATH}}`, `{{SOCKET_PATH}}`) or push updated shell env vars to a running daemon:**
+- **Check status (`{{ENV_PATH}}`, `{{SOCKET_PATH}}`, where each secret comes from) or make a running daemon pick up
+  changed secrets (this shell's variables, `.env`, the secrets command):**
 
   ```sh
   {{BIN_NAME}} doctor

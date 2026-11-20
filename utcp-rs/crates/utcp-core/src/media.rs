@@ -308,6 +308,7 @@ mod tests {
             media_dir: None,
             max_media_files: 3,
             media_ttl_mins: 60,
+            secrets: None,
         };
         settings.save(&paths).unwrap();
 

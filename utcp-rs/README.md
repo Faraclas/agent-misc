@@ -48,6 +48,9 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
   api.github.com (HTTP 403): retry after 1233 s (...)`, so agents wait instead of retrying into the same limit.
 - **Debug Without Disk Logging:** `utcp log recent [--failed]` shows the daemon's last 500 calls from memory, with
   the full error text of failures (secrets redacted).
+- **Secrets Stay Where You Keep Them:** Manuals store `${VAR}` placeholders only. Values come from `.env`, your shell,
+  or a secrets command (`[secrets]` in `settings.toml`) that prints them from a shell file, `pass` or a keyring, so the
+  daemon has them after a reboot without copying them anywhere. `utcp doctor` shows where each one comes from.
 - **Manual Lifecycle:** `utcp deregister` takes a manual out of search but keeps its settings, hint, and saved copy;
   `utcp register <name>` (no source) brings it back offline; `--purge-cache` deletes it for good.
 - **6-Tab Companion TUI (`utcp ui`):** Interactive `ratatui` interface: 1 Manuals (`h` edits a hint, `a` shows
@@ -56,24 +59,38 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
   error, with secrets redacted), and 6 Daemon Monitor (the `--user` daemon and the media spool). `?` opens help for
   the current tab.
 
+## Installation
+
+The [operating guide](./docs/operating.md) (First Setup) covers the steps after installing: the agent skills, the
+daemon at login, and secrets.
+
+- **Gentoo:** `dev-util/utcp` in the [`adaptive-overlay`](https://github.com/Faraclas/adaptive-overlay) overlay. It
+  builds from the release source and installs `/usr/bin/utcp`, the systemd user unit, and the docs in
+  `/usr/share/doc/utcp-*/`.
+
+  ```sh
+  eselect repository add adaptive-overlay git https://github.com/Faraclas/adaptive-overlay.git
+  emaint sync -r adaptive-overlay
+  emerge --ask dev-util/utcp
+  ```
+
+- **Other Linux (x86_64):** the project's GitHub Releases (tags `utcp-rs-v*`) have
+  `utcp-x86_64-unknown-linux-musl.tar.gz`, a static binary that runs on any distribution, provided as-is. It also
+  holds the systemd unit (see below), `operating.md` and `secret-source.sh`. Copy `utcp` to `~/.local/bin/`.
+- **Windows:** the release zip has `install.cmd`, which installs utcp for your account, with no admin rights
+  needed. Its `README.txt` says how to run it.
+- **From source** (the tests also need Node.js, for the mock MCP servers):
+
+  ```sh
+  cd utcp-rs
+  cargo build --release -p utcp-cli
+  cargo test --workspace
+  install -Dm755 target/release/utcp ~/.local/bin/utcp
+  ```
+
 ## Quick Start
 
-Prebuilt downloads are on the project's GitHub Releases page (tags `utcp-rs-v*`): a static Linux binary
-(`utcp-x86_64-unknown-linux-musl.tar.gz`, any x86_64 distribution, provided as-is) and a Windows zip with
-`install.cmd` (no admin rights needed; its `README.txt` says how to run it). Both include the
-[operating guide](./docs/operating.md), whose First Setup section covers the rest. To build from source (the tests
-also need Node.js, for the mock MCP servers):
-
 ```sh
-cd utcp-rs
-
-# Build release binary and run the offline test suite
-cargo build --release -p utcp-cli
-cargo test --workspace
-
-# Put it on PATH (agents run `utcp`)
-install -Dm755 target/release/utcp ~/.local/bin/utcp
-
 # Install the utcp-tools and utcp-admin skills across Zed, VS Code, Copilot CLI, agy, and Hermes
 utcp sync-ides --global
 
@@ -81,7 +98,7 @@ utcp sync-ides --global
 utcp register myagent http://127.0.0.1:8765/utcp --hint 'my agent container'
 utcp import-mcp context7 --url https://mcp.context7.com/mcp --register --hint 'library and framework docs'
 utcp import-mcp everything --command npx --arg -y --arg @modelcontextprotocol/server-everything --register
-# Secrets: pass placeholders and keep values in ~/.config/utcp/.env
+# Secrets: pass placeholders; values come from ~/.config/utcp/.env, your shell, or a secrets command
 utcp import-mcp demo --command /usr/bin/some-mcp -e 'API_KEY=${DEMO_API_KEY}' --register
 
 # Take a manual out of search (settings + saved copy kept), restore it offline, or delete it for good
@@ -94,7 +111,7 @@ utcp set-hint context7 'library and framework docs'
 utcp get-hint
 utcp set-hint context7 --clear
 
-# (Optional) Start the per-user sub-0.2ms IPC daemon & sync shell env
+# (Optional) Start the per-user sub-0.2ms IPC daemon; send it this shell's variables and rerun the secrets command
 utcp daemon start
 utcp daemon reload-env
 
@@ -115,8 +132,8 @@ utcp daemon stop-server <manual>
 ## Running the Daemon at Login (`systemd --user`)
 
 [`packaging/systemd/utcp-daemon.service`](./packaging/systemd/utcp-daemon.service) is the reference unit. Packages
-(for example a Gentoo ebuild, planned) install it as is, with `ExecStart=/usr/bin/utcp daemon run`. For a manual
-build, copy it and point `ExecStart` at your binary:
+(such as the Gentoo ebuild) install it as is, with `ExecStart=/usr/bin/utcp daemon run`; then run
+`systemctl --user enable --now utcp-daemon`. For a manual install, copy it and point `ExecStart` at your binary:
 
 ```sh
 install -Dm644 packaging/systemd/utcp-daemon.service ~/.config/systemd/user/utcp-daemon.service
@@ -127,6 +144,19 @@ systemctl --user enable --now utcp-daemon
 
 The unit puts `~/.local/bin` on `PATH` for CLI-based manuals. It does not load `~/.config/utcp/.env` into the
 daemon's environment: utcp reads that file itself, so the secrets do not leak to every program the daemon starts.
+A daemon started at login does not see what your shell exports (for example from `~/.bashrc`). To give it secrets you
+keep in a shell file or a password store, set a secrets command: copy
+[`examples/secret-source.sh`](./examples/secret-source.sh), adjust its allowlist, and add to
+`~/.config/utcp/settings.toml`:
+
+```toml
+[secrets]
+command = ["/bin/bash", "~/scripts/utcp-secret-source.sh"]
+```
+
+The daemon runs it at start and on `utcp daemon reload-env`; `utcp doctor` shows whether it worked. See the
+[operating guide](./docs/operating.md) (section 3, Secrets) for the details.
+
 Only `systemd` is supported; units for other init systems are welcome as contributions.
 
 ## Load Testing (On Demand)

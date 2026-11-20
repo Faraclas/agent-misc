@@ -18,6 +18,8 @@ A fast, cross-platform (Linux & Windows), direct **Universal Tool Calling Protoc
   page-cache lookups (`< 1 ms`), or connects to a single per-user `utcp daemon` over a `0600` Unix socket / Windows
   Named Pipe (`< 0.2 ms`) for in-memory catalogs, warm `rustls` HTTP/2 connection pools, live `reload-env` sync (the
   daemon keeps only the env vars registered manuals use), and contention-free opt-in activity logging.
+- **Secrets Stay Where You Keep Them:** manuals store `${VAR}` placeholders only; an optional secrets command prints
+  the values from a shell file, `pass` or a keyring, so the daemon has them at login without copying them anywhere.
 - **Cross-Client Agent Skills (`utcp sync-ides`):** Renders platform-native skills across Zed, VS Code, Copilot CLI,
   Antigravity CLI (`agy`), Hermes, and workspace `.agents/skills/`: `utcp-tools` for calling tools (listing
   registered manuals, each with an optional few-word hint such as `context7 (library and framework docs)`) and
@@ -27,7 +29,11 @@ A fast, cross-platform (Linux & Windows), direct **Universal Tool Calling Protoc
   specs and MCP servers (`?` explains how), editing manual hints (`h`), syncing IDE skills, tailing live activity (with
   the error text of failed calls, secrets redacted), and monitoring the `--user` daemon and media spool.
 
-Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.10`),
+Install: `dev-util/utcp` from [`adaptive-overlay`](https://github.com/Faraclas/adaptive-overlay) on Gentoo, or the
+Linux and Windows archives on the Releases page (tags `utcp-rs-v*`); see the
+[installation section](./utcp-rs/README.md#installation).
+
+Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.11`),
 [issue log](./utcp-rs/issues/README.md) (upstream `rs-utcp` bugs and Windows fixes),
 [contributor rules](./utcp-rs/AGENTS.md).
 

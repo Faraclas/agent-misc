@@ -1,10 +1,13 @@
-//! `daemon.log`: what the daemon process would write to stderr, namely the error it exits with and
-//! any panic (also one inside a single task, which the daemon survives).
+//! `daemon.log`: what the daemon process would write to stderr, namely the error it exits with, any panic
+//! (also one inside a single task, which the daemon survives), the problems it finds when it starts (an
+//! invalid `settings.toml`, a failed secrets command, required variables still unset), and a secrets command
+//! that starts or stops failing later.
 //!
 //! The daemon's stderr is discarded when it runs detached (`utcp daemon start` without systemd) or from
 //! the Windows logon task, so these lines are also written here. They are written only on those events,
-//! never per call, so the file costs nothing on the call path. Like `activity.jsonl`, the file is
-//! capped: past [`DAEMON_LOG_CAP_BYTES`] it becomes `daemon.log.bak` and a fresh file starts.
+//! never per call and never with a secret value, so the file costs nothing on the call path. Like
+//! `activity.jsonl`, the file is capped: past [`DAEMON_LOG_CAP_BYTES`] it becomes `daemon.log.bak` and a
+//! fresh file starts.
 
 use crate::paths::UtcpPaths;
 use std::fs::{self, OpenOptions};

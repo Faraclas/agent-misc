@@ -21,7 +21,9 @@ MCP servers. A change you make here changes them for all agents.
   `{{BIN_NAME}} daemon stop` or `daemon restart`: they affect every agent, and a daemon restart fails other agents'
   calls in progress. Restarting one hung local MCP server (`daemon restart-server`) needs no permission.
 - Secrets: write `${VAR}` placeholders in `-H` and `-e`, single-quoted. Ask the user to add `VAR=value` to
-  `{{ENV_PATH}}`. Never ask for a secret value in the chat, and never print `.env`.
+  `{{ENV_PATH}}`, or to the source their secrets command reads (`[secrets]` in `settings.toml`, `operating.md`
+  section 3). Never ask for a secret value in the chat, never print `.env`, and never run the secrets command
+  yourself: it prints the values. `{{BIN_NAME}} doctor` shows which secrets are set and where they come from.
 - Always pass `--hint` with a few words (60 characters at most) saying what the manual is for. Agents see it next to
   the manual's name in the utcp-tools skill.
 - After a change, check it: `{{BIN_NAME}} list --manual <name>`, `{{BIN_NAME}} search "<keywords>"`, or
@@ -38,7 +40,8 @@ MCP servers. A change you make here changes them for all agents.
 {{BIN_NAME}} daemon servers                      # local MCP servers: state, PID, restarts
 {{BIN_NAME}} daemon restart-server <name>        # fix a hung local MCP server
 {{BIN_NAME}} daemon status                       # stopped: names daemon.log with the last start error or crash
-{{BIN_NAME}} doctor                              # daemon, paths, missing secrets, skill status
+{{BIN_NAME}} daemon reload-env                   # pick up changed secrets (shell, .env, secrets command)
+{{BIN_NAME}} doctor                              # daemon, paths, secrets and their source, skill status
 ```
 
 ## Full Guide
@@ -47,7 +50,7 @@ MCP servers. A change you make here changes them for all agents.
 
 1. What Runs Where (files and paths)
 2. First Setup
-3. Adding Tools (secrets, MCP servers in containers)
+3. Adding Tools (secrets and the secrets command, MCP servers in containers)
 4. Changing and Removing Manuals
 5. The Daemon
 6. Local MCP Servers

@@ -9,7 +9,7 @@ use utcp_core::ipc::{
     query_daemon_status, query_daemon_status_checked, run_daemon_foreground, try_send_ipc_sync,
     DaemonStatusInfo, IpcCommand, IpcPayload, IpcRequest, IpcResponse,
 };
-use utcp_core::paths::UtcpPaths;
+use utcp_core::paths::{UtcpPaths, UtcpSettings};
 
 /// Returns true on Linux when running against the default user session (no test/custom path overrides)
 /// AND `utcp-daemon.service` is registered in `systemd --user`, so `utcp daemon start|stop|restart`
@@ -182,7 +182,8 @@ fn push_windows_arg(line: &mut Vec<u16>, arg: &[u16]) {
 }
 
 /// Start `utcp daemon` (via `systemctl --user start utcp-daemon.service` when installed, or as a
-/// detached background process) and wait up to 3 seconds for socket readiness, less if the detached
+/// detached background process) and wait for socket readiness: 3 seconds, plus the `[secrets]`
+/// command's timeout when one is set; less if the detached
 /// daemon exits first. A failure includes what the daemon wrote to `daemon.log` during this attempt,
 /// since its stderr is discarded.
 pub fn start_daemon_background(
@@ -238,7 +239,13 @@ pub fn start_daemon_background(
         spawned = Some(child);
     }
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // The daemon runs the secrets command before it listens, so allow for its timeout too.
+    let wait = Duration::from_secs(
+        3 + UtcpSettings::load(paths)
+            .secrets
+            .map_or(0, |s| s.timeout_secs.max(1)),
+    );
+    let deadline = Instant::now() + wait;
     loop {
         // Read before probing: a daemon that exits after losing a start race to another one leaves
         // that one answering, which the probe below still finds.
@@ -256,9 +263,9 @@ pub fn start_daemon_background(
     }
 
     let outcome = if spawned.as_mut().is_some_and(SpawnedDaemon::has_exited) {
-        "exited before listening"
+        "exited before listening".to_string()
     } else {
-        "did not start listening within 3 seconds"
+        format!("did not start listening within {} seconds", wait.as_secs())
     };
     match daemon_log::read_since(paths, log_offset) {
         Some(logged) => Err(anyhow!(

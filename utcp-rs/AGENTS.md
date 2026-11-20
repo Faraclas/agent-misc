@@ -18,9 +18,10 @@ documentation, embedded skills, or packaging behind the code:
      as `node <file>` (no shebang, so they run on Windows too) and keep them free of npm packages and network access.
      Tests that need an external program use `node` (already required), never Unix-only commands such as `sleep`.
    - Compiled test binaries can run without the source tree (for example on a Windows VM): `UTCP_TEST_BIN` overrides
-     the `utcp` binary the integration tests run, and `UTCP_TEST_FIXTURES` the folder holding `mock_mcp_server.cjs`.
-     New tests that start `utcp` or a fixture must go through `utcp_bin()` / `mock_mcp_script()` (or
-     `node_mcp_provider` in `utcp-core`) so these overrides keep working.
+     the `utcp` binary the integration tests run, and `UTCP_TEST_FIXTURES` the folder holding the Node fixtures
+     (`mock_mcp_server.cjs`, `secret_source.cjs`). New tests that start `utcp` or a fixture must go through
+     `utcp_bin()` / `fixture_path()` / `mock_mcp_script()` (or `node_mcp_provider` in `utcp-core`) so these
+     overrides keep working.
    - Run `cargo test --workspace` and ensure all tests pass with 0 compiler warnings and 0 workspace `diagnostics`.
      CI also requires `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` to pass
      (on Linux and Windows), so run both before pushing.
@@ -36,8 +37,9 @@ documentation, embedded skills, or packaging behind the code:
      `README.md` (project index entry) accurate.
    - Log any newly discovered upstream `rs-utcp` bugs or patches as a numbered entry in `issues/` and `issues/README.md`.
 4. **Packaging & CI Artifacts:**
-   - Keep `packaging/systemd/`, `packaging/windows/` (`install.ps1`, `install.cmd`, `README.txt`) and
-     `.github/workflows/utcp-rs.yml` aligned with CLI subcommands, flags and the files the release archives ship.
+   - Keep `packaging/systemd/`, `packaging/windows/` (`install.ps1`, `install.cmd`, `README.txt`), `examples/` (the
+     example secrets commands, shipped in the release archives) and `.github/workflows/utcp-rs.yml` aligned with CLI
+     subcommands, flags and the files the release archives ship.
    - Only `systemd` is supported. Other init systems are welcome as contributions but are not maintained here.
    - **Versioning:** `version` in `Cargo.toml` (`[workspace.package]`) is the version of the whole `utcp-rs` release,
      not just the Rust code, and the only place it is set. Any change to what a release ships (Rust code, the

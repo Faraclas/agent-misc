@@ -147,10 +147,11 @@ jobs:
           file dist/utcp | grep -q 'static' || { echo "utcp is not statically linked"; exit 1; }
           ./dist/utcp --version
           ./dist/utcp sync-ides --print-skill > dist/SKILL.md
-          cp docs/operating.md packaging/systemd/utcp-daemon.service ../LICENSE NOTICE \
+          cp docs/operating.md packaging/systemd/utcp-daemon.service examples/secret-source.sh ../LICENSE NOTICE \
             crates/utcp-core/LICENSE-UPSTREAM-RS-UTCP dist/
-          tar -C dist -czf ${{ matrix.archive }} utcp SKILL.md operating.md utcp-daemon.service LICENSE \
-            NOTICE LICENSE-UPSTREAM-RS-UTCP
+          bash -n dist/secret-source.sh
+          tar -C dist -czf ${{ matrix.archive }} utcp SKILL.md operating.md utcp-daemon.service secret-source.sh \
+            LICENSE NOTICE LICENSE-UPSTREAM-RS-UTCP
 
       - name: Package Windows release archive
         if: matrix.archive && runner.os == 'Windows'
@@ -161,10 +162,11 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\utcp.exe" "dist\utcp.exe"
           & ".\dist\utcp.exe" sync-ides --print-skill | Set-Content -Encoding UTF8 "dist\SKILL.md"
           Copy-Item "docs\operating.md", "packaging\windows\install.cmd", "packaging\windows\install.ps1", `
-            "packaging\windows\README.txt", "..\LICENSE", "NOTICE", "crates\utcp-core\LICENSE-UPSTREAM-RS-UTCP" "dist\"
-          Compress-Archive -Path "dist\utcp.exe", "dist\install.cmd", "dist\install.ps1", "dist\README.txt", "dist\SKILL.md", `
-            "dist\operating.md", "dist\LICENSE", "dist\NOTICE", "dist\LICENSE-UPSTREAM-RS-UTCP" `
-            -DestinationPath "${{ matrix.archive }}"
+            "packaging\windows\README.txt", "examples\secret-source.ps1", "..\LICENSE", "NOTICE", `
+            "crates\utcp-core\LICENSE-UPSTREAM-RS-UTCP" "dist\"
+          Compress-Archive -Path "dist\utcp.exe", "dist\install.cmd", "dist\install.ps1", "dist\README.txt", `
+            "dist\SKILL.md", "dist\operating.md", "dist\secret-source.ps1", "dist\LICENSE", "dist\NOTICE", `
+            "dist\LICENSE-UPSTREAM-RS-UTCP" -DestinationPath "${{ matrix.archive }}"
 
       # Installs from the zip the way a user would, checks the result, then uninstalls. The runner is an admin
       # account, so this does not prove the logon task works without admin rights (test that on a VM).
@@ -177,6 +179,11 @@ jobs:
           # Users need README.txt to learn the install command; a bare .\install.ps1 is blocked by default.
           if (-not (Select-String -Quiet -SimpleMatch -Path "$env:RUNNER_TEMP\utcp-zip\README.txt" `
               -Pattern '.\install.cmd')) { throw 'README.txt lacks the install command' }
+          # The example secrets command must ship and parse (it is not run: it needs SecretManagement).
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$env:RUNNER_TEMP\utcp-zip\secret-source.ps1", `
+            [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { throw "secret-source.ps1 does not parse: $errors" }
           # Run it the way a user does, through install.cmd (which also must not pause outside Explorer).
           function Install-Utcp {
             & "$env:RUNNER_TEMP\utcp-zip\install.cmd" @args

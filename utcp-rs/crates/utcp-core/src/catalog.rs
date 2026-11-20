@@ -248,6 +248,12 @@ pub struct DoctorReport {
     pub manual_count: usize,
     pub tool_count: usize,
     pub credentials: Vec<CredentialStatus>,
+    /// The last run of `[secrets] command`; `None` when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets_command: Option<crate::secrets::SecretsCommandStatus>,
+    /// Why `settings.toml` could not be used (utcp then runs with the default settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,7 +262,20 @@ pub struct CredentialStatus {
     pub env_var: String,
     pub resolved_via: Option<String>,
     pub is_set: bool,
+    /// Where the value came from: [`SOURCE_SECRETS_COMMAND`], [`SOURCE_CALLER_SHELL`],
+    /// [`SOURCE_DAEMON_ENV`] or [`SOURCE_ENV`]. `None` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
+
+/// [`CredentialStatus::source`]: printed by `[secrets] command`.
+pub const SOURCE_SECRETS_COMMAND: &str = "secrets command";
+/// [`CredentialStatus::source`]: pushed to the daemon by `reload-env` or taken from a caller's shell.
+pub const SOURCE_CALLER_SHELL: &str = "caller shell";
+/// [`CredentialStatus::source`]: the daemon's own environment, `environment.d` or the utcp `.env`.
+pub const SOURCE_DAEMON_ENV: &str = "daemon environment";
+/// [`CredentialStatus::source`]: this process's environment, `environment.d` or the utcp `.env`.
+pub const SOURCE_ENV: &str = "environment";
 
 impl UtcpRegistryConfig {
     pub fn load(paths: &UtcpPaths) -> Result<Self> {
@@ -322,9 +341,63 @@ pub struct UnregisteredManual {
     pub restorable: bool,
 }
 
-/// Load `.env` variables from process environment, `~/.config/environment.d/*.conf` (on Unix),
-/// and the utcp `.env` (`paths.env_file`).
+/// The variables a `utcp` process without the daemon resolves `${VAR}` with: [`load_file_env_map`],
+/// overlaid with the secrets command's values for every name a registered manual may read (they win).
 pub fn load_env_map(paths: &UtcpPaths) -> HashMap<String, String> {
+    load_env_map_for(paths, None)
+}
+
+/// [`load_env_map`], asking the secrets command for `extra` names too (a manual being registered,
+/// which is not in the index yet).
+pub fn load_env_map_for(
+    paths: &UtcpPaths,
+    extra: Option<&BTreeSet<String>>,
+) -> HashMap<String, String> {
+    let mut map = load_file_env_map(paths);
+    if let Some(run) = direct_secrets(paths, extra) {
+        map.extend(run.values);
+    }
+    map
+}
+
+/// Runs the configured secrets command (through the per-process cache) for every name registered
+/// manuals may read, plus `extra`. `None` when no command is configured or no name is wanted.
+pub fn direct_secrets(
+    paths: &UtcpPaths,
+    extra: Option<&BTreeSet<String>>,
+) -> Option<crate::secrets::SecretsRun> {
+    let secrets = UtcpSettings::load(paths).secrets?;
+    let mut wanted = load_or_build_index_sync(paths)
+        .map(|index| index.env_var_names())
+        .unwrap_or_default();
+    if let Some(extra) = extra {
+        wanted.extend(extra.iter().cloned());
+    }
+    run_direct_secrets(paths, &secrets, &wanted)
+}
+
+fn run_direct_secrets(
+    paths: &UtcpPaths,
+    secrets: &crate::paths::SecretsSettings,
+    wanted: &BTreeSet<String>,
+) -> Option<crate::secrets::SecretsRun> {
+    (!wanted.is_empty()).then(|| crate::secrets::cached_run(paths, secrets, wanted))
+}
+
+/// Every name the secrets command could be asked for to fill the `${VAR}` placeholders in `value`
+/// for `manual_name`.
+fn placeholder_candidates(manual_name: &str, value: &Value) -> BTreeSet<String> {
+    let mut vars = BTreeSet::new();
+    collect_placeholders(value, &mut vars);
+    vars.iter()
+        .flat_map(|var| secret_var_candidates(manual_name, var))
+        .collect()
+}
+
+/// The variables from files and the environment only (no secrets command): the process
+/// environment, `~/.config/environment.d/*.conf` (on Unix) and the utcp `.env` (`paths.env_file`),
+/// earlier sources winning.
+pub fn load_file_env_map(paths: &UtcpPaths) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = std::env::vars().collect();
 
     #[cfg(unix)]
@@ -358,7 +431,7 @@ pub fn load_env_map(paths: &UtcpPaths) -> HashMap<String, String> {
 /// on Linux when `systemd --user` is active.
 pub fn load_daemon_startup_env_map(paths: &UtcpPaths) -> HashMap<String, String> {
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-    let mut map = load_env_map(paths);
+    let mut map = load_file_env_map(paths);
 
     #[cfg(target_os = "linux")]
     if let Ok(out) = std::process::Command::new("systemctl")
@@ -543,8 +616,9 @@ fn sanitize_tool_name(raw: &str) -> String {
     }
 }
 
-/// Resolves `${VAR}` placeholders in spec-fetch headers (shell env, `~/.config/environment.d` and the
-/// utcp `.env`). Returns the resolved headers and the placeholder names that stayed unset.
+/// Resolves `${VAR}` placeholders in spec-fetch headers (shell env, `~/.config/environment.d`, the
+/// utcp `.env` and the secrets command). Returns the resolved headers and the placeholder names that
+/// stayed unset.
 fn resolve_fetch_headers(
     paths: &UtcpPaths,
     manual_name: &str,
@@ -553,8 +627,8 @@ fn resolve_fetch_headers(
     if !headers.values().any(|v| v.contains("${")) {
         return (headers.clone(), BTreeSet::new());
     }
-    let env_map = load_env_map(paths);
     let mut value = serde_json::to_value(headers).unwrap_or_default();
+    let env_map = load_env_map_for(paths, Some(&placeholder_candidates(manual_name, &value)));
     interpolate_provider_vars(&mut value, manual_name, &env_map, false);
     let mut unresolved = BTreeSet::new();
     collect_placeholders(&value, &mut unresolved);
@@ -1278,9 +1352,13 @@ async fn discover_mcp_manual(
 ) -> Result<CachedUtcpManual> {
     use crate::providers::mcp::McpProvider;
     // Discovery runs against a copy with `${VAR}` placeholders resolved (from the shell,
-    // `~/.config/environment.d` and the utcp `.env`); the saved manual keeps the placeholders.
-    let env_map = load_env_map(paths);
+    // `~/.config/environment.d`, the utcp `.env` and the secrets command); the saved manual keeps
+    // the placeholders.
     let mut resolved_json = serde_json::to_value(mcp_prov)?;
+    let env_map = load_env_map_for(
+        paths,
+        Some(&placeholder_candidates(manual_name, &resolved_json)),
+    );
     interpolate_provider_vars(&mut resolved_json, manual_name, &env_map, false);
     let mut unresolved = BTreeSet::new();
     collect_placeholders(&resolved_json, &mut unresolved);
@@ -2180,7 +2258,15 @@ pub async fn call_tool_direct(
             .iter()
             .any(|t| t.provider.to_string().contains("${"))
     {
-        load_env_map(paths)
+        // Only this manual's names, so a direct call still reads no other manual or the index.
+        let mut env_map = load_file_env_map(paths);
+        if let Some(secrets) = UtcpSettings::load(paths).secrets {
+            let wanted = manual_env_var_names([(manual_name.as_str(), &manual)]);
+            if let Some(run) = run_direct_secrets(paths, &secrets, &wanted) {
+                env_map.extend(run.values);
+            }
+        }
+        env_map
     } else {
         HashMap::new()
     };
@@ -2292,28 +2378,64 @@ pub async fn batch_call_direct(
     Ok(ordered.into_iter().map(|(_, r)| r).collect())
 }
 
-/// Produce a `DoctorReport` checking paths, index freshness, `.env` credentials (`SET` vs `MISSING`), and daemon state.
+/// Produce a `DoctorReport` checking paths, index freshness, credentials (`SET` vs `MISSING`, and
+/// where each value comes from), the secrets command, `settings.toml`, and daemon state. The
+/// credentials are this process's view; when the daemon runs, `doctor` shows the daemon's instead.
 pub fn build_doctor_report(
     paths: &UtcpPaths,
     daemon_running: bool,
     daemon_pid: Option<u32>,
 ) -> Result<DoctorReport> {
+    let settings_error = UtcpSettings::load_checked(&paths.settings_file)
+        .err()
+        .map(|e| format!("{e:#}"));
     let settings = UtcpSettings::load(paths);
     let logging_enabled = crate::activity::is_logging_enabled(paths);
     let index_present = paths.search_index_file.exists();
     let idx = load_or_build_index_sync(paths)?;
-    let env_map = load_env_map(paths);
+    let mut env_map = load_file_env_map(paths);
+    // With the daemon running, `doctor` reports the daemon's credentials and secrets command run.
+    let secrets = settings
+        .secrets
+        .as_ref()
+        .filter(|_| !daemon_running)
+        .map(|secrets| {
+            run_direct_secrets(paths, secrets, &idx.env_var_names()).unwrap_or_else(|| {
+                crate::secrets::SecretsRun {
+                    values: HashMap::new(),
+                    status: crate::secrets::SecretsCommandStatus {
+                        command: secrets.command.join(" "),
+                        error: None,
+                        provided: Vec::new(),
+                    },
+                }
+            })
+        });
+    let secret_values = secrets
+        .as_ref()
+        .map(|run| run.values.clone())
+        .unwrap_or_default();
+    env_map.extend(secret_values.clone());
 
     let mut credentials = Vec::new();
     for m in &idx.manuals {
         for req_var in &m.required_env_vars {
             let resolved = resolve_secret_var(&m.name, req_var, &env_map);
             let is_set = resolved.is_some();
+            let source = resolved.as_ref().map(|(value, via)| {
+                if secret_values.get(via).map(String::as_str) == Some(*value) {
+                    SOURCE_SECRETS_COMMAND
+                } else {
+                    SOURCE_ENV
+                }
+                .to_string()
+            });
             credentials.push(CredentialStatus {
                 manual: m.name.clone(),
                 env_var: req_var.clone(),
                 resolved_via: resolved.map(|(_, via)| via),
                 is_set,
+                source,
             });
         }
     }
@@ -2331,6 +2453,8 @@ pub fn build_doctor_report(
         manual_count: idx.manuals.len(),
         tool_count: idx.tools.len(),
         credentials,
+        secrets_command: secrets.map(|run| run.status),
+        settings_error,
     })
 }
 

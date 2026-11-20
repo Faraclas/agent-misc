@@ -18,7 +18,7 @@ calls. All agents of one user on one machine share the same manuals, secrets and
 | :--- | :--- | :--- |
 | Registry (which manuals, their sources, hints) | `~/.config/utcp/.utcp_config.json` | `%APPDATA%\utcp\config\.utcp_config.json` |
 | Secrets (`NAME=value` lines) | `~/.config/utcp/.env` | `%APPDATA%\utcp\config\.env` |
-| Settings | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
+| Settings (and the optional secrets command) | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
 | Saved manuals and search index | `~/.cache/utcp/` | `%LOCALAPPDATA%\utcp\cache\` |
 | Daemon socket | `$XDG_RUNTIME_DIR/utcp.sock` | `\\.\pipe\utcp-<USERNAME>` |
 | Optional disk log | `~/.local/state/utcp/activity.jsonl` | `%LOCALAPPDATA%\utcp\data\activity.jsonl` |
@@ -28,19 +28,22 @@ calls. All agents of one user on one machine share the same manuals, secrets and
 `UTCP_MEDIA_DIR` or `media_dir` in `settings.toml` moves the media folder. On Linux it must be a folder you own that
 only you can open; otherwise utcp leaves images inline in the answer.
 
-`utcp doctor` prints the actual paths, whether the daemon runs, which secrets are set, and whether the agent skills
-are current. Start there whenever something looks wrong.
+`utcp doctor` prints the actual paths, whether the daemon runs, which secrets are set and where each comes from, and
+whether the agent skills are current. Start there whenever something looks wrong.
 
 ## 2. First Setup
 
-1. Put `utcp` on `PATH`: a release archive from the project's GitHub Releases (tags `utcp-rs-v*`) or
-   `cargo build --release`. There are no distribution packages yet (a Gentoo ebuild is planned). The Linux archive
-   (`utcp-x86_64-unknown-linux-musl.tar.gz`) holds a static binary that runs on any x86_64 distribution, provided
-   as-is; copy `utcp` to `~/.local/bin/`. On Windows, unzip the release and run `install.cmd` (double-click it, or
-   `.\install.cmd` in a terminal), which runs `install.ps1`: it copies `utcp.exe` to `%LOCALAPPDATA%\Programs\utcp`,
-   adds that to your user `PATH`, does step 2, and does step 3 through a logon scheduled task that also starts the
-   daemon now (never as administrator). No admin rights needed. `-NoDaemonAtLogon` skips or removes the task. Running
-   it again upgrades; `-Uninstall` removes it and keeps your manuals, secrets and skills.
+1. Put `utcp` on `PATH`:
+   - **Gentoo:** `dev-util/utcp` from the [`adaptive-overlay`](https://github.com/Faraclas/adaptive-overlay)
+     overlay installs `/usr/bin/utcp` and the systemd user unit.
+   - **Other Linux:** the release archive from the project's GitHub Releases (tags `utcp-rs-v*`),
+     `utcp-x86_64-unknown-linux-musl.tar.gz`, holds a static binary that runs on any x86_64 distribution, provided
+     as-is; copy `utcp` to `~/.local/bin/`. Or build it with `cargo build --release`.
+   - **Windows:** unzip the release and run `install.cmd` (double-click it, or `.\install.cmd` in a terminal), which
+     runs `install.ps1`: it copies `utcp.exe` to `%LOCALAPPDATA%\Programs\utcp`, adds that to your user `PATH`, does
+     step 2, and does step 3 through a logon scheduled task that also starts the daemon now (never as
+     administrator). No admin rights needed. `-NoDaemonAtLogon` skips or removes the task. Running it again
+     upgrades; `-Uninstall` removes it and keeps your manuals, secrets and skills.
 2. Install the agent skills for Zed, VS Code, Copilot CLI, Antigravity (`agy`) and Hermes:
 
    ```sh
@@ -56,6 +59,9 @@ are current. Start there whenever something looks wrong.
    systemctl --user daemon-reload
    systemctl --user enable --now utcp-daemon
    ```
+
+4. Give utcp the secrets your manuals need (section 3, Secrets). A daemon started by systemd or at Windows logon
+   does not see the variables your shell exports, so if you keep secrets in a shell file, set up a secrets command.
 
 ## 3. Adding Tools
 
@@ -101,17 +107,53 @@ agent loads, so agents know what an unclear name such as `context7` is for.
 ### Secrets
 
 Write `${VAR}` placeholders in `-H` and `-e`, single-quoted so the shell keeps them, never the token itself. The
-manual saves the placeholder; the value is looked up at call time. Put the value in `~/.config/utcp/.env`:
+manual saves the placeholder; the value is looked up at call time. utcp keeps only the variables registered manuals
+use and ignores all others. There are three places for a value:
 
-```sh
-MYAPI_TOKEN=...
+- **`~/.config/utcp/.env`:** `NAME=value` lines. The daemon rereads it when it changes, so no restart is needed.
+- **A secrets command** (`[secrets]` in `settings.toml`): a program that prints the values, so they stay where you
+  already keep them (a shell file, `pass`, a keyring, a password manager) and are never copied into utcp's files.
+  The daemon runs it when it starts, so it has the secrets after a reboot with no one logged in to a shell.
+- **Your shell:** a variable exported in a shell reaches the daemon with `utcp daemon reload-env` from that shell,
+  and a `utcp call` from a shell that has a variable the daemon lacks hands it over too. Both last until the daemon
+  stops.
+
+If a name has values in several places, the secrets command wins, then your shell, then `.env` and the daemon's own
+environment. If a call or import fails because a variable is missing, the error names it. `utcp doctor` shows each
+variable as `[SET]` (with where it came from) or `[MISSING]`.
+
+Agents should ask the user to add a secret and should never ask for its value in the chat.
+
+#### The Secrets Command
+
+```toml
+# ~/.config/utcp/settings.toml
+[secrets]
+command = ["/bin/bash", "~/scripts/utcp-secret-source.sh"]
+timeout_secs = 10   # optional; it is stopped after this
 ```
 
-The daemon rereads `.env` when it changes, so no restart is needed. A variable exported in a shell instead reaches
-the daemon with `utcp daemon reload-env` from that shell (only variables that registered manuals use are sent; all
-others are ignored). If a call or import fails because a variable is missing, the error names it.
+- `command` is the program and its arguments, one list item each. It runs directly, not through a shell; a leading
+  `~` is your home folder.
+- utcp adds the names it wants as further arguments: every name a registered manual may read.
+- It reads `NAME=value` lines from the program's stdout and keeps only the names it asked for. A value is taken as
+  written up to the end of the line (no `$` expansion); a leading `export` and one pair of quotes around the value
+  are removed. Blank lines and `#` comments are skipped.
+- The program's stderr is discarded, and no value is ever shown or logged. If it fails, `utcp doctor` and
+  `daemon.log` say how (exit code, timeout, a line that is not `NAME=value`); run it by hand to see its own errors.
+- **When it runs:** the daemon runs it at start, when its config folder changes (`register`, `deregister`, an edit
+  to `settings.toml`) and on `utcp daemon reload-env`, so after you change a secret, run `reload-env`. If a run
+  fails, the daemon keeps the values of the last good run. Without the daemon, each `utcp` command runs it when it
+  needs a secret (at most once a minute).
 
-Agents should ask the user to add a secret to `.env` and should never ask for its value in the chat.
+Two examples to copy and adjust ship in the release archives and in `examples/` in the source:
+
+- `secret-source.sh` (Linux) sources a shell file such as `~/.bash_secrets` and prints only the names on its
+  allowlist, so that file's other secrets never reach utcp.
+- `secret-source.ps1` (Windows) reads each value from the PowerShell SecretManagement module.
+
+The program prints secrets to its stdout, so do not run it in a terminal to test it: run `utcp doctor`, which names
+the variables it printed.
 
 ### MCP Servers in Containers
 
@@ -165,19 +207,23 @@ utcp daemon status        # running?, PID, manuals, calls served
 utcp daemon start         # start it in the background (through systemd when the unit is installed)
 utcp daemon stop
 utcp daemon restart       # needed after installing a new utcp binary
-utcp daemon reload-env    # send this shell's variables (only those manuals use) to the daemon
+utcp daemon reload-env    # send this shell's variables (only those manuals use) to the daemon, reread its
+                          # environment and .env, and run the secrets command again
 ```
 
 With the systemd unit, `systemctl --user restart utcp-daemon` does the same as `utcp daemon restart`.
 
-Changes to the registry, saved manuals and `.env` reach a running daemon on their own. Restart it only for a new
-`utcp` binary or to clear everything at once. A restart stops all of its MCP servers, so calls in progress fail.
+Changes to the registry, saved manuals, `settings.toml` and `.env` reach a running daemon on their own. Restart it
+only for a new `utcp` binary or to clear everything at once. A restart stops all of its MCP servers, so calls in
+progress fail.
 
 If the daemon fails to start or crashes, the reason is in `daemon.log` in the state folder (`~/.local/state/utcp/` on
 Linux, `%LOCALAPPDATA%\utcp\data\` on Windows; `utcp doctor` prints the folder). `utcp daemon start` shows what it
-logged during that attempt, and `utcp daemon status` names the file when the daemon is stopped. Only the error the
-daemon exits with and crashes go there, never calls, and it is always on: it costs nothing while the daemon works.
-Under systemd the journal has the same lines (`journalctl --user -u utcp-daemon`).
+logged during that attempt, and `utcp daemon status` names the file when the daemon is stopped. The file also gets
+what the daemon finds wrong when it starts (an invalid `settings.toml`, a failed secrets command, required
+variables that are still not set) and a secrets command that starts or stops failing later. It never gets calls
+or secret values, and costs nothing while the daemon works. Under systemd the journal has the same lines
+(`journalctl --user -u utcp-daemon`).
 
 ## 6. Local MCP Servers
 
@@ -217,11 +263,12 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
    | Error says | Meaning | Fix |
    | :--- | :--- | :--- |
    | `rate limited by <host> (HTTP 429)` or `(HTTP 403)` ... `retry after N s` | The API's limit is used up. All agents using the same token share it. | Wait the time it names. Retrying sooner fails again. |
-   | `these placeholders were not set: NAME` | A `${NAME}` the manual needs has no value. | Add `NAME=value` to `.env` (or export it and run `utcp daemon reload-env`). |
+   | `these placeholders were not set: NAME` | A `${NAME}` the manual needs has no value. | Give it a value (section 3, Secrets): `.env`, the secrets command, or export it and run `utcp daemon reload-env`. |
+   | `Secrets command failed: ...` (`reload-env`, `doctor`, `daemon.log`) | The `[secrets]` command did not run cleanly; the daemon keeps the values of its last good run. | Run the command by hand to see its own error output (it prints secrets, so not where others can see), fix it, then `utcp daemon reload-env`. |
    | `Tool 'x.y' not found` | No such manual or tool is registered. | `utcp search` or `utcp list` for the right name. |
    | `MCP server 'x' did not answer ... within 60s` | The local server is stuck or very slow. | `utcp daemon restart-server x`. |
    | `MCP server 'x' was stopped on request` | Someone ran `stop-server` or `restart-server` during the call. | Call again. |
-   | `utcp daemon exited before listening` or `did not start listening within 3 seconds` | `utcp daemon start` failed. | Read the lines it quotes from `daemon.log`; `utcp daemon status` names the file. |
+   | `utcp daemon exited before listening` or `did not start listening within N seconds` | `utcp daemon start` failed. | Read the lines it quotes from `daemon.log`; `utcp daemon status` names the file. |
    | `utcp daemon is not running` or `is not currently running` | From `daemon servers`, `stop-server`, `restart-server` and `reload-env` (`daemon stop` prints it as information). | `utcp daemon start`. Calls work without it. |
    | `Cannot use the utcp daemon at ...: access denied` (Windows) | The daemon was started from an administrator (elevated) shell, so normal shells may not use it. | `utcp daemon stop` in an elevated shell, then `utcp daemon start` in a normal one. `utcp --direct` works meanwhile. |
    | `Cannot use the utcp daemon at ...: permission denied` (Linux) | Another account started it, for example root through `sudo`. | Stop it as that account, start it as yourself. |
@@ -231,7 +278,8 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
      secrets redacted) without sending it.
    - `utcp --direct call ...` skips the daemon. If that works and the normal call fails, the daemon has stale
      state: `utcp daemon reload-env` for secrets, `utcp daemon restart` for everything else.
-   - `utcp doctor` shows `[MISSING]` for every secret a manual needs and cannot find.
+   - `utcp doctor` shows `[MISSING]` for every secret a manual needs and cannot find, and where each `[SET]` one comes
+     from. With the daemon running it shows the daemon's view, which is what calls use.
 
 4. **Disk logging, only while debugging.** It is off by default and costs nothing while off. `utcp call ... --log`
    logs one command; `utcp log on` logs everything until `utcp log off`. The log keeps about 10,000 calls in two

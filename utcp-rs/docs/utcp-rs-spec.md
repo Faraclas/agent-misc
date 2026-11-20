@@ -1,9 +1,10 @@
 # `utcp-rs`: Direct UTCP Rust Workspace Specification (Zero-MCP, Dual-Mode CLI + Daemon, Linux & Windows)
 
-- **Status:** v1.10 (Implemented — Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
+- **Status:** v1.11 (Implemented — Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
   manual lifecycle (deregister / re-register / purge), env var allow-list, per-manual skill hints, 6-tab TUI with Try
   popup and MCP import, concurrent stdio MCP routing, stdio MCP process-tree cleanup, clear rate-limit errors,
-  `utcp log recent`, stdio MCP server management, interruptible direct mode, `utcp-admin` skill and operating guide)
+  `utcp log recent`, stdio MCP server management, interruptible direct mode, `utcp-admin` skill and operating guide,
+  secrets command)
 - **Repository:** `agent-misc` (`/utcp-rs`)
 - **License:** MIT. `utcp-core` is derived from `rs-utcp` 0.3.2 (`MIT OR Apache-2.0`; its Apache-2.0 text is kept as
   `crates/utcp-core/LICENSE-UPSTREAM-RS-UTCP`, see `NOTICE`).
@@ -197,14 +198,14 @@ upstream's core engine and outbound transports active out of the box:
 | **Binary (`PATH`)** | Single CLI & daemon executable | `/usr/bin/utcp` or `~/.local/bin/utcp` | `%LOCALAPPDATA%\Programs\utcp\utcp.exe` |
 | **Daemon IPC Socket** | Local IPC endpoint for Daemon Mode | `$XDG_RUNTIME_DIR/utcp.sock` (fallback `~/.cache/utcp/utcp.sock`) | `\\.\pipe\utcp-<USERNAME>` |
 | **`utcp.sock.lock`** | Held by the running daemon, so only one can bind the socket (empty, `0600`) | Next to the socket | None: the pipe is created first-instance-only |
-| **`settings.toml`** | Management flags (`cache_on_register`, daemon/log opts) | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
+| **`settings.toml`** | Management flags (`cache_on_register`, daemon/log opts, media spool) and the optional `[secrets]` command (`command`, `timeout_secs`); an invalid file is reported by the daemon and `doctor`, and the defaults apply | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
 | **`.utcp_config.json`** | Shared UTCP manual registry (machine-wide per user) | `~/.config/utcp/.utcp_config.json` | `%APPDATA%\utcp\config\.utcp_config.json` |
 | **`.env`** | Namespaced API secrets (`chmod 600` / user ACL) | `~/.config/utcp/.env` | `%APPDATA%\utcp\config\.env` |
 | **`manuals/*.utcp.json`** | Converted & cached UTCP manuals on disk | `~/.cache/utcp/manuals/` | `%LOCALAPPDATA%\utcp\cache\manuals\` |
 | **`search_index.bin`** | Pre-computed tool metadata & schema index | `~/.cache/utcp/search_index.bin` | `%LOCALAPPDATA%\utcp\cache\search_index.bin` |
 | **`logging.enabled`** | Sentinel file present only when disk logging is on | `~/.local/state/utcp/logging.enabled` | `%LOCALAPPDATA%\utcp\data\logging.enabled` |
 | **`activity.jsonl`** | Opt-in call audit log (with `.bak` rotation) | `~/.local/state/utcp/activity.jsonl` | `%LOCALAPPDATA%\utcp\data\activity.jsonl` |
-| **`daemon.log`** | Daemon exit errors and panics, always on (256 KiB, `.bak` rotation) | `~/.local/state/utcp/daemon.log` | `%LOCALAPPDATA%\utcp\data\daemon.log` |
+| **`daemon.log`** | Daemon exit errors, panics, startup warnings and secrets command failures, always on (256 KiB, `.bak` rotation) | `~/.local/state/utcp/daemon.log` | `%LOCALAPPDATA%\utcp\data\daemon.log` |
 | **`daemon.pid`** | PID of the running daemon (removed on exit if still its own) | `~/.local/state/utcp/daemon.pid` | `%LOCALAPPDATA%\utcp\data\daemon.pid` |
 | **`utcp-media/`** | Bounded, self-cleaning spool for intercepted media (must be a real folder owned by the user; mode `0700` enforced on Unix, else media stays inline) | `$XDG_RUNTIME_DIR/utcp-media/` (`0700` RAM `tmpfs`; without `XDG_RUNTIME_DIR`, `utcp-media-$USER` in the temp folder) | `%TEMP%\utcp-media\` |
 
@@ -217,8 +218,9 @@ upstream's core engine and outbound transports active out of the box:
    `UTCP_CONFIG_DIR` / `UTCP_CACHE_DIR` / `UTCP_STATE_DIR` environment variables. The platform folders are looked up
    only for a directory without an override: on Windows that lookup goes through the Known Folders API, which fails
    when `%USERPROFILE%` points at a missing folder, so setting all three variables avoids it.
-3. The daemon watches `.utcp_config.json`, `manuals/*.utcp.json`, and `.env` (`mtime` / `notify`) so registering manuals
-   or updating API keys takes effect immediately without restarting `utcp daemon`.
+3. The daemon watches its config folder (`.utcp_config.json`, `settings.toml`, `.env`) and `manuals/*.utcp.json`
+   (`mtime` / `notify`) so registering manuals or updating API keys takes effect immediately without restarting
+   `utcp daemon`.
 
 ---
 
@@ -290,12 +292,32 @@ the single machine-wide user daemon maintains:
   - At startup, reads process environment variables, `~/.config/environment.d/*.conf`, `systemctl --user
     show-environment` (on Linux), and `~/.config/utcp/.env` (re-read on `.env` `mtime` changes), keeping only allowed
     names.
+  - **Secrets Command (`[secrets]` in `settings.toml`, `secrets.rs`):** a program the user names to print the
+    secrets, so they can stay in a shell file, `pass`, a keyring or a password manager. A daemon started by
+    `systemd --user` never reads `~/.bashrc`, so without it, secrets exported there reach the daemon only through
+    a caller. The Hermes gateway's `secrets.command` follows the same model.
+    - `command` is a list (program, then arguments; no shell, a leading `~` is the home folder). utcp appends every
+      allowed name as a further argument and reads `NAME=value` lines from stdout: values literal to the end of the
+      line (no `$` expansion, so no `dotenvy`), a leading `export` and one pair of matching quotes removed, blank
+      lines and `#` comments skipped. Only allowed, non-empty names are kept; a line that is not `NAME=value` fails
+      the run.
+    - It runs with stdin closed and stderr discarded, under `timeout_secs` (default 10), with stdout capped at
+      1 MiB. Errors name the problem (could not start, exit code, timeout, line number), never output.
+    - The daemon runs it at startup (before it listens; `utcp daemon start` waits 3 s plus `timeout_secs`), on every
+      reload (`notify` on the config folder, which covers `register` and `settings.toml` edits) and on
+      `reload-env`, outside the catalog lock. A failed run keeps the values of the last good one. A new failure and
+      the recovery are logged to stderr and `daemon.log`, not every repeat.
+    - **Precedence:** secrets command > pushed or absorbed caller variables > startup environment and `.env`.
+    - `daemon status --json` and `doctor` show its last run (`secrets_command`: command, error, provided names).
+  - **Startup warnings:** after loading, the daemon writes to stderr (the journal) and `daemon.log` an invalid
+    `settings.toml`, a failed secrets command, and every required variable still unset, with its manual.
   - **Cold-Boot Shell Variable Auto-Absorption:** On `utcp call` and `utcp batch`, non-empty variables a registered
     manual needs that are present in the caller's shell but were absent when `systemd --user` started the daemon at
     boot (for example, variables exported in `~/.bashrc`) are absorbed over the `0600` IPC socket, preventing
     cold-boot `401` errors. All other caller variables are ignored.
   - Supports **`utcp daemon reload-env`** (and hotkey **`E`** in `utcp ui`) to explicitly rotate/overwrite already
-    loaded manual variables in daemon RAM without restarting the daemon.
+    loaded manual variables in daemon RAM without restarting the daemon. It also rereads the daemon's own environment
+    and `.env` and runs the secrets command again.
 - **Shared Warm Outbound Connection Pools:**
   - Persistent `reqwest::Client` (`rustls`) pool keeping HTTP/1.1 keep-alive and HTTP/2 multiplexed TLS connections warm
     across sequential `utcp call` invocations (eliminating repeated 50–150 ms TCP+TLS handshakes).
@@ -324,7 +346,11 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 - **Zero-Tokio Synchronous Execution for Local Commands (`list`, `search`, `schema`):** Reads `search_index.bin`
   directly from the OS RAM page cache (~15 microseconds) without initializing Tokio or TLS.
 - **Direct Single-Manual Lookup on `utcp call <manual>.<tool>`:** Opens only `~/.cache/utcp/manuals/<manual>.utcp.json`
-  (1 file read from OS page cache) and loads `.env` only when `${...}` secret interpolation is required.
+  (1 file read from OS page cache) and loads `.env` only when `${...}` secret interpolation is required. The secrets
+  command, if configured, is then asked for that manual's names only.
+- **Secrets Command Without the Daemon:** other commands that resolve secrets (`batch`, `register` / `import-mcp`
+  placeholders, `doctor`) ask it for every name registered manuals use, plus the placeholders of a manual being
+  registered. A process reuses a run for the same names for 60 s. Its values win over the environment and `.env`.
 - **Lock-Free Reads & Atomic Writes:** Cold-path writes (`register`, `refresh`, `deregister`) acquire an advisory file
   lock (`~/.config/utcp/.utcp.lock`) and write to `.<file>.tmp.<pid>.<nanos>` followed by atomic `std::fs::rename()`,
   ensuring concurrent readers never see half-written files.
@@ -363,14 +389,15 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
      `antigravity` -> `agy`, names containing `hermes` -> `hermes`.
   - Never calls full process-tree enumeration (`sysinfo::System::new_all()`).
 - **Daemon Failure Log (`daemon.log`, separate and always on):** the daemon process also writes what it would print
-  to stderr to `daemon.log` in the state folder (`daemon_log.rs`): the error `utcp daemon run` exits with, and every
+  to stderr to `daemon.log` in the state folder (`daemon_log.rs`): the error `utcp daemon run` exits with, every
   panic (a panic hook, installed only in the daemon, records the message, location and thread name; a panic inside one
-  task, which the daemon survives, is recorded too). Its stderr is discarded when it runs detached or from the Windows
-  logon task, and only systemd keeps it otherwise. Nothing is written per call, so it is on even with activity logging
-  off. Past **256 KiB** it rotates to one `daemon.log.bak`, like `activity.jsonl`.
+  task, which the daemon survives, is recorded too), its startup warnings, and secrets command failures and
+  recoveries. Its stderr is discarded when it runs detached or from the Windows logon task, and only systemd keeps it
+  otherwise. Nothing is written per call, so it is on even with activity logging off. Past **256 KiB** it rotates to
+  one `daemon.log.bak`, like `activity.jsonl`.
   - `utcp daemon start` notes the file's size before spawning, stops waiting as soon as the detached daemon exits (or
-    after 3 s), and puts whatever was appended since into its error ("utcp daemon exited before listening ... It
-    logged ...").
+    after 3 s, plus the secrets command's `timeout_secs` when one is set), and puts whatever was appended since into
+    its error ("utcp daemon exited before listening ... It logged ...").
   - `utcp daemon status` of a stopped daemon prints the file's last write time and path (`daemon_log` in `--json`).
 
 ### 5. Single-Process Batch Execution (`utcp batch`)
@@ -530,12 +557,12 @@ bypass the daemon and force standalone execution.
 | `utcp schema <manual.tool>` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms. | **Hot (Daemon IPC or Sync Direct)** |
 | `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--pretty \| --compact] [--dry-run] [--log]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); dotted paths pass through arrays (`workflow_runs.id`), and when no field names a top-level key it projects the response's list (`items`/`results`/`data`, else its only array of objects). | **Hot (Daemon IPC or Async Direct)** |
 | `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--pretty \| --compact] [--log]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` as well as `--fields`). | **Hot (Daemon IPC or Async Direct)** |
-| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds) and none of `UTCP_SOCKET_PATH`, `UTCP_CONFIG_DIR` or `UTCP_CONFIG` is set (for `start` and `restart`, also no `--config` or `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json`. | Management |
+| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds) and none of `UTCP_SOCKET_PATH`, `UTCP_CONFIG_DIR` or `UTCP_CONFIG` is set (for `start` and `restart`, also no `--config` or `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run. | Management |
 | `utcp daemon servers [--json]` | Lists the local (stdio) MCP servers of registered manuals: state, PID, uptime, restart count, program name. Errors when no daemon is running (in direct mode each call starts and stops its own server). | Management (Daemon IPC) |
 | `utcp daemon stop-server <manual>` | Stops a manual's local MCP server now; waiting calls fail at once and the next call starts it again. Errors for unknown manuals and manuals without a local server. | Management (Daemon IPC) |
 | `utcp daemon restart-server <manual>` | Stops a manual's local MCP server and starts it again now, printing the new PID (or the start error). | Management (Daemon IPC) |
 | `utcp import <source> [-o <path>] [--name <ns>] [--base-url <url>] [-H <k:v>] [--register [--hint <text>]]` | Proactive OpenAPI/Swagger/UTCP conversion to disk ("cache-before-register"). The name defaults to the first URL host label or the file name. `${VAR}` placeholders in `-H` are resolved for the spec download (also `register` and `refresh`) but saved as placeholders; a failed download names unset ones. | Cold |
-| `utcp import-mcp [<name>] (--command <program> [--arg <a>...] [-e KEY=VALUE...] \| --url <url> [-H <k:v>...]) [-o <path>] [--register [--hint <text>]]` | Discovers tools via MCP `initialize` + `tools/list` (60 s timeout) and writes a lazy `.utcp.json` manual (`mcp` outbound client). `--command` is the program only; each `--arg` is one argument (values may start with `-`). `${VAR}` placeholders in `-e`/`-H` are resolved for discovery from the shell and `.env` but saved as placeholders; discovery errors name unset ones. The name defaults to the URL host (`mcp.context7.com` -> `context7`) or the launched package (`npx -y @upstash/context7-mcp` -> `context7`). | Cold |
+| `utcp import-mcp [<name>] (--command <program> [--arg <a>...] [-e KEY=VALUE...] \| --url <url> [-H <k:v>...]) [-o <path>] [--register [--hint <text>]]` | Discovers tools via MCP `initialize` + `tools/list` (60 s timeout) and writes a lazy `.utcp.json` manual (`mcp` outbound client). `--command` is the program only; each `--arg` is one argument (values may start with `-`). `${VAR}` placeholders in `-e`/`-H` are resolved for discovery from the shell, `.env` and the secrets command but saved as placeholders; discovery errors name unset ones. The name defaults to the URL host (`mcp.context7.com` -> `context7`) or the launched package (`npx -y @upstash/context7-mcp` -> `context7`). | Cold |
 | `utcp register <name> [<source>] [--cache \| --no-cache] [--base-url <url>] [-H <k:v>] [--hint <text>]` | Registers a manual into `.utcp_config.json`, caches `manuals/<name>.utcp.json`, and rebuilds `search_index.bin`. Without `<source>`, re-registers a deregistered manual offline from its saved copy (`--hint` is still allowed). `--hint` sets the few words shown next to the name in the skill description; without it an existing hint is kept. Prints a `Hint` line (or how to add one). | Cold |
 | `utcp set-hint <name> (<text> \| --clear)` | Sets or clears a registered or deregistered manual's hint (whitespace collapsed, at most 60 characters, no control characters). For an active manual it also rebuilds the search index (hint words are searchable), tells the daemon to reload, and rewrites the installed global skill copies. | Cold |
 | `utcp get-hint [<name>]` | Prints one manual's hint (or how to add one), or every registered manual with its hint (`-` when none). | Cold (Sync) |
@@ -544,7 +571,7 @@ bypass the daemon and force standalone execution.
 | `utcp log <on \| off \| status \| clear>` | Explicitly enables/disables opt-in disk activity logging (`logging.enabled` sentinel) or clears `activity.jsonl` / `.bak`. | Cold (Sync) |
 | `utcp log recent [--limit 20] [--failed] [--json]` | Shows recent calls, newest first, with the full redacted error text of failures. Reads the daemon's in-memory ring (last 500 calls, works with logging off); without a daemon it reads the log files. | Hot (Daemon IPC) |
 | `utcp media <status \| clear>` | Inspects or clears the bounded media spool (`$XDG_RUNTIME_DIR/utcp-media` on Linux, `%TEMP%\utcp-media` on Windows). | Cold (Sync) |
-| `utcp doctor [--json]` | Checks daemon status, config paths, index freshness, `.env` credential status (`SET` vs. `MISSING`), logging state, and IDE skills. | Cold (Sync) |
+| `utcp doctor [--json]` | Checks daemon status, config paths, index freshness, credential status (`SET` vs. `MISSING`, with the source: `secrets command`, `caller shell`, `daemon environment`, or `environment` without a daemon), the secrets command's last run, an invalid `settings.toml`, logging state, and IDE skills. With the daemon running, the credentials and secrets command are the daemon's (what calls use). | Cold (Sync) |
 | `utcp sync-ides [--global] [--workspace <dir>] [--status] [--print-skill]` | Installs or repairs the `utcp-tools` and `utcp-admin` skills (plus `utcp-admin/operating.md`) across Zed, VS Code, Copilot CLI, Antigravity CLI, and Hermes without requiring Windows Admin symlink privileges. `--print-skill` writes the rendered `utcp-tools` skill to stdout (release archives and ebuilds). | Cold (Sync) |
 | `utcp ui` | Launches the interactive `ratatui` companion Terminal UI (does not auto-enable logging). | Interactive |
 
@@ -709,7 +736,7 @@ not use in a given conversation.
 rendered for the target platform when packaged or when `utcp sync-ides` runs (using regular file writes on both Linux
 and Windows so Windows never fails on unprivileged symlink creation):
 
-- **On Linux (`utcp sync-ides`, release archives, and the planned Gentoo ebuild):** Renders POSIX shell syntax
+- **On Linux (`utcp sync-ides`, release archives, and the Gentoo ebuild):** Renders POSIX shell syntax
   (`<<'EOF'` heredocs)
   and XDG paths (`~/.config/utcp/.env`, `$XDG_RUNTIME_DIR/utcp.sock`), omitting Windows PowerShell instructions so
   Linux agents do not waste tokens on irrelevant OS syntax.
@@ -768,7 +795,7 @@ this binary. Register, deregister and hint changes rewrite all three in every gl
 | **Hermes Agent** | `.agents/skills/` | `~/.hermes/skills/software-development/` (only when `~/.hermes/skills` exists) | `%USERPROFILE%\.hermes\skills\software-development\` (only when `%USERPROFILE%\.hermes\skills` exists) |
 | **VS Code (1.146+, Copilot Chat, default Copilot harness)** | `.github/skills/` (documented; not written by utcp). A root `.agents/skills/` appears to load too (observed, not documented) | `~/.copilot/skills/` | `%USERPROFILE%\.copilot\skills\` |
 | **GitHub Copilot CLI** | `.agents/skills/` | `~/.copilot/skills/` (also reads `~/.agents/skills/`) | `%USERPROFILE%\.copilot\skills\` |
-| **Gentoo System Share (planned)** | — | `/usr/share/utcp/SKILL.md` (tools skill only; to be installed by the ebuild in the separate `adaptive-overlay` repo) | — |
+| **Gentoo System Share** | — | `/usr/share/utcp/SKILL.md` (tools skill only; installed by the ebuild in the separate `adaptive-overlay` repo) | — |
 
 The old Gemini CLI path (`~/.gemini/skills`) is not a target: Antigravity replaced Gemini CLI and does not read it.
 VS Code's default Copilot harness documents `~/.copilot/skills/` and `.github/skills/` and does not read
@@ -905,9 +932,10 @@ it needs secrets, a `Required credentials` line.
 
 - **Secrets:** always write `${VAR}` placeholders in `-H` / `-e` (single-quoted so your shell keeps them), never
   literal tokens: the manual stores the placeholder and the value is resolved at call time. Ask the user to put the
-  value in `~/.config/utcp/.env` as `VAR=value` (or export it in the shell and run `utcp daemon reload-env`).
-  Do not ask the user to paste secret values into the chat. If discovery fails, the error names any unset
-  placeholder.
+  value in `~/.config/utcp/.env` as `VAR=value`, or where their secrets command (`[secrets]` in `settings.toml`) reads it
+  from, or to export it in the shell; then run `utcp daemon reload-env`. Do not ask the user to paste secret
+  values into the chat, and never run the secrets command yourself (it prints the values). If discovery fails, the
+  error names any unset placeholder.
 - **Verify an import:**
 
   ```sh
@@ -929,7 +957,8 @@ it needs secrets, a `Required credentials` line.
   utcp refresh [<name>]
   ```
 
-- **Check status (`~/.config/utcp/.env`, `$XDG_RUNTIME_DIR/utcp.sock`) or push updated shell env vars to a running daemon:**
+- **Check status (`~/.config/utcp/.env`, `$XDG_RUNTIME_DIR/utcp.sock`, where each secret comes from) or make a running daemon pick up
+  changed secrets (this shell's variables, `.env`, the secrets command):**
 
   ```sh
   utcp doctor
@@ -962,10 +991,11 @@ it needs secrets, a `Required credentials` line.
 
 ## 9. Build, Packaging & Distribution Strategy
 
-### 1. Gentoo Linux (`adaptive-overlay`, planned)
+### 1. Gentoo Linux (`adaptive-overlay`)
 
-The ebuild and its test script live in the separate `adaptive-overlay` repository, not here. This section is the plan
-they follow.
+The ebuild and its test script live in the separate
+[`adaptive-overlay`](https://github.com/Faraclas/adaptive-overlay) repository, not here. This section is what they
+do; changes to it are agreed with that repository.
 
 - **Package category/name:** `dev-util/utcp` in `adaptive-overlay` (`inherit cargo systemd`).
 - **Offline Pure-Rust Build:** Uses Gentoo's `cargo.eclass` with offline vendored `${CARGO_CRATE_URIS}`. Because
@@ -980,6 +1010,8 @@ they follow.
      upstream so manual builds use the same file. Only `systemd` is supported.
   3. **System Skill File:** Installs the Linux-rendered `SKILL.md` to `/usr/share/utcp/SKILL.md` (and `pkg_postinst`
      prints `elog` instructions for `systemctl --user enable --now utcp-daemon` and `utcp sync-ides --global`).
+  4. **Docs:** `README.md`, `NOTICE`, `docs/operating.md` and the licenses with `dodoc`; from 0.1.1 also
+     `examples/secret-source.sh`, the example secrets command.
 - **Container Verification:** `adaptive-overlay` includes `containers/testenv-rust/verify-utcp.sh` to validate binary
   dependencies (`ldd`), Direct Mode and Daemon Mode hot-path benchmarks, OpenAPI import, and IDE skill sync.
 
@@ -1001,7 +1033,8 @@ they follow.
     `--args-stdin` with JSON piped to the process's stdin (an integration test, on both platforms).
   - Builds the release binaries: a static Linux `utcp` (`x86_64-unknown-linux-musl`, `musl-tools` for `ring`'s C code;
     the job fails unless `file` reports a static binary) and `utcp.exe`. The glibc test build is not published.
-  - Uploads release archives containing the binary, the rendered `SKILL.md`, `operating.md`, `LICENSE`, `NOTICE` and
+  - Uploads release archives containing the binary, the rendered `SKILL.md`, `operating.md`, the platform's example
+    secrets command (`secret-source.sh` or `secret-source.ps1`), `LICENSE`, `NOTICE` and
     `LICENSE-UPSTREAM-RS-UTCP` as build artifacts; on a release run the `release` job attaches them to the GitHub
     Release (and fails if none matched):
     - `utcp-x86_64-unknown-linux-musl.tar.gz`, which also holds `utcp-daemon.service`. Its
@@ -1020,7 +1053,8 @@ they follow.
       `powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1` with the given options. It clears
       `PSModulePath` first, because Windows PowerShell 5.1 started from PowerShell 7 inherits 7's module path and
       cannot load its own modules. When Explorer started it (double-click), it pauses at the end so the window stays
-      open. CI checks that the README names `.\install.cmd`, then unzips it, runs `install.cmd`, checks
+      open. CI checks that the README names `.\install.cmd` and that `secret-source.ps1` parses (the Linux job runs
+      `bash -n` on `secret-source.sh`), then unzips it, runs `install.cmd`, checks
       `PATH`, the skills, the licence files and the logon task, re-runs it with `-NoDaemonAtLogon` and checks that the
       task is gone, installs again, then runs `-Uninstall` and checks that the program, the task and the `PATH` entry
       are gone.

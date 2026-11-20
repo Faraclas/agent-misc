@@ -18,6 +18,7 @@ pub mod paths;
 pub mod plugins;
 pub mod providers;
 pub mod repository;
+pub mod secrets;
 pub mod security;
 pub mod skills;
 pub mod spec;

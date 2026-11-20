@@ -1467,6 +1467,23 @@ async fn spec_fetch_resolves_header_placeholders() {
         !written.contains("tok-spec"),
         "secret saved in the import file"
     );
+
+    // 5. The secrets command is asked for the placeholders of a manual being registered (not in
+    //    the index yet), with no `.env` value to fall back on.
+    std::fs::remove_file(env.tmp.path().join("config/.env")).unwrap();
+    let runs = configure_secret_source(&env, &json!({"values": {"OTHER_SPEC_TOKEN": "tok-spec"}}));
+    run_ok(
+        &env,
+        &[
+            "register",
+            "privy_two",
+            &spec_url,
+            "-H",
+            "Authorization: Bearer ${OTHER_SPEC_TOKEN}",
+        ],
+    );
+    let asked = std::fs::read_to_string(runs).unwrap();
+    assert!(asked.contains("OTHER_SPEC_TOKEN"), "{asked}");
 }
 
 /// issues/014 end to end: a real stdio MCP server (`node`, the shared fixture) registered with
@@ -1681,14 +1698,147 @@ fn refresh_asks_the_mcp_server_again() {
 
 /// `UTCP_TEST_FIXTURES` (a folder holding the fixtures) overrides `utcp-core/tests/fixtures`.
 fn mock_mcp_script() -> String {
+    fixture_path("mock_mcp_server.cjs")
+}
+
+fn fixture_path(name: &str) -> String {
     std::env::var_os("UTCP_TEST_FIXTURES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../utcp-core/tests/fixtures")
         })
-        .join("mock_mcp_server.cjs")
+        .join(name)
         .display()
         .to_string()
+}
+
+/// Writes `settings.toml` with a `[secrets]` command running `secret_source.cjs` on `config`, and
+/// returns the file the fixture appends the requested names to.
+fn configure_secret_source(env: &IsolatedEnv, config: &Value) -> std::path::PathBuf {
+    let config_dir = env.tmp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let source_config = env.tmp.path().join("secrets.json");
+    std::fs::write(&source_config, config.to_string()).unwrap();
+    let settings = format!(
+        "[secrets]\ncommand = [\"node\", {}, {}]\ntimeout_secs = 5\n",
+        toml_string(&fixture_path("secret_source.cjs")),
+        toml_string(&source_config.display().to_string()),
+    );
+    std::fs::write(config_dir.join("settings.toml"), settings).unwrap();
+    env.tmp.path().join("secrets.json.runs")
+}
+
+/// A TOML literal string (no escapes, so Windows paths stay as they are).
+fn toml_string(s: &str) -> String {
+    assert!(!s.contains('\''), "{s}");
+    format!("'{s}'")
+}
+
+fn doctor_json(env: &IsolatedEnv) -> Value {
+    let out = run_ok(env, &["doctor", "--json"]);
+    serde_json::from_str::<Value>(&out).unwrap()["doctor"].clone()
+}
+
+fn credential<'a>(doctor: &'a Value, manual: &str) -> &'a Value {
+    doctor["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["manual"] == manual)
+        .unwrap_or_else(|| panic!("no credential row for {manual}: {doctor}"))
+}
+
+fn call_auth(env: &IsolatedEnv) -> Value {
+    let out = run_ok(env, &["call", "dyn_api.get_user", r#"{"user_id": "x"}"#]);
+    serde_json::from_str::<Value>(&out).unwrap()["auth"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_command_supplies_credentials_to_the_daemon_and_direct_mode() {
+    let base_url = spawn_mock_api().await;
+    let env = IsolatedEnv::new();
+    let runs = configure_secret_source(
+        &env,
+        &json!({"values": {"dyn__api_API_KEY": "from-secrets-command"}}),
+    );
+    run_ok(
+        &env,
+        &["register", "dyn_api", &format!("{base_url}/openapi.json")],
+    );
+
+    // Direct mode: the command fills the placeholder, and doctor says where the value came from.
+    assert_eq!(call_auth(&env), "Bearer from-secrets-command");
+    let doctor = doctor_json(&env);
+    assert_eq!(credential(&doctor, "dyn_api")["source"], "secrets command");
+    assert_eq!(doctor["secrets_command"]["error"], Value::Null);
+
+    // The daemon runs it at startup: no caller pushes the value (the test shell does not have it).
+    run_ok(&env, &["daemon", "start"]);
+    assert_eq!(call_auth(&env), "Bearer from-secrets-command");
+    let status: Value =
+        serde_json::from_str(&run_ok(&env, &["daemon", "status", "--json"])).unwrap();
+    assert_eq!(
+        status["env_var_count"], 1,
+        "UNASKED_SECRET must not be held: {status}"
+    );
+    assert_eq!(
+        status["secrets_command"]["provided"],
+        json!(["dyn__api_API_KEY"])
+    );
+    let doctor = doctor_json(&env);
+    assert_eq!(credential(&doctor, "dyn_api")["source"], "secrets command");
+
+    // It is asked only for names registered manuals may read.
+    let asked = std::fs::read_to_string(&runs).unwrap();
+    assert!(asked.lines().count() >= 2, "{asked}");
+    for line in asked.lines() {
+        assert!(line.split(' ').any(|n| n == "dyn__api_API_KEY"), "{asked}");
+        assert!(
+            line.split(' ')
+                .all(|n| n.to_ascii_lowercase().contains("api")),
+            "{asked}"
+        );
+    }
+
+    // `reload-env` runs it again, so a rotated secret is picked up without a restart.
+    let source_config = env.tmp.path().join("secrets.json");
+    std::fs::write(
+        &source_config,
+        json!({"values": {"dyn__api_API_KEY": "rotated"}}).to_string(),
+    )
+    .unwrap();
+    let out = run_ok(&env, &["daemon", "reload-env"]);
+    assert!(out.contains("Secrets command re-run"), "{out}");
+    assert_eq!(call_auth(&env), "Bearer rotated");
+
+    // A failing run keeps the last good values, and the error (never the output) is reported.
+    std::fs::write(&source_config, json!({"exit": 3}).to_string()).unwrap();
+    let out = run_ok(&env, &["daemon", "reload-env"]);
+    assert!(
+        out.contains("Secrets command failed: exited with code 3"),
+        "{out}"
+    );
+    assert!(!out.contains("SECRET-VALUE"), "{out}");
+    assert_eq!(call_auth(&env), "Bearer rotated");
+
+    // A daemon whose command fails still starts; doctor and daemon.log say why.
+    run_ok(&env, &["daemon", "stop"]);
+    run_ok(&env, &["daemon", "start"]);
+    let doctor = doctor_json(&env);
+    let error = doctor["secrets_command"]["error"].as_str().unwrap();
+    assert!(error.starts_with("exited with code 3"), "{doctor}");
+    assert_eq!(credential(&doctor, "dyn_api")["is_set"], false);
+    let log = std::fs::read_to_string(env.tmp.path().join("state/daemon.log")).unwrap();
+    assert!(log.contains("failed: exited with code 3"), "{log}");
+    assert!(log.contains("dyn__api_API_KEY (dyn_api)"), "{log}");
+    assert!(!log.contains("SECRET-VALUE"), "{log}");
+
+    // An invalid settings.toml is reported instead of silently ignored.
+    std::fs::write(env.tmp.path().join("config/settings.toml"), "[secrets\n").unwrap();
+    let text = run_ok(&env, &["doctor"]);
+    assert!(text.contains("Settings          : NOT USED"), "{text}");
+
+    run_ok(&env, &["daemon", "stop"]);
 }
 
 /// `node` from `PATH`, linked into `<tmp>/My Tools (x86)/` (no parentheses on Unix, where the command

@@ -48,5 +48,6 @@ Next steps
 ----------
 
 operating.md (in this zip, and copied to %LOCALAPPDATA%\Programs\utcp) explains how
-to add tools and secrets. Online:
+to add tools and secrets. secret-source.ps1 is an example secrets command (operating.md,
+section 3): copy it elsewhere before you change it. Online:
 https://github.com/Faraclas/agent-misc/blob/main/utcp-rs/docs/operating.md

@@ -292,6 +292,25 @@ pub struct UtcpSettings {
     pub max_media_files: usize,
     #[serde(default = "default_media_ttl_mins")]
     pub media_ttl_mins: u64,
+    /// `[secrets]`: the command that prints the secrets registered manuals need.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretsSettings>,
+}
+
+/// `[secrets]` in `settings.toml`: a program utcp runs to get the secrets registered manuals need,
+/// so the secrets can stay wherever the user keeps them (see [`crate::secrets`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretsSettings {
+    /// The program and its arguments, one list item each (no shell). A leading `~` is the home
+    /// folder. utcp appends the variable names it wants as further arguments.
+    pub command: Vec<String>,
+    /// Seconds the command may run before utcp stops it.
+    #[serde(default = "default_secrets_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_secrets_timeout_secs() -> u64 {
+    10
 }
 
 fn default_true() -> bool {
@@ -314,18 +333,27 @@ impl Default for UtcpSettings {
             media_dir: None,
             max_media_files: default_max_media_files(),
             media_ttl_mins: default_media_ttl_mins(),
+            secrets: None,
         }
     }
 }
 
 impl UtcpSettings {
+    /// The settings in `path`; the defaults when the file is missing or invalid (see
+    /// [`Self::load_checked`] to tell an invalid file apart).
     pub fn load_from_file(path: &Path) -> Self {
-        if let Ok(raw) = fs::read_to_string(path) {
-            if let Ok(parsed) = toml::from_str::<Self>(&raw) {
-                return parsed;
-            }
-        }
-        Self::default()
+        Self::load_checked(path).unwrap_or_default()
+    }
+
+    /// Like [`Self::load_from_file`], but an unreadable or invalid file is an error. A missing file
+    /// gives the defaults.
+    pub fn load_checked(path: &Path) -> Result<Self> {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
+        };
+        toml::from_str::<Self>(&raw).with_context(|| format!("Invalid {}", path.display()))
     }
 
     pub fn load(paths: &UtcpPaths) -> Self {
@@ -336,5 +364,32 @@ impl UtcpSettings {
         paths.ensure_dirs()?;
         let serialized = toml::to_string_pretty(self)?;
         write_atomic(&paths.settings_file, serialized.as_bytes())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::UtcpPaths;
+    use std::path::Path;
+
+    /// Paths with every folder under `base` (`config/`, `cache/`, `state/`, `media/`).
+    pub(crate) fn paths_in(base: &Path) -> UtcpPaths {
+        UtcpPaths {
+            config_dir: base.join("config"),
+            cache_dir: base.join("cache"),
+            state_dir: base.join("state"),
+            media_dir: base.join("media"),
+            config_file: base.join("config/.utcp_config.json"),
+            settings_file: base.join("config/settings.toml"),
+            env_file: base.join("config/.env"),
+            lock_file: base.join("config/.utcp.lock"),
+            manuals_dir: base.join("cache/manuals"),
+            search_index_file: base.join("cache/search_index.bin"),
+            logging_sentinel: base.join("state/logging.enabled"),
+            activity_log_file: base.join("state/activity.jsonl"),
+            activity_log_bak: base.join("state/activity.jsonl.bak"),
+            socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
+            daemon_pid_file: base.join("state/daemon.pid"),
+        }
     }
 }

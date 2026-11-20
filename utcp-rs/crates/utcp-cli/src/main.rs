@@ -258,7 +258,8 @@ enum Commands {
         #[command(subcommand)]
         action: MediaAction,
     },
-    /// Check daemon status, config paths, index freshness, `.env` credentials, media spool, and IDE skills
+    /// Check daemon status, config paths, index freshness, credentials (and where each comes from),
+    /// the `[secrets]` command, `settings.toml`, media spool, and IDE skills
     Doctor {
         /// Output raw JSON
         #[arg(long)]
@@ -306,7 +307,8 @@ enum DaemonAction {
         idle_timeout: Option<u64>,
     },
     /// Push the variables registered manuals use from the current shell into the running `utcp daemon`
-    /// without restarting (all other variables are ignored)
+    /// without restarting (all other variables are ignored). The daemon also re-reads its own
+    /// environment and `.env`, and runs the `[secrets]` command again
     ReloadEnv,
     /// List the local MCP servers (`import-mcp --command` manuals) the daemon runs: state, pid,
     /// uptime and restart count
@@ -765,6 +767,15 @@ fn run_cli() -> Result<()> {
                             info.media_spool.total_bytes,
                             if info.logging_enabled { "ON" } else { "OFF" }
                         );
+                        if let Some(s) = &info.secrets_command {
+                            match &s.error {
+                                Some(error) => println!("Secrets cmd  : FAILED: {error}"),
+                                None => println!(
+                                    "Secrets cmd  : OK ({} names printed)",
+                                    s.provided.len()
+                                ),
+                            }
+                        }
                     }
                 } else if json {
                     let log = utcp_core::daemon_log::daemon_log_file(&paths);
@@ -798,11 +809,20 @@ fn run_cli() -> Result<()> {
                 Ok(())
             }
             DaemonAction::ReloadEnv => match sync_caller_env_to_daemon(&paths)? {
-                Some(total) => {
+                Some(summary) => {
                     println!(
                         "Synchronized the variables registered manuals use from this shell into the running utcp daemon ({} held; all others ignored).",
-                        total
+                        summary.total_vars
                     );
+                    if let Some(s) = summary.secrets_command {
+                        match s.error {
+                            Some(error) => println!("Secrets command failed: {error}"),
+                            None => println!(
+                                "Secrets command re-run: printed {} of the wanted names.",
+                                s.provided.len()
+                            ),
+                        }
+                    }
                     Ok(())
                 }
                 None => Err(anyhow!(
@@ -1194,8 +1214,14 @@ fn run_cli() -> Result<()> {
 
         Commands::Doctor { json } => {
             let d_info = query_daemon_status(&paths);
-            let report =
+            let mut report =
                 build_doctor_report(&paths, d_info.is_some(), d_info.as_ref().map(|d| d.pid))?;
+            // A running daemon resolves every call, so its view of the credentials is the one that
+            // matters (this shell's may differ).
+            if let Some(info) = &d_info {
+                report.credentials = info.credentials.clone();
+                report.secrets_command = info.secrets_command.clone();
+            }
             let media_spool = inspect_media_spool(&paths);
             let cwd = std::env::current_dir().ok();
             let skills = inspect_skill_targets(&paths, true, cwd.as_deref());
@@ -1253,15 +1279,39 @@ fn run_cli() -> Result<()> {
                 }
             );
 
+            if let Some(error) = &report.settings_error {
+                println!("Settings          : NOT USED, the defaults apply: {error}");
+            }
+            if let Some(s) = &report.secrets_command {
+                match &s.error {
+                    Some(error) => println!("Secrets Command   : FAILED: {error}\n                    `{}`", s.command),
+                    None => println!(
+                        "Secrets Command   : OK, printed {} of the wanted names\n                    `{}`",
+                        s.provided.len(),
+                        s.command
+                    ),
+                }
+            }
+
             if !report.credentials.is_empty() {
-                println!("\nCredentials (env + {}):", paths.env_file.display());
+                if d_info.is_some() {
+                    println!("\nCredentials (as the running daemon sees them):");
+                } else {
+                    println!(
+                        "\nCredentials (secrets command, environment, {}):",
+                        paths.env_file.display()
+                    );
+                }
                 for c in &report.credentials {
                     if c.is_set {
+                        let via = c.resolved_via.as_deref().unwrap_or(&c.env_var);
+                        let via = match &c.source {
+                            Some(source) => format!("{via}, from {source}"),
+                            None => via.to_string(),
+                        };
                         println!(
                             "  [SET]     {:<24} (manual: {}, via {})",
-                            c.env_var,
-                            c.manual,
-                            c.resolved_via.as_deref().unwrap_or(&c.env_var)
+                            c.env_var, c.manual, via
                         );
                     } else {
                         println!("  [MISSING] {:<24} (manual: {})", c.env_var, c.manual);
