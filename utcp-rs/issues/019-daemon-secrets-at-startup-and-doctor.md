@@ -5,7 +5,8 @@
   `crates/utcp-core/src/catalog.rs`, `crates/utcp-core/src/ipc.rs`, `crates/utcp-core/src/daemon_log.rs`,
   `crates/utcp-cli/src/main.rs`, `crates/utcp-cli/src/daemon.rs`, `crates/utcp-cli/src/tui/mod.rs`,
   `examples/secret-source.sh`, `examples/secret-source.ps1`
-- **Local Status:** Fixed in `utcp-rs` 0.1.1
+- **Local Status:** Fixed in `utcp-rs` 0.1.1; the Windows example's case-insensitive allowlist (below) fixed after
+  0.1.1
 - **Upstream Issue / PR:** Not applicable
 
 ## How It Was Found
@@ -60,3 +61,17 @@ in a shell file that `~/.bashrc` sources. systemd never reads `.bashrc`, so the 
   `daemon.log` say why), and `doctor` reporting an invalid `settings.toml`.
 - `spec_fetch_resolves_header_placeholders` step 5: `register` asks the command for the placeholders of a manual not
   yet in the index.
+
+## Follow-Up: Windows Example Matched Names in Any Case
+
+Found on a Windows test machine after 0.1.1: `doctor` said the command "printed 2 of the wanted names" for a single
+`github` manual that needs only `GITHUB_TOKEN`. utcp also asks for alias spellings of each variable (here
+`github_TOKEN`, from `secret_var_candidates`). `examples/secret-source.ps1` checked its allowlist with `-notcontains`,
+which ignores case, so `github_TOKEN` passed as `GITHUB_TOKEN`; Windows environment lookups ignore case too, so the
+value was printed under both names. Harmless for one manual, but a different manual whose variable is a case variant
+of an allowlisted name would receive that secret, which defeats the allowlist. The bash example compares exactly and
+was not affected.
+
+**Fix:** the example uses `-cnotcontains` (exact case). Checked in Windows PowerShell 5.1 and PowerShell 7: only the
+exact name passes, `github_TOKEN` and `Github_Token` are skipped, and the script still parses. On the test machine
+the count dropped to 1 and `github` calls still authenticated.

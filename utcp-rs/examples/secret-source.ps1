@@ -28,7 +28,9 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } c
 Import-Module Microsoft.PowerShell.SecretManagement
 
 foreach ($name in $Names) {
-    if ($Allow -notcontains $name) { continue }
+    # Exact case: PowerShell and Windows ignore case by default, so `github_TOKEN` (an alias utcp
+    # also asks for) would match `GITHUB_TOKEN` and get its value.
+    if ($Allow -cnotcontains $name) { continue }
     try { $value = Get-Secret -Name $name -AsPlainText -ErrorAction Stop } catch { continue }
     if ($value) {
         [Console]::Out.Write("$name=$value`n")
