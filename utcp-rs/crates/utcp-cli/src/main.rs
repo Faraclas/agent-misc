@@ -771,7 +771,7 @@ fn run_cli() -> Result<()> {
                             match &s.error {
                                 Some(error) => println!("Secrets cmd  : FAILED: {error}"),
                                 None => println!(
-                                    "Secrets cmd  : OK ({} names printed)",
+                                    "Secrets cmd  : OK, printed {} of the wanted names",
                                     s.provided.len()
                                 ),
                             }

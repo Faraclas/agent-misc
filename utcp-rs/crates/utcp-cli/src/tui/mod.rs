@@ -3753,7 +3753,7 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
                     None => "not configured ([secrets] in settings.toml)".to_string(),
                     Some(s) => match &s.error {
                         Some(error) => format!("FAILED: {error}"),
-                        None => format!("OK ({} names printed)", s.provided.len()),
+                        None => format!("OK, printed {} of the wanted names", s.provided.len()),
                     },
                 }
             )),
