@@ -33,6 +33,12 @@ scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not
    `src/bodies.rs` (a test enforces this), and `write-test` gets a step that sends every field of that body and checks
    the answer shows it; a write tool without a step is reported as not run. DELETE and HEAD are never generated.
 6. **Request-side fixes** borrowed from Microsoft's `vsts-api-patcher` (MIT) are credited in `NOTICE`.
+7. **HTTP behaves like utcp's.** This crate uses `ureq` (blocking, no async runtime) while utcp uses `reqwest` on
+   tokio; that is deliberate, a short-lived CLI does not need tokio. The two libraries have different defaults, so
+   check network behavior against utcp's whenever `src/http.rs` or the `ureq` features change: trusted CAs come from
+   the system store (`platform-verifier`, so a CA installed for TLS inspection works), proxies come from
+   `HTTPS_PROXY`/`ALL_PROXY` and the Windows system proxy is read by neither. Change both projects together, or say
+   why they differ.
 
 ## Testing
 
