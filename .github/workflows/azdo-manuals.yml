@@ -1,4 +1,4 @@
-name: azdo-manuals CI
+name: azdo-manuals CI & Release
 
 on:
   push:
@@ -11,36 +11,112 @@ on:
     paths:
       - "azdo-manuals/**"
       - ".github/workflows/azdo-manuals.yml"
+  # Releases are made only from here: Actions > "azdo-manuals CI & Release" > Run workflow on main, with "release"
+  # ticked (or `gh workflow run azdo-manuals.yml --ref main -f release=true`). The version comes from Cargo.toml.
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub Release for the version in azdo-manuals/Cargo.toml (main only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  # Offline tests only: hand-made specs in, exact manuals out. CI never contacts the archive or Azure DevOps.
-  test:
-    name: Offline tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    defaults:
-      run:
-        shell: bash
-        working-directory: azdo-manuals
+  # Reads the version from Cargo.toml. On a release run it refuses before the long builds start when the run is
+  # not on main or the version is not newer than every released one.
+  version:
+    name: Version check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Read version from Cargo.toml
+        id: read
+        working-directory: azdo-manuals
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "azdo-manuals") | .version')"
+          [ -n "$version" ] || { echo "::error::Could not read the version from azdo-manuals/Cargo.toml"; exit 1; }
+          echo "azdo-manuals version in Cargo.toml: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check that this version can be released
+        if: github.event_name == 'workflow_dispatch' && inputs.release
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          refuse() {
+            echo "::error title=Release refused::$1"
+            printf '### Release refused\n\n%s\n\nNothing was built or published.\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          how="To release your changes, raise version in azdo-manuals/Cargo.toml (for example 0.1.0 -> 0.1.1),"
+          how="$how push it to main, then run the release again."
+          [ "$GITHUB_REF" = "refs/heads/main" ] ||
+            refuse "Releases are made from main only, and this run is on ${GITHUB_REF#refs/heads/}. Run it on main."
+          released="$(git ls-remote --tags --refs origin 'refs/tags/azdo-manuals-v*' \
+            | sed 's|.*refs/tags/azdo-manuals-v||')"
+          if printf '%s\n' "$released" | grep -qxF "$VERSION"; then
+            refuse "azdo-manuals $VERSION is already released (tag azdo-manuals-v$VERSION exists). $how"
+          fi
+          latest="$(printf '%s\n' "$released" | sed '/^$/d' | sort -V | tail -n 1)"
+          highest="$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n 1)"
+          if [ -n "$latest" ] && [ "$highest" != "$VERSION" ]; then
+            refuse "azdo-manuals $VERSION in Cargo.toml is lower than the latest release, $latest. $how"
+          fi
+          echo "Releasing azdo-manuals $VERSION (latest release: ${latest:-none})."
+
+  # Offline tests only: hand-made specs in, exact manuals out. CI never contacts the archive or Azure DevOps.
+  build-and-test:
+    name: Build & Test (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Runs the tests on Linux. Its glibc binary is not published: the static musl one runs on any distribution.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            test: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            test: false
+            archive: azdo-manuals-x86_64-unknown-linux-musl.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            test: true
+            archive: azdo-manuals-x86_64-pc-windows-msvc.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.x"
+          targets: ${{ matrix.target }}
+          components: ${{ matrix.test && 'clippy, rustfmt' || '' }}
+
+      # `ring` (TLS) compiles C code; for the musl target that needs `musl-gcc`.
+      - name: Install musl C toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: azdo-manuals
+          key: ${{ matrix.target }}
 
       # The load test registers the expected manuals in a throwaway utcp, using the latest utcp-rs release.
       - name: Download the latest utcp release (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.test && runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -57,5 +133,104 @@ jobs:
           echo "UTCP_BIN=$bin" >> "$GITHUB_ENV"
           echo "REQUIRE_UTCP=1" >> "$GITHUB_ENV"
 
+      # Runs on Linux and Windows, so code behind cfg(windows) is linted too.
+      - name: Check formatting and lints
+        if: matrix.test
+        working-directory: azdo-manuals
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+
       - name: Run tests
-        run: python -m unittest discover -s tests -v
+        if: matrix.test
+        working-directory: azdo-manuals
+        run: cargo test --locked
+
+      - name: Build release binary
+        if: matrix.archive
+        working-directory: azdo-manuals
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Linux release archive
+        if: matrix.archive && runner.os == 'Linux'
+        working-directory: azdo-manuals
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/azdo-manuals dist/azdo-manuals
+          file dist/azdo-manuals
+          file dist/azdo-manuals | grep -q 'static' || { echo "azdo-manuals is not statically linked"; exit 1; }
+          ./dist/azdo-manuals --version
+          cp README.md NOTICE ../LICENSE dist/
+          tar -C dist -czf ${{ matrix.archive }} azdo-manuals README.md NOTICE LICENSE
+
+      - name: Package Windows release archive
+        if: matrix.archive && runner.os == 'Windows'
+        working-directory: azdo-manuals
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\azdo-manuals.exe" "dist\azdo-manuals.exe"
+          & ".\dist\azdo-manuals.exe" --version
+          if ($LASTEXITCODE) { throw 'azdo-manuals.exe --version failed' }
+          Copy-Item "README.md", "NOTICE", "..\LICENSE" "dist\"
+          Compress-Archive -Path "dist\azdo-manuals.exe", "dist\README.md", "dist\NOTICE", "dist\LICENSE" `
+            -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload build artifact
+        if: matrix.archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}
+          path: azdo-manuals/${{ matrix.archive }}
+
+  # Only this job can write to the repository, and only after every build and test passed. It creates the tag
+  # azdo-manuals-v<version> on the commit that was built, together with the GitHub Release.
+  release:
+    name: Publish GitHub Release
+    needs: [version, build-and-test]
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: azdo-manuals-release
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Guards against a Cargo.toml version that the built binary does not report.
+      - name: Check that the binary reports the release version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p check
+          tar -xzf dist/azdo-manuals-x86_64-unknown-linux-musl.tar.gz -C check azdo-manuals
+          built="$(./check/azdo-manuals --version | awk '{print $2}')"
+          echo "Cargo.toml: $VERSION, binary: $built"
+          [ "$built" = "$VERSION" ] || {
+            echo "::error::The built binary reports $built, but azdo-manuals/Cargo.toml says $VERSION"
+            exit 1
+          }
+
+      # The version job checked this before the builds; check again in case another release run won meanwhile.
+      - name: Check that the tag is still free
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/azdo-manuals-v$VERSION" --silent 2>/dev/null; then
+            echo "::error title=Release refused::azdo-manuals $VERSION was released by another run meanwhile."
+            exit 1
+          fi
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: azdo-manuals-v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: azdo-manuals ${{ needs.version.outputs.version }}
+          files: dist/*
+          fail_on_unmatched_files: true

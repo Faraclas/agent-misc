@@ -6,12 +6,28 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
 - **Source:** Microsoft's own API specs (Swagger 2.0), REST API version 7.1. Their GitHub repository
   (`MicrosoftDocs/vsts-rest-api-specs`) no longer exists, so the generator downloads the files from the
   [Software Heritage](https://www.softwareheritage.org/) archive of it (revision of 2026-09-02, "Update REST API specs
-  from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json). Nothing from
-  Microsoft is stored in this repository.
-- **Output:** six manuals for one organization, a `scopes.md` listing the personal access token (PAT) scopes the
-  manuals need, and a `report.json` (tools, sizes, and every operation left out with the reason).
-- **Requirements:** Python 3.9 or newer, standard library only. Network access to `archive.softwareheritage.org` for
-  the first run; later runs use the cache.
+  from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json), which is built
+  into the binary. Nothing from Microsoft is stored in this repository.
+- **Output:** six manuals for one organization (375 tools), a `scopes.md` listing the personal access token (PAT)
+  scopes the manuals need, and a `report.json` (tools, sizes, and every operation left out with the reason).
+- **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` for the first run
+  (about 30 seconds, 21 downloads); later runs use the cache and take well under a second.
+
+## Installation
+
+- **Linux (x86_64):** the project's GitHub Releases (tags `azdo-manuals-v*`) have
+  `azdo-manuals-x86_64-unknown-linux-musl.tar.gz`, a static binary that runs on any distribution, provided as-is.
+  Copy `azdo-manuals` to `~/.local/bin/`.
+- **Windows:** the release zip `azdo-manuals-x86_64-pc-windows-msvc.zip` holds `azdo-manuals.exe`. Put it in a folder
+  on your `PATH`, for example next to `utcp.exe` in `%LOCALAPPDATA%\Programs\utcp`.
+- **From source:**
+
+  ```sh
+  cd azdo-manuals
+  cargo build --release
+  cargo test
+  install -Dm755 target/release/azdo-manuals ~/.local/bin/azdo-manuals
+  ```
 
 ## The manuals
 
@@ -39,31 +55,35 @@ Left out on purpose:
 - `profile`: its one operation runs on `app.vssps.visualstudio.com`, outside the organization, and refuses a PAT
   scoped to one organization.
 - Eight reads that Azure DevOps allows only with a write-level scope (deployment groups and targets, environments),
-  so the PAT can stay read-only. `ALLOW_WRITE_SCOPES` in `config.py` brings them back.
+  so the PAT can stay read-only. `allow_write_scopes` in `src/config.rs` brings them back.
+- Three test-results reads whose spec lists no scope and which a PAT with every read scope cannot call.
 
 `report.json` lists every operation left out, with the reason.
 
 ## Usage
 
 ```sh
-cd azdo-manuals
-python3 -m azdo_manuals generate --org <your-org> --out ~/private/azdo-manuals
+azdo-manuals generate --org <your-org> --register
 ```
 
-`--org` is the name in `https://dev.azure.com/<your-org>`. The manuals contain it in every URL, so keep the output
-folder private (not in a public repository). The downloaded specs are cached in `~/.cache/azdo-manuals`
-(`%LOCALAPPDATA%\azdo-manuals\cache` on Windows); `--cache` picks another folder.
+`--org` is the name in `https://dev.azure.com/<your-org>`. This writes the manuals to a private folder,
+`~/.local/share/azdo-manuals/<your-org>` (`%LOCALAPPDATA%\azdo-manuals\manuals\<your-org>` on Windows; `--out` picks
+another), and registers each one with utcp under its name and hint. Run the same command again to refresh them, for
+example after upgrading azdo-manuals. Without `--register` it only writes the files.
 
-Then create a PAT with the scopes listed in `scopes.md`, make it available to utcp as `AZURE_DEVOPS_EXT_PAT` (see the
-secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md)), and register the manuals:
+The manuals contain the organization name in every URL, so keep them private (never in a public repository). The
+downloaded specs are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache` on Windows); `--cache`
+picks another folder.
+
+Then create a PAT with the scopes listed in `scopes.md` and make it available to utcp as `AZURE_DEVOPS_EXT_PAT` (see
+the secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md)):
 
 ```sh
-utcp register azdo_git ~/private/azdo-manuals/azdo_git.utcp.json --hint 'Azure DevOps repos and PRs'
 utcp search 'pull request reviewers'
 utcp call azdo_git.get_pull_requests '{"project": "MyProject", "repositoryId": "my-repo"}'
 ```
 
-utcp keeps its own copy of each registered manual. Keep the output folder if you want to re-register later.
+To register by hand instead: `utcp register azdo_git <folder>/azdo_git.utcp.json --hint 'Azure DevOps repos and PRs'`.
 
 The manuals authenticate with HTTP basic auth: user name `pat` (Azure DevOps ignores it, utcp needs one) and the PAT
 as the password, which is how Azure DevOps expects PATs.
@@ -72,14 +92,16 @@ as the password, which is how Azure DevOps expects PATs.
 
 - **Tool names** come from the method name in Microsoft's own client library, in snake case (`GetTeamDaysOff` ->
   `get_team_days_off`), else from the operation id. When two operations in one manual would get the same name, both
-  get their area as a prefix (`build_get_folders`, `release_get_folders`). `config.NAMES` sets a name by hand.
+  get their area as a prefix (`build_get_folders`, `release_get_folders`). `names` in `src/config.rs` sets a name by
+  hand.
 - **URLs** use the host each spec names (for example `vsrm.dev.azure.com` for releases, `vssps.dev.azure.com` for
   graph, `vstmr.dev.azure.com` for test results) and carry the `api-version` each operation needs, including
   previews such as `7.1-preview.1`.
 - **Path parameters** are required. The optional `team` segment of the WIQL routes is left out, since utcp cannot
   drop a segment per call; board and iteration tools keep `team`.
-- **Spec corrections:** `config.REQUIRED_PARAMS` marks parameters the spec calls optional but the service requires,
-  and `config.SKIP_GETS` drops operations that no longer work. Both were found by the live read test.
+- **Spec corrections:** `required_params` in `src/config.rs` marks parameters the spec calls optional but the service
+  requires, and `skip_gets` drops operations that no longer work or that a read-only PAT cannot call. Both were found
+  by the live checks below.
 - **Request bodies** have their references and inheritance inlined up to three levels, without read-only fields.
 - **Responses** pass through as Azure DevOps sends them; use `utcp call --fields` to keep only what you need. A few
   responses can be large in a big organization (several MB for work item types or all project tags), and utcp
@@ -94,22 +116,23 @@ sizes, never the token.
 
 ```sh
 # Every tool's URL must match a route the organization lists, at a version it supports.
-python3 -m azdo_manuals check-routes --org <your-org> --manuals ~/private/azdo-manuals
+azdo-manuals check-routes --org <your-org> --manuals <folder>
 # Call every read tool through utcp, taking ids from earlier responses (needs utcp on PATH or --utcp).
-python3 -m azdo_manuals read-test --manuals ~/private/azdo-manuals --project <project> \
-  --seed repositoryId=<repo-with-pull-requests>
+azdo-manuals read-test --manuals <folder> --project <project> --seed repositoryId=<repo-with-pull-requests>
 ```
 
-`read-test` writes `readtest.json` next to the manuals with every call's status, size and arguments; it contains
+`read-test` uses its own throwaway utcp configuration, so it neither needs nor changes your registered manuals. It
+writes `readtest.json` next to the manuals with every call's status, size and arguments; that file contains
 organization data, so keep it as private as the manuals. Tools it found no ids for are listed as not exercised.
 
 ## Maintainers
 
-- `config.py` holds the grouping and every inclusion decision.
-- `python3 -m azdo_manuals pins` records the file hashes of an archive revision in `pins.json`. It costs about 40 of
-  the archive's 120 requests per hour and continues where it stopped if it runs out.
-- Tests: `python3 -m unittest discover -s tests -v` (offline; set `UTCP_BIN` to also load the manuals in utcp).
-- Rules for changes: [`AGENTS.md`](./AGENTS.md).
+- `src/config.rs` holds the grouping and every inclusion decision.
+- `azdo-manuals pins --pins pins.json` (run in this folder) records the file hashes of an archive revision. It costs
+  about 40 of the archive's 120 requests per hour and continues where it stopped if it runs out. The binary embeds
+  `pins.json`, so rebuild after changing it.
+- Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary to also load the manuals in utcp).
+- Rules for changes and releases: [`AGENTS.md`](./AGENTS.md).
 
 ## License
 

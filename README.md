@@ -47,7 +47,7 @@ reach Azure DevOps through `utcp` instead of an MCP server.
   Heritage archive and checked against pinned git hashes. Nothing from Microsoft is stored in this repository.
 - **Least privilege:** reads first (all GETs plus read-only queries and searches); writes only after they pass in a
   sandbox organization; never DELETE. A scope report lists exactly the PAT scopes the generated tools need.
-- **Python 3 standard library only**, offline tests in CI.
+- **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
 
 Docs: [README](./azdo-manuals/README.md), [contributor rules](./azdo-manuals/AGENTS.md).
 
