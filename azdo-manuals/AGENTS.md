@@ -46,6 +46,8 @@ scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not
   `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary to
   include the load test; CI uses the latest `utcp-rs` release on Linux and sets `REQUIRE_UTCP=1` so a missing binary
   fails instead of skipping.
+- On a machine without the source tree (for example a Windows test machine), copy the compiled test binary with
+  `tests/fixtures/` and set `AZDO_TEST_FIXTURES` to that copy.
 - Live checks against a real organization are run by hand: `check-routes` (every tool's URL against the
   organization's route list) and `read-test` (every read tool called through utcp) are read-only. `write-test` (every
   write tool, in a throwaway project it creates and deletes) is for the sandbox organization only. Their output

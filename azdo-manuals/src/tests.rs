@@ -3,6 +3,8 @@
 //! Set UPDATE_EXPECTED=1 to rewrite tests/fixtures/expected/ after an intended change (then review the diff).
 //! The utcp load test runs the `utcp` from UTCP_BIN, else from PATH, and is skipped when there is none (CI sets
 //! REQUIRE_UTCP=1 on Linux to make it fail instead).
+//! AZDO_TEST_FIXTURES points the compiled test binary at a copy of tests/fixtures/, so it can run on a machine
+//! without the source tree (a Windows test machine).
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -29,6 +31,9 @@ use crate::text::{one_line, snake, write_json};
 const ORG: &str = "contoso";
 
 fn fixtures() -> PathBuf {
+    if let Some(dir) = std::env::var_os("AZDO_TEST_FIXTURES") {
+        return PathBuf::from(dir);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
