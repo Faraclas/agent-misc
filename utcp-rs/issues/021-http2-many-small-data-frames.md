@@ -35,8 +35,13 @@ through `build_secure_http_client`).
 
 ## Tests
 
-- `http2_client_reads_a_body_of_many_tiny_data_frames`: a local `h2` server streams 20,000 one-byte DATA frames.
-  With the old setting it failed with the same `GoAway(b"too_many_data_frames", ENHANCE_YOUR_CALM)`; with the fix
-  the whole body arrives (5 runs in a row). `h2` and `http` are dev-dependencies, already in `Cargo.lock` through
-  `reqwest`.
+- `http2_client_reads_a_body_of_many_tiny_data_frames`: a local `h2` server streams 10,000 one-byte DATA frames.
+  With the old setting it fails with the same `GoAway(b"too_many_data_frames", ENHANCE_YOUR_CALM)`; with the fix
+  the whole body arrives. `h2` and `http` are dev-dependencies, already in `Cargo.lock` through `reqwest`.
+  - The first version sent 20,000 frames. Each unread frame under 256 bytes costs 256 minus its length, so that was
+    about 5.1 MB, over the new 4 MiB limit if nothing is read during the burst. It passed on Linux because the reader
+    kept up, and failed every time on a Windows test machine, where the whole burst arrived first. 10,000 frames (about
+    2.55 MB) fit the new limit with no reads at all and are still about 78 times the old limit. Checked: fails with
+    the old setting, passes 10/10 on Linux and 10/10 on Windows.
+  - Real traffic is far below the limit: the response above had 260 small frames, at most about 66 KB.
 - The Azure DevOps read test that found it was re-run with the fixed binary.

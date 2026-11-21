@@ -299,9 +299,13 @@ mod tests {
     /// Azure DevOps sends large responses as thousands of DATA frames, many of them tiny. h2 (0.4.17+) caps how
     /// many small frames may wait unread, at half the connection window; with the adaptive window that starts at
     /// 64 KiB, a burst ended the connection ("too_many_data_frames"). Issue 021.
+    ///
+    /// Each unread frame under 256 bytes costs 256 minus its length, so 10,000 one-byte frames cost about 2.55 MB:
+    /// over the old 32 KB limit (about 128 frames), within the new 4 MiB one even if nothing is read before the
+    /// burst ends. 20,000 frames (5.1 MB) passed on Linux only because the reader kept up, and failed on Windows.
     #[tokio::test]
     async fn http2_client_reads_a_body_of_many_tiny_data_frames() {
-        const FRAMES: usize = 20_000;
+        const FRAMES: usize = 10_000;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
