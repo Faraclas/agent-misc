@@ -36,3 +36,4 @@ Maintaining one document per issue serves two purposes:
 | [018](./018-pre-publish-review-fixes.md) | Pre-publish review: hung `cli` tools not stopped, `sprintf` UTF-8 panic, WebRTC client, `serde_yml`, unit leaks `.env`, media folder ownership, MCP `refresh`, `import -o`, caller names | `0.3.2` | Fixed in `utcp-rs` | Not filed yet |
 | [019](./019-daemon-secrets-at-startup-and-doctor.md) | Daemon has no secrets after a reboot (new secrets command), `doctor` checks the caller instead of the daemon, no startup warnings | none | Fixed in `utcp-rs` 0.1.1 | Not applicable |
 | [020](./020-windows-bare-command-names-miss-cmd-launchers.md) | Windows: a bare `--command` name (`npx`, `az`) misses `.cmd` launchers on `PATH` | none | Fixed in `utcp-rs` 0.1.3 | Not applicable |
+| [021](./021-http2-many-small-data-frames.md) | Large HTTP/2 responses sent in many small frames fail with "too_many_data_frames" | none (`h2` guard) | Fixed in `utcp-rs` 0.1.3 | Not applicable |

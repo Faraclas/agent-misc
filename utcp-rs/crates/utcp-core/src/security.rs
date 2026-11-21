@@ -215,20 +215,35 @@ pub fn build_secure_http_client() -> reqwest::Client {
         attempt.follow()
     });
 
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(concat!("utcp-rs/", env!("CARGO_PKG_VERSION")))
         .redirect(redirect_policy)
         .timeout(std::time::Duration::from_secs(60))
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
-        .gzip(true)
-        .http2_adaptive_window(true)
+        .gzip(true);
+    http2_settings(builder)
+        .build()
+        .expect("Failed to build secure rustls HTTP client")
+}
+
+/// HTTP/2 settings of the shared client, separate so tests can use them over plain TCP.
+///
+/// Fixed windows instead of `http2_adaptive_window`: h2 lets at most half the connection window's worth of small
+/// DATA frames wait unread, and the adaptive window starts at 64 KiB, so a server sending many tiny frames (Azure
+/// DevOps does) had the connection closed with "too_many_data_frames" (issue 021). 8 MiB keeps that limit, now at
+/// 4 MiB, and lets a response up to the 10 MB cap arrive in a few round trips.
+const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
+const HTTP2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+
+fn http2_settings(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+        .http2_initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+        .http2_initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .http2_keep_alive_interval(Some(std::time::Duration::from_secs(10)))
         .http2_keep_alive_timeout(std::time::Duration::from_secs(20))
         .http2_keep_alive_while_idle(true)
-        .build()
-        .expect("Failed to build secure rustls HTTP client")
 }
 
 /// Validates the size of input data to prevent DoS attacks.
@@ -280,6 +295,45 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Azure DevOps sends large responses as thousands of DATA frames, many of them tiny. h2 (0.4.17+) caps how
+    /// many small frames may wait unread, at half the connection window; with the adaptive window that starts at
+    /// 64 KiB, a burst ended the connection ("too_many_data_frames"). Issue 021.
+    #[tokio::test]
+    async fn http2_client_reads_a_body_of_many_tiny_data_frames() {
+        const FRAMES: usize = 20_000;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut conn = h2::server::handshake(socket).await.unwrap();
+            while let Some(Ok((_request, mut respond))) = conn.accept().await {
+                let mut send = respond
+                    .send_response(http::Response::new(()), false)
+                    .unwrap();
+                tokio::spawn(async move {
+                    for _ in 0..FRAMES {
+                        send.send_data(bytes::Bytes::from_static(b"x"), false)
+                            .unwrap();
+                    }
+                    send.send_data(bytes::Bytes::new(), true).unwrap();
+                });
+            }
+        });
+
+        let client = http2_settings(reqwest::Client::builder().http2_prior_knowledge())
+            .build()
+            .unwrap();
+        let body = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .expect("the whole body arrives");
+        assert_eq!(body.len(), FRAMES);
+    }
 
     #[test]
     fn test_validate_command_rejects_dangerous_chars() {

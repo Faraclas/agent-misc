@@ -3862,6 +3862,8 @@ dependencies = [
  "eventsource-stream",
  "fs2",
  "futures",
+ "h2 0.4.20",
+ "http 1.5.0",
  "libc",
  "notify",
  "once_cell",
