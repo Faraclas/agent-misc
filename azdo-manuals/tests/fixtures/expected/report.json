@@ -18,6 +18,7 @@
       ],
       "tools": 10,
       "reads": 9,
+      "writes": 1,
       "bytes": 6417,
       "approx_tokens": 1604,
       "scopes": [

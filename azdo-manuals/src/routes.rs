@@ -39,6 +39,7 @@ pub fn fetch_routes(
             ("Accept".into(), "application/json".into()),
             ("User-Agent".into(), USER_AGENT.into()),
         ],
+        body: None,
     };
     let resp = transport(&req).map_err(|e| format!("OPTIONS {base}/_apis failed: {e}"))?;
     if !(200..300).contains(&resp.status) {

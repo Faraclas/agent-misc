@@ -7,6 +7,8 @@ pub struct Request {
     pub method: &'static str,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Sent with POST, PUT and PATCH (empty when `None`); ignored for other methods.
+    pub body: Option<Vec<u8>>,
 }
 
 pub struct Response {
@@ -32,6 +34,16 @@ pub type Transport = Box<dyn FnMut(&Request) -> Result<Response, String>>;
 /// Responses can be several MB (spec files, route lists); this only guards against a runaway body.
 const BODY_LIMIT: u64 = 256 * 1024 * 1024;
 
+fn with_headers<B>(
+    mut builder: ureq::RequestBuilder<B>,
+    headers: &[(String, String)],
+) -> ureq::RequestBuilder<B> {
+    for (k, v) in headers {
+        builder = builder.header(k, v);
+    }
+    builder
+}
+
 pub fn ureq_transport() -> Transport {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
@@ -39,14 +51,17 @@ pub fn ureq_transport() -> Transport {
         .build()
         .into();
     Box::new(move |req: &Request| {
-        let mut builder = match req.method {
-            "OPTIONS" => agent.options(&req.url),
-            _ => agent.get(&req.url),
+        let (url, h) = (&req.url, &req.headers);
+        let body = req.body.as_deref().unwrap_or(&[]);
+        let sent = match req.method {
+            "OPTIONS" => with_headers(agent.options(url), h).call(),
+            "DELETE" => with_headers(agent.delete(url), h).call(),
+            "POST" => with_headers(agent.post(url), h).send(body),
+            "PUT" => with_headers(agent.put(url), h).send(body),
+            "PATCH" => with_headers(agent.patch(url), h).send(body),
+            _ => with_headers(agent.get(url), h).call(),
         };
-        for (k, v) in &req.headers {
-            builder = builder.header(k, v);
-        }
-        let mut resp = builder.call().map_err(|e| e.to_string())?;
+        let mut resp = sent.map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()

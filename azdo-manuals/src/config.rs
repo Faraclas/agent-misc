@@ -2,10 +2,12 @@
 //!
 //! Area names are the folder names under `specification/` in Microsoft's spec repository. Every GET of an included
 //! area becomes a tool unless it is listed in `skip_gets` or returns only binary content. Other methods are included
-//! only when listed in `post_reads` (POSTs that only read, such as queries and searches) or `writes` (phase B).
-//! DELETE and HEAD are never included.
+//! only when listed in `post_reads` (POSTs that only read, such as queries and searches) or `writes`. DELETE and HEAD
+//! are never included.
 
 use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
 
 pub const API_VERSION: &str = "7.1";
 pub const ARCHIVE_REVISION: &str = "c7e66d986b369dce462d04c02288a6c26c155002";
@@ -24,7 +26,7 @@ pub struct Config {
     pub manuals: Vec<ManualConf>,
     /// operationId values, per area. POSTs whose only effect is to return data.
     pub post_reads: HashMap<String, Vec<String>>,
-    /// Phase B: chosen writes, each tested in the sandbox organization before it is listed here.
+    /// Writes, each tested in a sandbox organization with `write-test` before it is listed here.
     pub writes: HashMap<String, Vec<String>>,
     /// Some reads accept only a write-level scope (Azure DevOps has no read scope for deployment groups or
     /// environments). Those reads are left out so the PAT can stay read-only, unless their scope is listed here.
@@ -40,6 +42,8 @@ pub struct Config {
     /// area. utcp cannot leave a segment out per call (an unfilled `{team}` stays in the URL), so each is either
     /// always required or always dropped.
     pub drop_optional_path_params: HashMap<String, HashSet<String>>,
+    /// Request body schemas that replace the spec's, per area and operationId (see `bodies.rs`).
+    pub body_overrides: HashMap<String, HashMap<String, Value>>,
 }
 
 pub fn manual(name: &str, areas: &[&str], title: &str, hint: &str) -> ManualConf {
@@ -78,6 +82,62 @@ impl Config {
             .iter()
             .flat_map(|m| m.areas.iter().cloned())
             .collect()
+    }
+
+    /// Leave out every write, for a read-only PAT.
+    pub fn read_only(mut self) -> Config {
+        self.writes.clear();
+        self
+    }
+
+    /// Every operationId the configuration names, as (setting, area, operationId).
+    pub fn named_operations(&self) -> Vec<(&'static str, &str, &str)> {
+        let mut out = Vec::new();
+        for (setting, map) in [("post_reads", &self.post_reads), ("writes", &self.writes)] {
+            for (area, ops) in map {
+                out.extend(ops.iter().map(|op| (setting, area.as_str(), op.as_str())));
+            }
+        }
+        let keyed = [
+            (
+                "skip_gets",
+                self.skip_gets
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect::<Vec<_>>()))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "required_params",
+                self.required_params
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect()))
+                    .collect(),
+            ),
+            (
+                "names",
+                self.names
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect()))
+                    .collect(),
+            ),
+            (
+                "body_overrides",
+                self.body_overrides
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect()))
+                    .collect(),
+            ),
+        ];
+        for (setting, areas) in keyed {
+            for (area, ops) in areas {
+                out.extend(
+                    ops.into_iter()
+                        .map(|op| (setting, area.as_str(), op.as_str())),
+                );
+            }
+        }
+        out.sort();
+        out
     }
 
     pub fn real() -> Config {
@@ -145,7 +205,24 @@ impl Config {
                 ),
                 ("graph", &["Subject Lookup_Lookup Subjects", "Subject Query_Query"]),
             ]),
-            writes: HashMap::new(),
+            // What an agent needs for code review and tracking: open and update PRs, comment on, reply to and
+            // resolve their threads, create and update work items, queue and cancel builds. Pushing code goes
+            // through `git push`, not the REST API.
+            writes: list_map(&[
+                (
+                    "git",
+                    &[
+                        "Pull Requests_Create",
+                        "Pull Requests_Update",
+                        "Pull Request Threads_Create",
+                        "Pull Request Threads_Update",
+                        "Pull Request Thread Comments_Create",
+                        "Pull Request Thread Comments_Update",
+                    ],
+                ),
+                ("wit", &["Work Items_Create", "Work Items_Update"]),
+                ("build", &["Builds_Queue", "Builds_Update Build"]),
+            ]),
             allow_write_scopes: HashSet::new(),
             skip_gets: nested(&[
                 (
@@ -183,6 +260,7 @@ impl Config {
             // In `wit`, `team` only matters for team-relative WIQL macros such as @CurrentIteration; in `work`
             // (boards, iterations, capacity) it selects the team, so it stays.
             drop_optional_path_params: HashMap::from([("wit".to_string(), HashSet::from(["team".to_string()]))]),
+            body_overrides: crate::bodies::real(),
         }
     }
 }

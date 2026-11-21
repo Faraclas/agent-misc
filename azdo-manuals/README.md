@@ -8,8 +8,9 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
   [Software Heritage](https://www.softwareheritage.org/) archive of it (revision of 2026-09-02, "Update REST API specs
   from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json), which is built
   into the binary. Nothing from Microsoft is stored in this repository.
-- **Output:** six manuals for one organization (375 tools), a `scopes.md` listing the personal access token (PAT)
-  scopes the manuals need, and a `report.json` (tools, sizes, and every operation left out with the reason).
+- **Output:** six manuals for one organization (385 tools: 375 reads, 10 writes), a `scopes.md` listing the personal
+  access token (PAT) scopes the manuals need, and a `report.json` (tools, sizes, and every operation left out with the
+  reason).
 - **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` for the first run
   (about 30 seconds, 21 downloads); later runs use the cache and take well under a second.
 
@@ -44,8 +45,23 @@ What a manual contains:
 
 - Every GET of its areas, except the few that return only binary content (zip files, images).
 - POSTs that only read: WIQL queries, batch reads, code, wiki and work item search, graph subject lookups.
-- No writes yet. A short list of writes (create and update work items and pull requests, pull request comments,
-  queue a build) comes after each has been tested in a sandbox organization. DELETE is never generated.
+- Ten writes, each tested in a sandbox organization with `write-test` (below):
+
+  | Manual | Tool | What it does |
+  | --- | --- | --- |
+  | `azdo_git` | `create_pull_request` | Open a pull request (draft, reviewers, labels, linked work items) |
+  | `azdo_git` | `update_pull_request` | Edit, publish a draft, abandon, reactivate, auto-complete, complete |
+  | `azdo_git` | `create_thread` | New comment thread, general or on lines of a file |
+  | `azdo_git` | `create_comment` | Reply in a thread |
+  | `azdo_git` | `update_comment` | Edit a comment |
+  | `azdo_git` | `update_thread` | Resolve (fixed, closed, ...) or reopen a thread |
+  | `azdo_work` | `create_work_item` | New work item (JSON Patch: fields, links) |
+  | `azdo_work` | `update_work_item` | Change fields and links, with optional optimistic locking on `rev` |
+  | `azdo_pipelines` | `queue_build` | Run a pipeline on a branch or commit, with runtime parameters |
+  | `azdo_pipelines` | `update_build` | Cancel a build, or rerun its failed jobs |
+
+  Pushing code is left to `git push`. DELETE is never generated. `generate --read-only` leaves the writes out, for
+  a read-only PAT.
 
 Left out on purpose:
 
@@ -55,7 +71,7 @@ Left out on purpose:
 - `profile`: its one operation runs on `app.vssps.visualstudio.com`, outside the organization, and refuses a PAT
   scoped to one organization.
 - Eight reads that Azure DevOps allows only with a write-level scope (deployment groups and targets, environments),
-  so the PAT can stay read-only. `allow_write_scopes` in `src/config.rs` brings them back.
+  so the PAT needs no more than the writes above. `allow_write_scopes` in `src/config.rs` brings them back.
 - Three test-results reads whose spec lists no scope and which a PAT with every read scope cannot call.
 
 `report.json` lists every operation left out, with the reason.
@@ -103,16 +119,22 @@ as the password, which is how Azure DevOps expects PATs.
   requires, and `skip_gets` drops operations that no longer work or that a read-only PAT cannot call. Both were found
   by the live checks below.
 - **Request bodies** have their references and inheritance inlined up to three levels, without read-only fields.
+  The writes are the exception: the specs describe their bodies with the full response type (35 properties for a
+  pull request, 45 for a build, mostly set by the service), and the work item body as an object although it is a
+  JSON Patch array. `src/bodies.rs` gives each write a short schema with only the fields the service accepts. Fields
+  the service refuses are left out, such as `keepForever` on a build (deprecated in favor of retention leases).
 - **Responses** pass through as Azure DevOps sends them; use `utcp call --fields` to keep only what you need. A few
   responses can be large in a big organization (several MB for work item types or all project tags), and utcp
   refuses responses over 10 MB.
 - **PAT scopes:** an operation that lists several scopes accepts any one of them, so the report picks a small set
-  that covers every tool, preferring read scopes.
+  that covers every tool, preferring read scopes. With the writes this is `vso.code_write`, `vso.work_write` and
+  `vso.build_execute` ("Code: Read & write", "Work Items: Read & write", "Build: Read & execute") plus read scopes.
+  Pull request threads and comments need no separate "Pull Request Threads" scope: `vso.code_write` covers them.
 
 ## Checking the manuals against a real organization
 
 Both checks are read-only and take the PAT from `AZURE_DEVOPS_EXT_PAT`. They print tool names, status codes and
-sizes, never the token.
+sizes, never the token. `read-test` skips the write tools.
 
 ```sh
 # Every tool's URL must match a route the organization lists, at a version it supports.
@@ -125,9 +147,31 @@ azdo-manuals read-test --manuals <folder> --project <project> --seed repositoryI
 writes `readtest.json` next to the manuals with every call's status, size and arguments; that file contains
 organization data, so keep it as private as the manuals. Tools it found no ids for are listed as not exercised.
 
+### Write test (sandbox organization only)
+
+`write-test` calls every write tool through utcp in a throwaway project. Run it only in a free organization of your
+own, never in a work organization: it creates a project and deletes every project whose name starts with
+`azdo-manuals-test-` (leftovers of earlier runs), so it refuses to start without `--create-and-delete-projects`.
+
+```sh
+azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-delete-projects
+```
+
+- **PAT:** the scopes in `scopes.md`, plus "Project and Team: Read, write, & manage" to create and delete the
+  project.
+- **Fixtures**, made with direct REST calls: the project `azdo-manuals-test-<UTC time>`, a repository with `main`
+  and two feature branches, and a YAML pipeline on the self-hosted `Default` pool. A new organization has no agents
+  in that pool, so queued builds wait and can be cancelled without using build minutes.
+- **Checks:** each write's answer must show what was sent (a field the service ignores fails the test), and the
+  effects that happen later (auto-complete, completion, cancellation) are polled for. A write tool the test did not
+  call is reported as not run.
+- **Output:** tool names and statuses; `writetest.json` next to the manuals holds the arguments and answers. The
+  project is deleted at the end (Azure DevOps keeps deleted projects restorable for 28 days).
+
 ## Maintainers
 
-- `src/config.rs` holds the grouping and every inclusion decision.
+- `src/config.rs` holds the grouping and every inclusion decision; `src/bodies.rs` the write bodies. `generate`
+  refuses a configuration that names an operation the specs do not have.
 - `azdo-manuals pins --pins pins.json` (run in this folder) records the file hashes of an archive revision. It costs
   about 40 of the archive's 120 requests per hour and continues where it stopped if it runs out. The binary embeds
   `pins.json`, so rebuild after changing it.

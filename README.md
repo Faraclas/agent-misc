@@ -45,8 +45,10 @@ reach Azure DevOps through `utcp` instead of an MCP server.
 
 - **Verified source:** the specs' GitHub repository is gone, so they are downloaded on demand from the Software
   Heritage archive and checked against pinned git hashes. Nothing from Microsoft is stored in this repository.
-- **Least privilege:** reads first (all GETs plus read-only queries and searches); writes only after they pass in a
-  sandbox organization; never DELETE. A scope report lists exactly the PAT scopes the generated tools need.
+- **Least privilege:** all reads (GETs plus read-only queries and searches) and ten writes an agent needs for code
+  review and tracking (pull requests, comment threads, work items, builds), each tested live in a sandbox
+  organization; never DELETE; `--read-only` drops the writes. A scope report lists exactly the PAT scopes the
+  generated tools need.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
 
 Docs: [README](./azdo-manuals/README.md), [contributor rules](./azdo-manuals/AGENTS.md).

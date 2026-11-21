@@ -15,6 +15,7 @@ use crate::http::ureq_transport;
 use crate::readtest::{self, ReadTest};
 use crate::routes;
 use crate::text::{write_atomic, write_json};
+use crate::writetest::{self, WriteTest};
 
 const PAT_VAR: &str = generate::PAT_VAR;
 
@@ -37,6 +38,9 @@ enum Cmd {
     CheckRoutes(CheckRoutesArgs),
     /// Call every read tool through utcp, chaining ids (read-only; PAT from AZURE_DEVOPS_EXT_PAT)
     ReadTest(ReadTestArgs),
+    /// Maintainers, sandbox organization only: call every write tool through utcp in a throwaway project (PAT from
+    /// AZURE_DEVOPS_EXT_PAT)
+    WriteTest(WriteTestArgs),
 }
 
 #[derive(Args)]
@@ -57,6 +61,9 @@ struct GenerateArgs {
     /// utcp binary for --register [default: utcp on PATH]
     #[arg(long)]
     utcp: Option<PathBuf>,
+    /// Leave out the write tools (pull requests, comments, work items, builds), for a read-only PAT
+    #[arg(long)]
+    read_only: bool,
     #[arg(long, hide = true)]
     pins: Option<PathBuf>,
 }
@@ -106,6 +113,22 @@ struct ReadTestArgs {
     utcp: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct WriteTestArgs {
+    /// A sandbox organization of your own, never a work organization
+    #[arg(long)]
+    org: String,
+    /// Folder written by generate (without --read-only)
+    #[arg(long)]
+    manuals: PathBuf,
+    /// Required: the test creates a project and deletes every project named azdo-manuals-test-*
+    #[arg(long)]
+    create_and_delete_projects: bool,
+    /// utcp binary [default: utcp on PATH]
+    #[arg(long)]
+    utcp: Option<PathBuf>,
+}
+
 /// A failure reported as `azdo-manuals: <message>` with the given exit code.
 struct Fail(i32, String);
 
@@ -132,6 +155,7 @@ pub fn main() -> i32 {
         Cmd::Pins(a) => cmd_pins(a),
         Cmd::CheckRoutes(a) => cmd_check_routes(a),
         Cmd::ReadTest(a) => cmd_read_test(a),
+        Cmd::WriteTest(a) => cmd_write_test(a),
     };
     match result {
         Ok(code) => code,
@@ -239,7 +263,11 @@ fn find_utcp(given: Option<PathBuf>) -> Result<PathBuf, Fail> {
 }
 
 fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
-    let conf = Config::real();
+    let conf = if args.read_only {
+        Config::real().read_only()
+    } else {
+        Config::real()
+    };
     if !generate::valid_org(&args.org) {
         return Err(Fail(
             1,
@@ -464,5 +492,70 @@ fn cmd_read_test(args: ReadTestArgs) -> Result<i32, Fail> {
     let failed = results
         .values()
         .any(|r| !matches!(r["status"].as_str(), Some("ok" | "not exercised")));
+    Ok(if failed { 1 } else { 0 })
+}
+
+fn cmd_write_test(args: WriteTestArgs) -> Result<i32, Fail> {
+    if !args.create_and_delete_projects {
+        return Err(Fail(
+            2,
+            format!(
+                "write-test creates a project in '{}' and deletes every project named {}*; run it only in a sandbox \
+                 organization of your own, with --create-and-delete-projects",
+                args.org,
+                writetest::PROJECT_PREFIX
+            ),
+        ));
+    }
+    if !generate::valid_org(&args.org) {
+        return Err(Fail(
+            1,
+            format!(
+                "'{}' is not a valid Azure DevOps organization name",
+                args.org
+            ),
+        ));
+    }
+    let pat = require_pat()?;
+    let utcp = find_utcp(args.utcp)?;
+    let manuals: Vec<(String, Value)> = read_manuals(&args.manuals)?.into_iter().collect();
+    let writes = manuals
+        .iter()
+        .flat_map(|(_, m)| m["tools"].as_array().cloned().unwrap_or_default())
+        .filter(|t| !readtest::is_read(t))
+        .count();
+    if writes == 0 {
+        return Err(Fail(
+            2,
+            format!(
+                "no write tools in {} (generated with --read-only?)",
+                args.manuals.display()
+            ),
+        ));
+    }
+    let name = format!(
+        "{}{}",
+        writetest::PROJECT_PREFIX,
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    );
+    let mut test = WriteTest::new(utcp, manuals, ureq_transport(), &args.org, &pat)
+        .map_err(|e| Fail(1, format!("temporary folder: {e}")))?;
+    test.register(&args.manuals).map_err(|e| Fail(1, e))?;
+    let results = test
+        .run(&name)
+        .map_err(|e| Fail(1, format!("setup failed: {e}")))?;
+    drop(test);
+    let path = args.manuals.join("writetest.json");
+    write_json(&path, &Value::Object(results.clone())).map_err(io_fail(&path))?;
+    let counts: Vec<String> = readtest::summary(&results)
+        .iter()
+        .map(|(k, n)| format!("{n} {k}"))
+        .collect();
+    println!("Results: {}", counts.join(", "));
+    println!(
+        "Details (contains organization data, keep private): {}",
+        path.display()
+    );
+    let failed = results.values().any(|r| r["status"] != "ok");
     Ok(if failed { 1 } else { 0 })
 }

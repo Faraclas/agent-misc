@@ -11,17 +11,16 @@
 //! the values used, since they come from the organization.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use crate::text::{py_str, py_strip};
+use crate::text::py_str;
+use crate::utcp::Utcp;
 
 /// Sample bodies for the read-only POSTs, by tool name. Strings `@tool:path` are taken from an earlier response.
 static POST_BODIES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
@@ -150,7 +149,6 @@ const ID_KEYS: [&str; 6] = ["id", "name", "descriptor", "key", "objectId", "orig
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^}]+)\}").unwrap());
 static REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{@([a-z0-9_]+):([^}]*)\}").unwrap());
 static WHOLE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@([a-z0-9_]+):(.*)$").unwrap());
-static STATUS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"status:? ([0-9]{3})").unwrap());
 
 pub fn template_of(tool: &Value) -> String {
     let url = tool["tool_call_template"]["url"].as_str().unwrap_or("");
@@ -272,15 +270,20 @@ fn properties(tool: &Value) -> &Map<String, Value> {
     tool["inputs"]["properties"].as_object().unwrap_or(&EMPTY)
 }
 
+/// Whether the read test calls this tool: every GET, and the read-only POSTs that have a sample body.
+pub fn is_read(tool: &Value) -> bool {
+    tool["tool_call_template"]["http_method"] == "GET"
+        || POST_BODIES.contains_key(tool["name"].as_str().unwrap_or(""))
+}
+
 pub struct ReadTest {
-    utcp: PathBuf,
+    utcp: Utcp,
     manuals: IndexMap<String, Value>,
     /// normalized list-URL template -> first item of its response
     pub items: HashMap<String, Value>,
     /// tool name -> first successful response; "seed" -> the seeds
     responses: HashMap<String, Value>,
     results: Map<String, Value>,
-    tmp: tempfile::TempDir,
     pub delay: Duration,
     pub log: Box<dyn FnMut(&str)>,
 }
@@ -291,16 +294,12 @@ impl ReadTest {
         manuals: IndexMap<String, Value>,
         seeds: Map<String, Value>,
     ) -> std::io::Result<Self> {
-        let tmp = tempfile::Builder::new()
-            .prefix("azdo-readtest-")
-            .tempdir()?;
         Ok(ReadTest {
-            utcp,
+            utcp: Utcp::new(utcp, "azdo-readtest-")?,
             manuals,
             items: HashMap::new(),
             responses: HashMap::from([("seed".to_string(), Value::Object(seeds))]),
             results: Map::new(),
-            tmp,
             delay: Duration::from_millis(100),
             log: Box::new(|line| println!("{line}")),
         })
@@ -318,45 +317,8 @@ impl ReadTest {
         }
     }
 
-    fn run_utcp(
-        &self,
-        args: &[&str],
-        stdin: Option<&str>,
-    ) -> std::io::Result<std::process::Output> {
-        let mut cmd = Command::new(&self.utcp);
-        cmd.args(args).arg("--direct");
-        for name in ["config", "cache", "state"] {
-            cmd.env(
-                format!("UTCP_{}_DIR", name.to_uppercase()),
-                self.tmp.path().join(name),
-            );
-        }
-        cmd.stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            pipe.write_all(text.as_bytes())?;
-        }
-        child.wait_with_output()
-    }
-
     pub fn register(&self, folder: &Path) -> Result<(), String> {
-        for name in self.manuals.keys() {
-            let file = folder.join(format!("{name}.utcp.json"));
-            let out = self
-                .run_utcp(&["register", name, &file.to_string_lossy()], None)
-                .map_err(|e| format!("cannot run {}: {e}", self.utcp.display()))?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let msg: String = py_strip(&stderr).chars().take(300).collect();
-                return Err(format!("utcp register {name} failed: {msg}"));
-            }
-        }
-        Ok(())
+        self.utcp.register(folder, self.manuals.keys())
     }
 
     /// A value for `param` from the seeds or SOURCES; `Ok(None)` when there is no rule. With `general = false` only
@@ -473,43 +435,10 @@ impl ReadTest {
         tool: &Value,
         args: &Map<String, Value>,
     ) -> (Map<String, Value>, Option<Value>) {
-        let start = Instant::now();
-        let target = format!("{manual}.{}", tool["name"].as_str().unwrap_or(""));
-        let stdin = serde_json::to_string(args).expect("JSON values always serialize");
-        let out = self.run_utcp(&["call", &target, "--args-stdin"], Some(&stdin));
-        let seconds = (start.elapsed().as_secs_f64() * 100.0).round() / 100.0;
-        let mut result = Map::new();
-        match out {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let text = py_strip(&stdout);
-                let data = serde_json::from_str(text).unwrap_or_else(|_| json!(text));
-                result.insert("status".into(), json!("ok"));
-                result.insert("bytes".into(), json!(text.len()));
-                result.insert("seconds".into(), json!(seconds));
-                (result, Some(data))
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let status = STATUS.captures(&stderr).map(|m| format!("http {}", &m[1]));
-                result.insert(
-                    "status".into(),
-                    json!(status.unwrap_or_else(|| "error".into())),
-                );
-                result.insert("seconds".into(), json!(seconds));
-                result.insert(
-                    "error".into(),
-                    json!(py_strip(&stderr).chars().take(500).collect::<String>()),
-                );
-                (result, None)
-            }
-            Err(e) => {
-                result.insert("status".into(), json!("error"));
-                result.insert("seconds".into(), json!(seconds));
-                result.insert("error".into(), json!(format!("cannot run utcp: {e}")));
-                (result, None)
-            }
-        }
+        let called = self
+            .utcp
+            .call(manual, tool["name"].as_str().unwrap_or(""), args);
+        (called.result, called.data)
     }
 
     pub fn run(&mut self) -> Map<String, Value> {
@@ -517,8 +446,7 @@ impl ReadTest {
         for (m, manual) in &self.manuals {
             for t in manual["tools"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                 let name = t["name"].as_str().unwrap_or("");
-                if t["tool_call_template"]["http_method"] == "GET" || POST_BODIES.contains_key(name)
-                {
+                if is_read(t) {
                     pending.push((m.clone(), t.clone()));
                 } else {
                     self.results.insert(

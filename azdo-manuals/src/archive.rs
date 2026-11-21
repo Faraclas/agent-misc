@@ -125,6 +125,7 @@ impl Archive {
             method: "GET",
             url: format!("{}{path}", self.api),
             headers: vec![("User-Agent".into(), USER_AGENT.into())],
+            body: None,
         };
         let resp = (self.transport)(&req)
             .map_err(|e| ArchiveError(format!("cannot reach the archive ({e})")))?;

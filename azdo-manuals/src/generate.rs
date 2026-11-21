@@ -445,8 +445,19 @@ fn build_tool(
         match place {
             Some("body") => {
                 body_field = true;
-                let mut schema = body_schema(spec, p.get("schema").unwrap_or(&json!({})), 0, &[])?;
-                if truthy(p.get("description")) {
+                let replaced = conf.body_overrides.get(area).and_then(|m| m.get(op_id));
+                let mut schema = match replaced {
+                    Some(Value::Object(s)) => s.clone(),
+                    Some(_) => {
+                        return err(format!(
+                            "{area}/{op_id}: body_overrides entry is not an object"
+                        ))
+                    }
+                    None => body_schema(spec, p.get("schema").unwrap_or(&json!({})), 0, &[])?,
+                };
+                if truthy(p.get("description"))
+                    && !(replaced.is_some() && schema.contains_key("description"))
+                {
                     schema.insert(
                         "description".into(),
                         json!(one_line_default(str_of(p, "description"))),
@@ -717,6 +728,43 @@ pub fn minimal_scopes(scopes: &BTreeSet<String>) -> Vec<String> {
     out
 }
 
+/// Every operationId the configuration names must exist in its area, so a typo cannot silently drop a tool.
+/// Areas without a spec are skipped. A body override must name an operation that takes a body.
+fn check_config_names(specs: &Specs, conf: &Config) -> Result<()> {
+    for (setting, area, op_id) in conf.named_operations() {
+        let Some(files) = specs.get(area) else {
+            continue;
+        };
+        let found = files.iter().find_map(|spec| {
+            iter_operations(spec)
+                .into_iter()
+                .find(|o| str_of(o.op, "operationId") == op_id)
+                .map(|o| (spec, o))
+        });
+        let Some((spec, o)) = found else {
+            return err(format!(
+                "config {setting} names {area}/{op_id}, which the specs do not have"
+            ));
+        };
+        if setting == "body_overrides" {
+            let mut has_body = false;
+            for p in o.shared.iter().chain(array_of(o.op, "parameters")) {
+                let p = match p.get("$ref").and_then(Value::as_str) {
+                    Some(r) => resolve_ref(spec, r)?.1,
+                    None => p,
+                };
+                has_body |= str_of(p, "in") == "body";
+            }
+            if !has_body {
+                return err(format!(
+                    "config body_overrides names {area}/{op_id}, which takes no body"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Returns ({manual name: manual}, report).
 pub fn generate(
     specs: &Specs,
@@ -730,6 +778,7 @@ pub fn generate(
             "'{org}' is not a valid Azure DevOps organization name"
         ));
     }
+    check_config_names(specs, conf)?;
     let mut manuals = IndexMap::new();
     let mut report_manuals = Map::new();
     let mut left_out = Vec::new();
@@ -808,6 +857,10 @@ pub fn generate(
                     || in_list(&conf.post_reads, &e.area, &e.operation_id)
             })
             .count();
+        let writes = entries
+            .iter()
+            .filter(|e| in_list(&conf.writes, &e.area, &e.operation_id))
+            .count();
         let mut without_scope: Vec<&String> = entries
             .iter()
             .filter(|e| e.scopes.is_empty())
@@ -822,6 +875,7 @@ pub fn generate(
                 "areas_without_spec": missing,
                 "tools": entries.len(),
                 "reads": reads,
+                "writes": writes,
                 "bytes": text.len(),
                 "approx_tokens": text.len() / 4,
                 "scopes": scopes,

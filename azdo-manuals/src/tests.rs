@@ -69,6 +69,7 @@ fn test_config() -> Config {
             "alpha".to_string(),
             HashSet::from(["team".to_string()]),
         )]),
+        body_overrides: HashMap::new(),
     }
 }
 
@@ -261,6 +262,162 @@ fn body_schema() {
         level2,
         &json!({"type": "object", "description": "Too deep to inline."})
     );
+}
+
+#[test]
+fn body_overrides() {
+    let mut conf = test_config();
+    let schema =
+        json!({"type": "object", "required": ["wiql"], "properties": {"wiql": {"type": "string"}}});
+    let mut described = schema.clone();
+    described["description"] = json!("Ours.");
+    conf.body_overrides = nested(&[(
+        "alpha",
+        &[
+            ("Query_Run Query", schema.clone()),
+            ("Widgets_Create", described.clone()),
+        ],
+    )]);
+    let (manuals, _) = run_generate_with(&conf);
+    let tools = tools_by_name(&manuals);
+    // Without a description of its own, the override takes the body parameter's ("The query.").
+    let mut want = schema;
+    want["description"] = json!("The query.");
+    assert_eq!(tools["run_query"]["inputs"]["properties"]["body"], want);
+    assert_eq!(
+        tools["create_widget"]["inputs"]["properties"]["body"],
+        described
+    );
+    assert_eq!(
+        tools["create_widget"]["tool_call_template"]["body_field"],
+        "body"
+    );
+}
+
+#[test]
+fn config_must_name_real_operations() {
+    let generate_err = |conf: &Config| {
+        generate(&load_fixture_specs(), ORG, "7.1", &source(), conf)
+            .unwrap_err()
+            .0
+    };
+    let mut conf = test_config();
+    conf.writes = list_map(&[("alpha", &["Widgets_Craete"])]);
+    assert_eq!(
+        generate_err(&conf),
+        "config writes names alpha/Widgets_Craete, which the specs do not have"
+    );
+    let mut conf = test_config();
+    conf.names = nested(&[("beta", &[("Nope_List", "x".to_string())])]);
+    assert!(generate_err(&conf).contains("beta/Nope_List"));
+    let mut conf = test_config();
+    conf.body_overrides = nested(&[("alpha", &[("Widgets_Get", json!({"type": "object"}))])]);
+    assert_eq!(
+        generate_err(&conf),
+        "config body_overrides names alpha/Widgets_Get, which takes no body"
+    );
+    // An area without a spec (gamma) is not checked: its spec may be missing at the pinned API version.
+    let mut conf = test_config();
+    conf.writes = list_map(&[("gamma", &["Anything_Create"])]);
+    run_generate_with(&conf);
+}
+
+#[test]
+fn read_only_leaves_out_writes() {
+    let (manuals, report) = run_generate();
+    assert!(tools_by_name(&manuals).contains_key("create_widget"));
+    assert_eq!(report["manuals"]["t_main"]["writes"], 1);
+    let (manuals, report) = run_generate_with(&test_config().read_only());
+    assert!(!tools_by_name(&manuals).contains_key("create_widget"));
+    assert_eq!(report["manuals"]["t_main"]["writes"], 0);
+    assert!(left_out_reasons(&report).contains(&(
+        "Widgets_Create".to_string(),
+        "write not selected".to_string()
+    )));
+    let scopes: Vec<&str> = report["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["scope"].as_str().unwrap())
+        .collect();
+    assert_eq!(scopes, ["vso.alpha", "vso.beta"]);
+}
+
+#[test]
+fn real_writes_have_short_bodies() {
+    let conf = Config::real();
+    let writes: BTreeSet<(String, String)> = conf
+        .writes
+        .iter()
+        .flat_map(|(a, ops)| ops.iter().map(move |o| (a.clone(), o.clone())))
+        .collect();
+    let overridden: BTreeSet<(String, String)> = conf
+        .body_overrides
+        .iter()
+        .flat_map(|(a, ops)| ops.keys().map(move |o| (a.clone(), o.clone())))
+        .collect();
+    assert_eq!(
+        writes, overridden,
+        "every write has a hand-written body, and only writes do"
+    );
+    for ((area, op), schema) in conf
+        .body_overrides
+        .iter()
+        .flat_map(|(a, ops)| ops.iter().map(move |(o, s)| ((a, o), s)))
+    {
+        let kind = schema["type"].as_str().unwrap_or("");
+        assert!(kind == "object" || kind == "array", "{area}/{op}");
+        assert!(
+            schema.get("properties").is_some() || schema.get("items").is_some(),
+            "{area}/{op}"
+        );
+        assert!(schema.to_string().len() < 4000, "{area}/{op} is not short");
+    }
+    let named = conf.named_operations();
+    assert!(named.contains(&("writes", "git", "Pull Requests_Create")));
+    assert!(named.contains(&("body_overrides", "wit", "Work Items_Update")));
+}
+
+#[test]
+fn write_test_checks() {
+    use crate::writetest::{check, is_test_project, lookup, Want};
+    let data = json!({"status": "active", "comments": [{"content": "x"}], "result": null});
+    assert_eq!(lookup(&data, "comments.0.content"), Some(&json!("x")));
+    assert_eq!(lookup(&data, "comments.1.content"), None);
+    assert_eq!(lookup(&data, "status.0"), None);
+    let item = json!({"fields": {"System.Title": "t", "System": {"Other": 1}}});
+    assert_eq!(lookup(&item, "fields.System.Title"), Some(&json!("t")));
+    assert_eq!(lookup(&item, "fields.System.Other"), Some(&json!(1)));
+    assert_eq!(lookup(&item, "fields.System.Missing"), None);
+    let expect = [
+        ("status", Want::Is(json!("active"))),
+        ("comments.0.content", Want::Is(json!("x"))),
+        ("missing", Want::Absent),
+        ("result", Want::Absent),
+        ("result", Want::OneOf(vec![Value::Null, json!("canceled")])),
+        (
+            "status",
+            Want::OneOf(vec![json!("active"), json!("completed")]),
+        ),
+    ];
+    assert!(check(&data, &expect).is_empty());
+    let expect = [
+        ("status", Want::Is(json!("closed"))),
+        ("isDraft", Want::Is(json!(false))),
+        ("comments.0.content", Want::Absent),
+    ];
+    assert_eq!(
+        check(&data, &expect),
+        [
+            ("status".to_string(), json!("active")),
+            ("isDraft".to_string(), Value::Null),
+            ("comments.0.content".to_string(), json!("x")),
+        ]
+    );
+    assert!(is_test_project("azdo-manuals-test-20261120-120000"));
+    assert!(!is_test_project("azdo-manuals-test-"));
+    assert!(!is_test_project("azdo-manuals"));
+    assert!(!is_test_project("my-azdo-manuals-test-1"));
 }
 
 #[test]
