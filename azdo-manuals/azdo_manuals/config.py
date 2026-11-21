@@ -76,6 +76,15 @@ SKIP_GETS = {
         # Answers 404 "This API is being tested for whether it can be deprecated in the future" (2026-11-20).
         "History_Get": "Microsoft is testing its deprecation (404)",
     },
+    "testResults": {
+        # The spec lists no scope for these. A PAT with all the read scopes the report lists answers 401, a full-access
+        # PAT answers 200 (2026-11-20), so a read-only PAT cannot use them.
+        "Settings_Get": "no scope in the spec; refused (401) by a PAT with every read scope",
+        "Resultsummarybypipeline_Query": "no scope in the spec; refused (401) by a PAT with every read scope",
+        "Resultsgroup Details_Test Results Group Details": (
+            "no scope in the spec; refused (401) by a PAT with every read scope"
+        ),
+    },
 }
 
 # Parameters the spec marks optional but the service requires (it answers 400 without them), per area and
