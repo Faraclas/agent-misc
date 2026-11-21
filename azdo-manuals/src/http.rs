@@ -45,7 +45,13 @@ fn with_headers<B>(
 }
 
 pub fn ureq_transport() -> Transport {
+    // Trust the operating system's certificate store, like utcp does, so a company root CA that IT installed
+    // (TLS inspection) is accepted. ureq's default is a built-in Mozilla list that ignores it.
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(tls)
         .timeout_global(Some(Duration::from_secs(60)))
         .http_status_as_error(false)
         .build()

@@ -17,7 +17,7 @@ regex = "1.13.2"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha1 = "0.11.0"
 tempfile = "3.27.0"
-ureq = "3.5.2"
+ureq = { version = "3.5.2", features = ["platform-verifier"] }
 
 [profile.release]
 lto = "thin"
