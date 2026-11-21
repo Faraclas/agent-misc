@@ -1,0 +1,79 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Beta", "version": "7.1" },
+  "host": "vsbeta.dev.azure.com",
+  "basePath": "/",
+  "schemes": ["https"],
+  "paths": {
+    "/{organization}/_apis/beta/widgets": {
+      "get": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_List",
+        "description": "Lists beta widgets.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version-preview.1" }
+        ],
+        "security": [{ "oauth2": ["vso.beta"] }]
+      }
+    },
+    "/_apis/beta/profiles/{id}": {
+      "get": {
+        "tags": ["Profiles"],
+        "operationId": "Profiles_Get",
+        "description": "Gets a profile.",
+        "parameters": [
+          { "in": "path", "name": "id", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.beta"] }]
+      }
+    },
+    "/{organization}/_apis/beta/threads": {
+      "get": {
+        "tags": ["Threads"],
+        "operationId": "Threads_List",
+        "description": "Lists threads; either scope works.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.beta", "vso.beta_full"] }]
+      }
+    },
+    "/{organization}/_apis/beta/pools": {
+      "get": {
+        "tags": ["Pools"],
+        "operationId": "Pools_List",
+        "description": "Lists pools; only a manage scope allows it.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.beta_manage"] }]
+      }
+    },
+    "/{organization}/_apis/beta/subjectquery": {
+      "post": {
+        "tags": ["Subject Query"],
+        "operationId": "Subject Query_Query",
+        "description": "Finds subjects.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "body", "name": "body", "required": true,
+            "schema": { "type": "object", "properties": { "query": { "type": "string" } } } },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.beta"] }]
+      }
+    }
+  },
+  "parameters": {
+    "api-Version": { "name": "api-version", "in": "query", "required": true, "type": "string" },
+    "api-Version-preview.1": { "name": "api-version", "in": "query", "required": true, "type": "string" }
+  },
+  "securityDefinitions": {
+    "oauth2": { "type": "oauth2", "scopes": { "vso.beta": "Read beta things.", "vso.beta_full": "Everything beta.",
+      "vso.beta_manage": "Manage beta things." } }
+  }
+}

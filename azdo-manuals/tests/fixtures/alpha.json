@@ -1,0 +1,197 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Alpha", "version": "7.1" },
+  "host": "dev.azure.com",
+  "basePath": "/",
+  "schemes": ["https"],
+  "paths": {
+    "/{organization}/{project}/_apis/alpha/widgets": {
+      "get": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_List",
+        "description": "Lists widgets\n   in a project.",
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "description": "Project ID or project name", "required": true,
+            "x-ms-required": false, "type": "string" },
+          { "in": "query", "name": "ids", "description": "Widget ids", "required": false, "type": "string",
+            "format": "array (int32)" },
+          { "in": "query", "name": "$top", "description": "Max results.", "required": false, "type": "integer",
+            "format": "int32" },
+          { "in": "query", "name": "kind", "required": false, "type": "string", "enum": ["round", "square"] },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      },
+      "post": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Create",
+        "description": "Creates a widget.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "body", "name": "body", "required": true, "schema": { "$ref": "#/definitions/Widget" } },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha_write"] }]
+      }
+    },
+    "/{organization}/{project}/_apis/alpha/widgets/{widgetId}": {
+      "get": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Get",
+        "x-ms-vss-method": "GetWidgetById",
+        "description": "Gets one widget.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "path", "name": "widgetId", "required": true, "type": "string", "format": "uuid" },
+          { "in": "header", "name": "X-Trace", "required": false, "type": "string" },
+          { "$ref": "#/parameters/api-Version-preview.2" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      },
+      "delete": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Delete",
+        "parameters": [{ "$ref": "#/parameters/api-Version" }],
+        "security": [{ "oauth2": ["vso.alpha_write"] }]
+      },
+      "head": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Exists",
+        "parameters": [{ "$ref": "#/parameters/api-Version" }],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    },
+    "/{organization}/{project}/{team}/_apis/alpha/query": {
+      "post": {
+        "tags": ["Query"],
+        "operationId": "Query_Run Query",
+        "description": "Runs a query.",
+        "consumes": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "path", "name": "team", "required": true, "x-ms-required": false, "type": "string" },
+          { "in": "body", "name": "body", "description": "The query.", "required": true,
+            "schema": { "$ref": "#/definitions/QueryRequest" } },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    },
+    "/{organization}/{project}/_apis/alpha/things/${type}": {
+      "get": {
+        "tags": ["Things"],
+        "operationId": "Things_Get Thing Template",
+        "description": "",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "path", "name": "type", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    },
+    "/{organization}/_apis/alpha/logs/{logId}": {
+      "get": {
+        "tags": ["Logs"],
+        "operationId": "Logs_Get",
+        "description": "Gets a log as text.",
+        "produces": ["text/plain"],
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "logId", "required": true, "type": "integer", "format": "int32" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    },
+    "/{organization}/_apis/alpha/archive": {
+      "get": {
+        "tags": ["Archive"],
+        "operationId": "Archive_Get Zip",
+        "produces": ["application/zip"],
+        "parameters": [{ "$ref": "#/parameters/api-Version" }],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    }
+  },
+  "x-ms-paths": {
+    "/{organization}/_apis/alpha/widgets?ids={ids}": {
+      "get": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Get Widgets Batch",
+        "description": "Gets widgets by id across projects.",
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "query", "name": "ids", "required": true, "type": "string", "format": "array (string)",
+            "description": "Comma-separated widget ids" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha"] }]
+      }
+    }
+  },
+  "definitions": {
+    "Widget": {
+      "description": "A widget.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer", "readOnly": true },
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "_links": { "type": "object" }
+      }
+    },
+    "QueryRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/definitions/QueryBase" }],
+      "properties": {
+        "text": { "description": "The query text.", "type": "string" },
+        "parent": { "$ref": "#/definitions/QueryRequest" },
+        "options": { "$ref": "#/definitions/Options" }
+      },
+      "required": ["text"]
+    },
+    "QueryBase": {
+      "type": "object",
+      "properties": {
+        "$top": { "description": "Max results.", "type": "integer", "format": "int32" }
+      }
+    },
+    "Options": {
+      "type": "object",
+      "properties": {
+        "level1": {
+          "type": "object",
+          "properties": {
+            "level2": { "$ref": "#/definitions/Deep" }
+          }
+        }
+      }
+    },
+    "Deep": {
+      "description": "Too deep to inline.",
+      "type": "object",
+      "properties": { "x": { "type": "string" } }
+    }
+  },
+  "parameters": {
+    "api-Version": { "name": "api-version", "in": "query", "required": true, "type": "string" },
+    "api-Version-preview.2": { "name": "api-version", "in": "query", "required": true, "type": "string" }
+  },
+  "securityDefinitions": {
+    "oauth2": {
+      "type": "oauth2",
+      "scopes": {
+        "vso.alpha": "Read alpha things.",
+        "vso.alpha_write": "Read and write alpha things."
+      }
+    }
+  },
+  "security": [{ "accessToken": [] }]
+}

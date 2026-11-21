@@ -37,6 +37,20 @@ Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/
 [issue log](./utcp-rs/issues/README.md) (upstream `rs-utcp` bugs and Windows fixes),
 [contributor rules](./utcp-rs/AGENTS.md).
 
+### [`azdo-manuals/`](./azdo-manuals/)
+
+A generator that turns Microsoft's Azure DevOps REST API specs (version 7.1) into six utcp HTTP manuals for one
+organization (repos and pull requests, work items, pipelines, tests, wiki and search, projects and users), so agents
+reach Azure DevOps through `utcp` instead of an MCP server.
+
+- **Verified source:** the specs' GitHub repository is gone, so they are downloaded on demand from the Software
+  Heritage archive and checked against pinned git hashes. Nothing from Microsoft is stored in this repository.
+- **Least privilege:** reads first (all GETs plus read-only queries and searches); writes only after they pass in a
+  sandbox organization; never DELETE. A scope report lists exactly the PAT scopes the generated tools need.
+- **Python 3 standard library only**, offline tests in CI.
+
+Docs: [README](./azdo-manuals/README.md), [contributor rules](./azdo-manuals/AGENTS.md).
+
 ## Contributing
 
 See [`AGENTS.md`](./AGENTS.md) for the repository layout rules; each project's own `AGENTS.md` has its specific rules.
@@ -45,4 +59,5 @@ See [`AGENTS.md`](./AGENTS.md) for the repository layout rules; each project's o
 
 This project is licensed under the [MIT License](./LICENSE). `utcp-rs/crates/utcp-core` is derived from
 [rs-utcp](https://github.com/universal-tool-calling-protocol/rs-utcp) 0.3.2 (`MIT OR Apache-2.0`); see
-[`utcp-rs/NOTICE`](./utcp-rs/NOTICE).
+[`utcp-rs/NOTICE`](./utcp-rs/NOTICE). `azdo-manuals` reads Microsoft's MIT-licensed API specs at run time; see
+[`azdo-manuals/NOTICE`](./azdo-manuals/NOTICE).

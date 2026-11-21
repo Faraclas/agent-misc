@@ -1,6 +1,15 @@
 # Rust target directory
 **/target/
 
+# Python caches
+__pycache__/
+*.pyc
+
+# azdo-manuals output: generated manuals name a real organization and are never committed
+azdo-manuals/out/
+azdo-manuals/**/*.utcp.json
+!azdo-manuals/tests/fixtures/expected/*.utcp.json
+
 # Local environment & secret files
 **/.env
 **/.env.*

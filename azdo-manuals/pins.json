@@ -1,0 +1,153 @@
+{
+  "revision": "c7e66d986b369dce462d04c02288a6c26c155002",
+  "revision_date": "2026-09-03T03:41:28+02:00",
+  "revision_message": "Update REST API specs from releases/M279 (#736)",
+  "specification_dir": "eb5a1ee87e2a2fe00bd29c737b8f12aa68693ac3",
+  "api_version": "7.1",
+  "areas": {
+    "wit": [
+      {
+        "file": "workItemTracking.json",
+        "sha1_git": "5e85b5e62f84785ded34f9f15cb759bc68d9eab4",
+        "length": 311301
+      }
+    ],
+    "release": [
+      {
+        "file": "release.json",
+        "sha1_git": "b2cddf6d2cff225d889dea753b4a080832733bca",
+        "length": 318227
+      }
+    ],
+    "git": [
+      {
+        "file": "git.json",
+        "sha1_git": "2daed662633fc64a0bfd0e7389485f0dab55f305",
+        "length": 530489
+      }
+    ],
+    "policy": [
+      {
+        "file": "policy.json",
+        "sha1_git": "a7889097775296f2cfc948227c0e242877c50f1d",
+        "length": 38415
+      }
+    ],
+    "work": [
+      {
+        "file": "work.json",
+        "sha1_git": "cbe3af39bf8dbdcfa28d19dc1b74d917179ed6e1",
+        "length": 189348
+      }
+    ],
+    "build": [
+      {
+        "file": "build.json",
+        "sha1_git": "535e999e2d9a439ddcf83be15edbf3aa50b6c561",
+        "length": 379378
+      }
+    ],
+    "pipelines": [
+      {
+        "file": "pipelines.json",
+        "sha1_git": "eddcc056b3e5f8886a3bfd313e573bb5de9acbf5",
+        "length": 40024
+      }
+    ],
+    "approvalsAndChecks": [
+      {
+        "file": "pipelinePermissions.json",
+        "sha1_git": "eceab646a8ca2e613c46f2c85d0fe2f85e9048ed",
+        "length": 14157
+      },
+      {
+        "file": "pipelinesChecks.json",
+        "sha1_git": "e5411050114d59c98d541017e29482d4789a0ac7",
+        "length": 42785
+      },
+      {
+        "file": "pipelinesapproval.json",
+        "sha1_git": "7f4c358f6b39c386bd558e7cb625e469fba77994",
+        "length": 35008
+      }
+    ],
+    "distributedTask": [
+      {
+        "file": "elastic.json",
+        "sha1_git": "7a9bcb1d7f42f3b6203d8d4c50d809a0f9b544e5",
+        "length": 49605
+      },
+      {
+        "file": "task.json",
+        "sha1_git": "522bc9570a998dff8d3dde5e9397fdf9ef2857a3",
+        "length": 42227
+      },
+      {
+        "file": "taskAgent.json",
+        "sha1_git": "64b9fcd7116c5bb3e60a98020a0482fc83879d5a",
+        "length": 337516
+      }
+    ],
+    "testResults": [
+      {
+        "file": "testResults.json",
+        "sha1_git": "034b6d1e50da83bd3eddfc1e488d33f5b32be915",
+        "length": 336706
+      }
+    ],
+    "testPlan": [
+      {
+        "file": "testPlan.json",
+        "sha1_git": "2a0f24bb54f1c9a6e81a556b1fda7dd0c18f111d",
+        "length": 161367
+      }
+    ],
+    "test": [
+      {
+        "file": "test.json",
+        "sha1_git": "affc95b52f201bc609f8e6004b51001804735400",
+        "length": 382658
+      }
+    ],
+    "wiki": [
+      {
+        "file": "wiki.json",
+        "sha1_git": "7aba6fa47f7fa56cbce69356efe357ecc32c50ca",
+        "length": 86027
+      }
+    ],
+    "search": [
+      {
+        "file": "search.json",
+        "sha1_git": "8d5835ad5218dae1e5b22b3a10486ea0e34bb4bd",
+        "length": 41091
+      }
+    ],
+    "core": [
+      {
+        "file": "core.json",
+        "sha1_git": "c677f5d4d1a440bd24df994178ab929caf4a9ebd",
+        "length": 77164
+      }
+    ],
+    "graph": [
+      {
+        "file": "graph.json",
+        "sha1_git": "5efa63f83c417d8abd9fda3d027da3ccf48b364d",
+        "length": 96899
+      }
+    ],
+    "ims": [
+      {
+        "file": "identities.json",
+        "sha1_git": "d05d6c232ee2fc9aebe4ae5b778e311f5c16259a",
+        "length": 34052
+      }
+    ]
+  },
+  "missing": {
+    "environments": [
+      "7.2"
+    ]
+  }
+}

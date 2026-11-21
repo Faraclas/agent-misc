@@ -1,0 +1,61 @@
+name: azdo-manuals CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "azdo-manuals/**"
+      - ".github/workflows/azdo-manuals.yml"
+  pull_request:
+    paths:
+      - "azdo-manuals/**"
+      - ".github/workflows/azdo-manuals.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Offline tests only: hand-made specs in, exact manuals out. CI never contacts the archive or Azure DevOps.
+  test:
+    name: Offline tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: azdo-manuals
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      # The load test registers the expected manuals in a throwaway utcp, using the latest utcp-rs release.
+      - name: Download the latest utcp release (Linux)
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("utcp-rs-v"))][0].tagName')"
+          [ -n "$tag" ] || { echo "::error::No utcp-rs release found"; exit 1; }
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'utcp-x86_64-unknown-linux-musl.tar.gz' --dir "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/utcp"
+          tar -xzf "$RUNNER_TEMP/utcp-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/utcp"
+          bin="$(find "$RUNNER_TEMP/utcp" -type f -name utcp | head -n 1)"
+          [ -x "$bin" ] || { echo "::error::utcp binary not found in the archive"; exit 1; }
+          "$bin" --version
+          echo "UTCP_BIN=$bin" >> "$GITHUB_ENV"
+          echo "REQUIRE_UTCP=1" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v

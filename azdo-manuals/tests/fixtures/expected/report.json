@@ -1,0 +1,84 @@
+{
+  "api_version": "7.1",
+  "source": {
+    "revision": "0000000000000000000000000000000000000000",
+    "revision_date": "2026-01-01T00:00:00+00:00",
+    "revision_message": "test"
+  },
+  "manuals": {
+    "t_main": {
+      "hint": "test main",
+      "areas": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "areas_without_spec": [
+        "gamma"
+      ],
+      "tools": 10,
+      "reads": 9,
+      "bytes": 6417,
+      "approx_tokens": 1604,
+      "scopes": [
+        "vso.alpha",
+        "vso.alpha_write",
+        "vso.beta"
+      ],
+      "tools_without_scope": []
+    }
+  },
+  "left_out": [
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "DELETE",
+      "operation_id": "Widgets_Delete",
+      "reason": "DELETE never included"
+    },
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "HEAD",
+      "operation_id": "Widgets_Exists",
+      "reason": "HEAD never included"
+    },
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "GET",
+      "operation_id": "Archive_Get Zip",
+      "reason": "binary response"
+    },
+    {
+      "manual": "t_main",
+      "area": "beta",
+      "method": "GET",
+      "operation_id": "Profiles_Get",
+      "reason": "skipped: test skip"
+    },
+    {
+      "manual": "t_main",
+      "area": "beta",
+      "method": "GET",
+      "operation_id": "Pools_List",
+      "reason": "read needs a write scope: vso.beta_manage"
+    }
+  ],
+  "scopes": [
+    {
+      "scope": "vso.alpha_write",
+      "description": "Read and write alpha things."
+    },
+    {
+      "scope": "vso.beta",
+      "description": "Read beta things."
+    }
+  ],
+  "scopes_all": [
+    "vso.alpha",
+    "vso.alpha_write",
+    "vso.beta",
+    "vso.beta_full"
+  ]
+}

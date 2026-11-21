@@ -1,0 +1,14 @@
+azdo-manuals is licensed under the MIT License (see the LICENSE file at the root of this repository).
+
+It reads, at run time, the Azure DevOps REST API specifications from MicrosoftDocs/vsts-rest-api-specs, as preserved
+by the Software Heritage archive (https://archive.softwareheritage.org/). Those files are not included in this
+repository. Their repository's LICENSE file reads "MIT License, Copyright (c) 2018 Microsoft Docs"; its
+ThirdPartyNotices file states that documentation content is licensed under Creative Commons Attribution 4.0 and code
+under MIT. Manuals generated from them copy operation and parameter descriptions from those files.
+
+Request-side corrections to the specs follow the ones made by vsts-api-patcher in
+microsoft/azure-devops-rust-api (https://github.com/microsoft/azure-devops-rust-api), MIT License,
+Copyright (c) Microsoft Corporation.
+
+Microsoft and Azure DevOps are trademarks of the Microsoft group of companies. This project is not affiliated with or
+endorsed by Microsoft.
