@@ -1,6 +1,6 @@
 # azdo-manuals specification
 
-- **Version:** describes `azdo-manuals` 7.1.0 (REST API 7.1). Keep it in step with the code (see
+- **Version:** describes `azdo-manuals` 7.1.1 (REST API 7.1). Keep it in step with the code (see
   [`AGENTS.md`](../AGENTS.md), "Lockstep docs").
 - **Audience:** maintainers and agents changing the generator. Users start with the [README](../README.md) and the
   [operating guide](./operating.md).
@@ -66,7 +66,7 @@ in a manual nor in `excluded_areas`.
 | Field | Meaning |
 | :--- | :--- |
 | `manuals` | Name, areas (in order: the first area wins name clashes), title (the manual's `info.title`) and hint. |
-| `excluded_areas` | Areas in no manual, each with a reason (`profile`, `account`, `tokens`, `tokenAdmin`, `tokenAdministration`, `governance`). |
+| `excluded_areas` | Areas in no manual, each with a reason (`account`, `tokens`, `tokenAdmin`, `tokenAdministration`, `governance`). |
 | `post_reads` | POSTs whose only effect is to return data (queries, batch reads, searches, lookups). They count as reads. |
 | `tested_writes` | Writes covered by `write-test`; each needs a body in `bodies.rs` (a test enforces this). |
 | `deletes` | The DELETEs that are generated (19 small ones an agent may need to take back). |
@@ -75,6 +75,7 @@ in a manual nor in `excluded_areas`.
 | `names` | Tool names set by hand, for clashes or names that say too little. |
 | `drop_optional_path_params` | Optional path parameters removed with their segment (`team` in `wit`). |
 | `body_overrides` | Request body schemas replacing the spec's (`bodies::real()`). |
+| `host_overrides` | Hosts replacing the spec's, per area (`profile` -> `vssps.dev.azure.com`; the spec's host refuses an organization's PAT). A test refuses an area no manual includes. |
 | `read_only` | Set by `--read-only`: no writes, and no reads that only a write-level scope allows. |
 
 `API_VERSION` (`7.1`) and `ARCHIVE_REVISION` are constants there too.
@@ -114,7 +115,8 @@ Every left-out operation goes into `report.json` `left_out` with its manual, are
 
 - `host` is the spec's (`dev.azure.com`, `vssps.dev.azure.com`, `vsrm.dev.azure.com`, ...). In a parameterized host
   (`x-ms-parameterized-host`) the optional parameters are removed (`{service}dev.azure.com` -> `dev.azure.com`); a
-  required host parameter fails `generate`.
+  required host parameter fails `generate`. An area in `host_overrides` uses that host instead; a path without
+  `{organization}` then gets it as its first segment, and the tool is sent the PAT.
 - `{organization}` is replaced with `--org`. The name must match `^[A-Za-z0-9][A-Za-z0-9-]{0,48}[A-Za-z0-9]?$`, so it
   needs no encoding. No tool takes the organization as a parameter.
 - Segments of `drop_optional_path_params` are removed. A literal `$` before a path parameter becomes `%24`, because

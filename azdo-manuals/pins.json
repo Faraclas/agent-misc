@@ -355,6 +355,13 @@
         "sha1_git": "cbe3af39bf8dbdcfa28d19dc1b74d917179ed6e1",
         "length": 189348
       }
+    ],
+    "profile": [
+      {
+        "file": "profile.json",
+        "sha1_git": "9728d28b0704c26ee96a04425f239955a919e0d9",
+        "length": 14230
+      }
     ]
   },
   "missing": {

@@ -49,6 +49,9 @@ pub struct Config {
     pub drop_optional_path_params: HashMap<String, HashSet<String>>,
     /// Request body schemas that replace the spec's, per area and operationId (see `bodies.rs`).
     pub body_overrides: HashMap<String, HashMap<String, Value>>,
+    /// Hosts that replace the spec's, per area, for areas the service also serves under the organization. A path
+    /// without `{organization}` gets it as its first segment.
+    pub host_overrides: HashMap<String, String>,
 }
 
 pub fn manual(name: &str, areas: &[&str], title: &str, hint: &str) -> ManualConf {
@@ -185,8 +188,9 @@ impl Config {
                 ),
                 manual(
                     "azdo_core",
-                    &["core", "graph", "ims", "operations", "favorite", "status", "resourceUsage"],
-                    "Azure DevOps projects, teams, processes, users, groups, identities, favorites and service status",
+                    &["core", "graph", "ims", "operations", "favorite", "status", "resourceUsage", "profile"],
+                    "Azure DevOps projects, teams, processes, users, groups, identities, profiles, favorites and \
+                     service status",
                     "Azure DevOps projects, teams, users",
                 ),
                 manual(
@@ -215,10 +219,6 @@ impl Config {
                 ),
             ],
             excluded_areas: [
-                (
-                    "profile",
-                    "hosted outside the organization; refused (401) an organization's PAT (2026-11-20)",
-                ),
                 ("account", "hosted outside the organization (app.vssps.visualstudio.com)"),
                 ("tokens", "creates and revokes PATs"),
                 ("tokenAdmin", "revokes PATs of other users"),
@@ -405,6 +405,9 @@ impl Config {
             // (boards, iterations, capacity) it selects the team, so it stays.
             drop_optional_path_params: HashMap::from([("wit".to_string(), HashSet::from(["team".to_string()]))]),
             body_overrides: crate::bodies::real(),
+            // The spec's host, app.vssps.visualstudio.com, refuses an organization's PAT (401); the organization's
+            // identity host serves the same route and accepts it (checked 2026-11-23).
+            host_overrides: HashMap::from([("profile".to_string(), "vssps.dev.azure.com".to_string())]),
         }
     }
 }

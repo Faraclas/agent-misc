@@ -8,8 +8,8 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
   [Software Heritage](https://www.softwareheritage.org/) archive of it (revision of 2026-09-02, "Update REST API specs
   from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json), which is built
   into the binary. Nothing from Microsoft is stored in this repository.
-- **Output:** eight manuals for one organization covering every area of the API that has a 7.1 description (944
-  tools: 582 reads, 362 writes), a `scopes.md` listing the personal access token (PAT) permissions the manuals need,
+- **Output:** eight manuals for one organization covering every area of the API that has a 7.1 description (945
+  tools: 583 reads, 362 writes), a `scopes.md` listing the personal access token (PAT) permissions the manuals need,
   and a `report.json` (tools, sizes, and every operation left out with the reason).
 - **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` for the first run
   (about a minute, 46 downloads); later runs use the cache and take about a second.
@@ -93,9 +93,8 @@ Left out (`generate` prints this list, `report.json` has every operation with it
 - The other 100 DELETEs: deleting a project, repository, branch policy, pipeline, feed, package, user or permission
   cannot be undone, and an agent that guesses wrong should not be able to.
 - 3 HEAD operations (the GET of the same thing is included).
-- Areas: `profile` and `account` (hosted on `app.vssps.visualstudio.com`, outside the organization; `profile` refused
-  an organization's PAT), `tokens`, `tokenAdmin` and `tokenAdministration` (they create or revoke PATs), and
-  `governance` (its 7.1 folder has examples only).
+- Areas: `account` (hosted on `app.vssps.visualstudio.com`, outside the organization), `tokens`, `tokenAdmin` and
+  `tokenAdministration` (they create or revoke PATs), and `governance` (its 7.1 folder has examples only).
 - Four operations that do not work: one Microsoft is deprecating (404), and three test-results reads whose spec
   lists no scope and which only a full-access PAT may call.
 - With `--read-only`, also the reads that Azure DevOps allows only with a write-level permission (deployment groups,
@@ -153,7 +152,10 @@ health page (`azdo_core.get_service_status`), is sent no PAT.
   `nuget_...`). `names` in `src/config.rs` sets a name by hand.
 - **URLs** use the host each spec names (for example `vsrm.dev.azure.com` for releases, `vssps.dev.azure.com` for
   graph, `vstmr.dev.azure.com` for test results, `feeds.dev.azure.com` for Artifacts) and carry the `api-version`
-  each operation needs, including previews such as `7.1-preview.1`.
+  each operation needs, including previews such as `7.1-preview.1`. One exception: the spec puts `profile` on
+  `app.vssps.visualstudio.com`, which refuses an organization's PAT, so `azdo_core.get_profile` uses the
+  organization's `vssps.dev.azure.com/<your-org>`, which serves the same route (`host_overrides` in `src/config.rs`).
+  `get_profile` with `{"id": "me"}` returns the PAT owner's name and email.
 - **Path parameters** are required. The optional `team` segment of the WIQL routes is left out, since utcp cannot
   drop a segment per call; board and iteration tools keep `team`.
 - **Spec corrections:** `required_params` in `src/config.rs` marks parameters the spec calls optional but the service

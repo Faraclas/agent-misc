@@ -326,8 +326,9 @@ fn build_url(
     org: &str,
     version: &str,
     dropped: &[String],
+    host_override: Option<&str>,
 ) -> Result<String> {
-    let host = str_of(spec, "host");
+    let host = host_override.unwrap_or_else(|| str_of(spec, "host"));
     if host.is_empty() {
         let title = shown(spec.get("info").and_then(|i| i.get("title")));
         return err(format!("{title}: spec has no host"));
@@ -355,6 +356,9 @@ fn build_url(
     };
     let base = base_path.trim_end_matches('/');
     let mut path = path.split('?').next().unwrap_or("").to_string();
+    if host_override.is_some() && !path.contains("{organization}") {
+        path = format!("/{{organization}}{path}");
+    }
     for name in dropped {
         path = path.replacen(&format!("/{{{name}}}"), "", 1);
     }
@@ -585,9 +589,17 @@ fn build_tool(
     let mut template = Map::new();
     template.insert("call_template_type".into(), json!("http"));
     template.insert("http_method".into(), json!(o.method.to_uppercase()));
+    let host_override = conf.host_overrides.get(area).map(String::as_str);
     template.insert(
         "url".into(),
-        json!(build_url(spec, o.path, org, &version, &dropped)?),
+        json!(build_url(
+            spec,
+            o.path,
+            org,
+            &version,
+            &dropped,
+            host_override,
+        )?),
     );
     if body_field {
         let consumes = op
@@ -614,8 +626,9 @@ fn build_tool(
         template.insert("header_fields".into(), json!(header_fields));
     }
     // Only the organization's own APIs get the PAT. An operation outside any organization (the public service health
-    // page) answers 401 to a PAT that is limited to one, and must not be sent it anyway.
-    if o.path.contains("{organization}") {
+    // page) answers 401 to a PAT that is limited to one, and must not be sent it anyway. A host override puts the
+    // operation under the organization.
+    if o.path.contains("{organization}") || host_override.is_some() {
         template.insert("auth".into(), auth());
     }
     let mut inputs = Map::new();

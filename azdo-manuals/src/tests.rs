@@ -78,6 +78,7 @@ fn test_config() -> Config {
             HashSet::from(["team".to_string()]),
         )]),
         body_overrides: HashMap::new(),
+        host_overrides: HashMap::new(),
     }
 }
 
@@ -753,6 +754,46 @@ fn parameterized_host() {
     );
     specs["beta"][0]["x-ms-parameterized-host"]["parameters"][0]["required"] = json!(true);
     assert!(generate(&specs, ORG, "7.1", &source(), &test_config()).is_err());
+}
+
+#[test]
+fn host_override_adds_the_organization() {
+    let mut specs = load_fixture_specs();
+    let beta = &mut specs["beta"][0];
+    beta["host"] = json!("app.vsbeta.visualstudio.com");
+    let paths = beta["paths"].as_object_mut().unwrap();
+    let moved: Map<String, Value> = std::mem::take(paths)
+        .into_iter()
+        .map(|(p, v)| (p.replacen("/{organization}", "", 1), v))
+        .collect();
+    *paths = moved;
+    let mut conf = test_config();
+    conf.host_overrides = HashMap::from([("beta".to_string(), "vsbeta.dev.azure.com".to_string())]);
+    let (manuals, _) = generate(&specs, ORG, "7.1", &source(), &conf).unwrap();
+    let tool = tools_by_name(&manuals)["beta_list_widgets"].clone();
+    let url = tool["tool_call_template"]["url"].clone();
+    assert!(
+        url.as_str()
+            .unwrap()
+            .starts_with("https://vsbeta.dev.azure.com/contoso/_apis/beta/widgets"),
+        "{url}"
+    );
+    assert!(
+        tool["tool_call_template"].get("auth").is_some(),
+        "an operation moved under the organization is sent the PAT"
+    );
+}
+
+#[test]
+fn host_overrides_name_included_areas() {
+    let conf = Config::real();
+    let areas: BTreeSet<String> = conf.all_areas().into_iter().collect();
+    for area in conf.host_overrides.keys() {
+        assert!(
+            areas.contains(area),
+            "host_overrides names {area}, which no manual includes"
+        );
+    }
 }
 
 #[test]
