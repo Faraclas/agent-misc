@@ -10,6 +10,7 @@ pub mod errors;
 pub mod grpcpb;
 pub mod index;
 pub mod ipc;
+pub mod ipc_files;
 pub mod loader;
 pub mod media;
 pub mod migration;
@@ -21,10 +22,13 @@ pub mod providers;
 pub mod repository;
 pub mod secrets;
 pub mod security;
+pub mod settings_file;
 pub mod skills;
 pub mod spec;
+pub mod staging;
 pub mod tag;
 pub mod tools;
+pub mod transfer;
 pub mod transports;
 
 #[cfg(test)]

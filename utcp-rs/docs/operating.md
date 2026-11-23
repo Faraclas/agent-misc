@@ -20,13 +20,27 @@ calls. All agents of one user on one machine share the same manuals, secrets and
 | Secrets (`NAME=value` lines) | `~/.config/utcp/.env` | `%APPDATA%\utcp\config\.env` |
 | Settings (and the optional secrets command) | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
 | Saved manuals and search index | `~/.cache/utcp/` | `%LOCALAPPDATA%\utcp\cache\` |
+| Staged manuals, and the versions `promote` replaced | `~/.cache/utcp/manuals/staged/`, `.../previous/` | `%LOCALAPPDATA%\utcp\cache\manuals\staged\`, `...\previous\` |
 | Daemon socket | `$XDG_RUNTIME_DIR/utcp.sock` | `\\.\pipe\utcp-<USERNAME>` |
 | Optional disk log | `~/.local/state/utcp/activity.jsonl` | `%LOCALAPPDATA%\utcp\data\activity.jsonl` |
 | Daemon start errors and crashes | `~/.local/state/utcp/daemon.log` | `%LOCALAPPDATA%\utcp\data\daemon.log` |
-| Images and files returned by tools | `$XDG_RUNTIME_DIR/utcp-media/` (no `XDG_RUNTIME_DIR`: `utcp-media-$USER/` in `$TMPDIR` or `/tmp`) | `%TEMP%\utcp-media\` |
+| Images and audio from MCP servers | `$XDG_RUNTIME_DIR/utcp-media/` (no `XDG_RUNTIME_DIR`: `utcp-media-$USER/` in `$TMPDIR` or `/tmp`) | `%TEMP%\utcp-media\` |
+| Files tools answer with (no `--out`) | your Downloads folder (`~/Downloads`, from `user-dirs.dirs`) | your Downloads folder |
+| Answers too large to print, and downloads when there is no Downloads folder (deleted after a day) | `~/.cache/utcp/downloads/` | `%LOCALAPPDATA%\utcp\cache\downloads\` |
 
 `UTCP_MEDIA_DIR` or `media_dir` in `settings.toml` moves the media folder. On Linux it must be a folder you own that
 only you can open; otherwise utcp leaves images inline in the answer.
+
+`UTCP_CONFIG_DIR` or `UTCP_CACHE_DIR` (or `--config`, `UTCP_CONFIG`) makes a separate setup, for example for tests;
+set `UTCP_STATE_DIR` too to keep its logs apart. It has its own manuals and its own daemon endpoint (`utcp.sock` in
+its cache folder; on Windows a pipe name with a hash of that folder), so it never uses or changes the normal setup's
+daemon. `UTCP_SOCKET_PATH` sets the endpoint explicitly. It does not rewrite the agent skills the normal setup
+installed, and `utcp daemon start`, `stop` and `restart` never touch the systemd unit for it.
+
+A separate config without `UTCP_CACHE_DIR` gets its own cache folder, `setups/<hash>/` in the normal one
+(`~/.cache/utcp/setups/<hash>/`), where the hash comes from the config file's path. So `--config` alone never shares
+saved manuals or the search index with the normal setup, and the same config file always finds its cache again.
+`utcp --config <path> doctor` prints that folder.
 
 `utcp doctor` prints the actual paths, whether the daemon runs, which secrets are set and where each comes from, and
 whether the agent skills are current. Start there whenever something looks wrong.
@@ -62,6 +76,50 @@ whether the agent skills are current. Start there whenever something looks wrong
 
 4. Give utcp the secrets your manuals need (section 3, Secrets). A daemon started by systemd or at Windows logon
    does not see the variables your shell exports, so if you keep secrets in a shell file, set up a secrets command.
+5. Check the setup:
+
+   ```sh
+   utcp doctor
+   ```
+
+   It always shows a `Secrets Command` line (`OK`, `FAILED`, or `not set`) and a `Secrets File` line (the `.env`
+   path, and whether it exists), the settings file with any setting in it that has no effect, the upload and
+   download limits and the downloads folder, then each secret your manuals need as `[SET]` or `[MISSING]`.
+
+   In a terminal, `SET` and `UP TO DATE` are green, and `utcp list` and `utcp diff` show tool and manual names in
+   blue. Set `NO_COLOR=1` to turn color off. Pipes and agents always get plain text.
+
+### Settings (`settings.toml`)
+
+The first `utcp` command (other than `utcp daemon run`, which systemd starts) creates `settings.toml` (path in the
+table above) with every setting and a comment saying what it does. Settings with a good default are active lines; the
+others are commented out (`#`) with an example value. A commented line is off, and utcp uses its built-in behavior
+for it.
+
+- To change a setting, remove the `#` and set your value. To undo, put the `#` back. Don't delete lines: utcp adds a
+  missing setting back.
+- When a newer utcp knows more settings, it adds each one that is missing (neither active nor commented) in its
+  template state, keeps a copy of the old file as `settings.toml.bak`, and says what it added. It never changes a
+  line that is there, even when a default changes.
+- A commented section header (`# [secrets]`) turns the whole section off.
+- An invalid file is left alone; utcp then uses its built-in settings and says so (`utcp doctor`, `daemon.log`).
+- `utcp doctor` names any setting that has no effect, for example a misspelled one, or a key that ended up in the
+  wrong section because its header was commented out.
+
+| Setting | Template | What it does |
+| :--- | :--- | :--- |
+| `cache_on_register` | `true` | Keep a copy of a manual's tools when it is registered (section 3). |
+| `daemon_idle_timeout_mins` | `0` | Stop the daemon after this many idle minutes; `0` keeps it running. |
+| `max_upload_mb` | `100` | Largest file a tool may upload, in MB. `0` turns uploads off; commented out, no limit. |
+| `max_download_mb` | `# 500` | Largest file a tool may download, in MB. `0` turns downloads off; commented out, no limit. |
+| `download_dir` | `# "~/Downloads"` | Where file answers go without `--out`. Commented out: your Downloads folder. |
+| `media_dir` | `# <the default>` | Where images and audio from MCP servers go. `UTCP_MEDIA_DIR` overrides it. |
+| `max_media_files` | `64` | How many of those media files to keep. |
+| `media_ttl_mins` | `60` | Minutes to keep each media file. |
+| `[secrets]` `command` | `# ["/bin/bash", "~/scripts/..."]` | The secrets command (section 3). |
+| `[secrets]` `timeout_secs` | `# 10` | Seconds it may run. |
+
+The TUI's `[c]` key changes `cache_on_register` by rewriting only that line.
 
 ## 3. Adding Tools
 
@@ -106,7 +164,31 @@ agent loads, so agents know what an unclear name such as `context7` is for.
   utcp import-mcp everything --command npx --arg -y --arg @modelcontextprotocol/server-everything -o everything.utcp.json
   ```
 
-- **Check the result:** `utcp list --manual <name>`, then `utcp search "<keywords>"`.
+- **Check the result:** `utcp list <name>`, then `utcp search "<keywords>"`.
+
+### Staging: Try a Manual Before Agents See It
+
+`register` makes a manual active at once: agents find it, and the skills list it. To review and test a manual first,
+for example one made by a generator such as `azdo-manuals`, or a new version of one you already use, stage it:
+
+```sh
+utcp stage <name> <url_or_file_path> --hint '<few words>'   # same source, --base-url and -H as register
+utcp diff [<name>]                        # new manual, or what changes: tools added (+), removed (-), changed (~)
+utcp list [<name>] --staged               # the staged manuals' tools (or one manual's)
+utcp call --staged <manual.tool> '<json>' # call one (also schema --staged, batch --staged)
+utcp promote [<name>]                     # make it active; without a name, everything staged
+utcp discard [<name>]                     # drop it instead
+utcp rollback <name>                      # back to the version the last promote replaced; again to undo
+```
+
+- A staged manual is not in `search`, `list` or the skills, and plain `call` does not reach it. `call --staged`
+  works through the daemon (or `--direct`) with the same secrets as active manuals: the secrets command is also asked
+  for the names staged manuals read, and `utcp doctor` lists their secrets, marked `(staged)`.
+- There is one staging area, with at most one staged copy per name; staging a name again replaces its staged copy.
+  `doctor` shows how many manuals are staged.
+- `promote` is the only step that changes what agents see: it rebuilds search, reloads the daemon and rewrites the
+  installed skills. It keeps the version it replaced (one per name), which `rollback` brings back.
+- Without `--hint`, a staged manual keeps the hint of the manual it replaces.
 
 ### Secrets
 
@@ -139,14 +221,14 @@ timeout_secs = 10   # optional; it is stopped after this
 
 - `command` is the program and its arguments, one list item each. It runs directly, not through a shell; a leading
   `~` is your home folder.
-- utcp adds the names it wants as further arguments: every name a registered manual may read.
+- utcp adds the names it wants as further arguments: every name a registered or staged manual may read.
 - It reads `NAME=value` lines from the program's stdout and keeps only the names it asked for. A value is taken as
   written up to the end of the line (no `$` expansion); a leading `export` and one pair of quotes around the value
   are removed. Blank lines and `#` comments are skipped.
 - The program's stderr is discarded, and no value is ever shown or logged. If it fails, `utcp doctor` and
   `daemon.log` say how (exit code, timeout, a line that is not `NAME=value`); run it by hand to see its own errors.
-- **When it runs:** the daemon runs it at start, when its config folder changes (`register`, `deregister`, an edit
-  to `settings.toml`) and on `utcp daemon reload-env`, so after you change a secret, run `reload-env`. If a run
+- **When it runs:** the daemon runs it at start, when its config folder changes (`register`, `stage`, `deregister`, an
+  edit to `settings.toml`) and on `utcp daemon reload-env`, so after you change a secret, run `reload-env`. If a run
   fails, the daemon keeps the values of the last good run. Without the daemon, each `utcp` command runs it when it
   needs a secret (at most once a minute).
 
@@ -184,6 +266,34 @@ utcp import-mcp github-mcp --command podman \
   the daemon stops or you stop the server. Without the daemon, every single `utcp call` starts and stops its own
   container, which takes seconds. Run the daemon for container servers.
 
+### Files Tools Send and Receive
+
+The `utcp` process that makes a call reads the files a tool uploads and writes the files it downloads, with the
+permissions of whoever runs it (an agent in a sandbox stays in its sandbox). The daemon only passes the bytes along;
+it never opens your files.
+
+- **Downloads.** An answer that is not JSON or text (an archive, an image, a PDF), one the server sends as an
+  attachment (`Content-Disposition: attachment`), or one the manual marks as a file, is saved instead of printed,
+  and the call prints `{"type": "file", "path", "mime_type", "bytes", "filename"}`. `mime_type` is the media type
+  only, lowercased and without parameters: a server's `application/zip; api-version=7.1` is reported as
+  `application/zip`. Without `--out` it goes to `download_dir`, else your Downloads folder, else
+  `~/.cache/utcp/downloads/`, under the server's file name (or `<tool>.<ext>`), adding a number (`a (1).zip`) instead of
+  overwriting. `--out <path>` saves it there and overwrites, like `curl -o` and `cp` (into a folder: the server's
+  name); `--out -` writes the bytes to stdout. A file arrives as a `.part` file that is renamed when complete and
+  deleted if the transfer fails. Each batch item can have its own `"out"`.
+- **Uploads.** A tool that uploads takes `{"file": "<path>"}` in its body argument, optionally with `"offset"` and
+  `"length"` in bytes to send one part (chunked uploads). A relative path is relative to the caller's folder.
+- **Answers too large to print.** A JSON or text answer over 10 MB (after `--fields`) is saved to
+  `~/.cache/utcp/downloads/` and the call prints its reference with a `note`. Files there are deleted after a day.
+- **Limits.** `max_upload_mb` and `max_download_mb` (Settings, section 2). A refused transfer says it failed only
+  because of the limit, names the setting and the file, and keeps nothing. JSON answers are never limited.
+- **Slow transfers.** A call fails only when the server sends nothing for 60 s (`did not answer for 60 s`, or `sent
+  no data for 60 s in the middle of its answer`). A transfer that keeps moving can take as long as it needs.
+- In a manual, an HTTP tool's `tool_call_template` marks an upload with `"body_type": "file"` (its `body_field`
+  names the argument; the `Content-Type` header sets the type) and forces a file answer with
+  `"response_type": "file"`. An upload needs POST, PUT or PATCH: calling a GET, DELETE or HEAD tool marked as an
+  upload fails with an error that says to fix the manual, instead of sending the request without the file.
+
 ## 4. Changing and Removing Manuals
 
 ```sh
@@ -193,12 +303,15 @@ utcp set-hint <name> '<few words>'  # add or change a hint; --clear removes it
 utcp get-hint [<name>]              # show hints
 utcp deregister <name>              # take it out of search and calls; settings, hint and saved copy are kept
 utcp register <name>                # bring a deregistered manual back, offline, with its old settings
-utcp deregister <name> --purge-cache  # delete it for good (adding it back needs the original source)
+utcp deregister <name> --purge-cache  # delete it for good, with any staged copy and previous version
+                                      # (adding it back needs the original source)
 ```
 
-Registering, deregistering and hint changes reload the daemon and rewrite the installed account-wide (`--global`)
-agent skills, whose description lists the registered manuals. Agents see the new list in their next session. Project
-copies made with `utcp sync-ides --workspace <dir>` are not rewritten; run that command again.
+Registering, deregistering, promoting, rolling back and hint changes reload the daemon and rewrite the installed
+account-wide (`--global`) agent skills, whose description lists the registered manuals. Agents see the new list in
+their next session. Project copies made with `utcp sync-ides --workspace <dir>` are not rewritten; run that command
+again. To update a manual you depend on, consider `utcp stage` (section 3) instead of `refresh` or `register`, so
+you can check what changes first.
 
 ## 5. The Daemon
 
@@ -269,10 +382,15 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
    | `rate limited by <host> (HTTP 429)` or `(HTTP 403)` ... `retry after N s` | The API's limit is used up. All agents using the same token share it. | Wait the time it names. Retrying sooner fails again. |
    | `these placeholders were not set: NAME` | A `${NAME}` the manual needs has no value. | Give it a value (section 3, Secrets): `.env`, the secrets command, or export it and run `utcp daemon reload-env`. |
    | `Secrets command failed: ...` (`reload-env`, `doctor`, `daemon.log`) | The `[secrets]` command did not run cleanly; the daemon keeps the values of its last good run. | Run the command by hand to see its own error output (it prints secrets, so not where others can see), fix it, then `utcp daemon reload-env`. |
-   | `Tool 'x.y' not found` | No such manual or tool is registered. | `utcp search` or `utcp list` for the right name. |
+   | `Tool 'x.y' not found` | No such manual or tool is registered. | `utcp search` or `utcp list` for the right name. If `x` is staged, the error says so and gives the command with `--staged`. |
+   | `The manual and the tool are joined by a dot` | `utcp call x y` put the tool where the JSON arguments go. | Run the command it suggests: `utcp call x.y` (with `--staged` if `x` is staged). |
+   | `'x' is not staged` | `--staged`, `diff`, `promote` or `discard` named a manual that is not in the staging area. | `utcp list --staged`; stage it with `utcp stage x <source>`. |
    | `MCP server 'x' did not answer ... within 60s` | The local server is stuck or very slow. | `utcp daemon restart-server x`. |
    | `failed to start MCP server command 'x': program not found` | `x` is not on the `PATH` of the process that starts it (the daemon, or your shell with `--direct`). | Give the full path to `--command`, or put its folder on `PATH` and restart the daemon. Before 0.1.3, Windows also needed `npx.cmd` instead of `npx`. |
    | `MCP server 'x' was stopped on request` | Someone ran `stop-server` or `restart-server` during the call. | Call again. |
+   | `upload refused` or `download stopped` ... `only because of this limit` | The file is larger than `max_upload_mb` or `max_download_mb`, or the setting is `0` (turned off). Nothing was sent or kept. | Agents: tell the user. The user raises the setting in `settings.toml`, or comments it out for no limit (section 2). |
+   | `cannot upload <path>` | The file named in `{"file": ...}` does not exist, is not a file, or `offset`/`length` go past its end. | Fix the path (relative paths are relative to the caller's folder). |
+   | `<host> did not answer for 60 s` or `sent no data for 60 s in the middle of its answer` | The connection stalled. | Try again later. A request that changes something may have been carried out; check first. |
    | `utcp daemon exited before listening` or `did not start listening within N seconds` | `utcp daemon start` failed. | Read the lines it quotes from `daemon.log`; `utcp daemon status` names the file. |
    | `utcp daemon is not running` or `is not currently running` | From `daemon servers`, `stop-server`, `restart-server` and `reload-env` (`daemon stop` prints it as information). | `utcp daemon start`. Calls work without it. |
    | `Cannot use the utcp daemon at ...: access denied` (Windows) | The daemon was started from an administrator (elevated) shell, so normal shells may not use it. | `utcp daemon stop` in an elevated shell, then `utcp daemon start` in a normal one. `utcp --direct` works meanwhile. |
@@ -312,6 +430,10 @@ folders and lists a skill found in both only once.
 
 `utcp doctor` or `utcp sync-ides --status` shows each copy as `UP TO DATE`, `OUTDATED` or `NOT INSTALLED`. After
 installing a new `utcp`, run `utcp sync-ides --global` again so the skills match it.
+
+Each skills folder records which registry wrote it (`utcp-tools/.utcp-registry`). Only that registry's changes
+rewrite it, so registering in a separate setup (section 1) leaves your skills alone. `sync-ides` always writes and
+takes the folder over.
 
 ## 9. Working on `utcp-rs` Itself
 

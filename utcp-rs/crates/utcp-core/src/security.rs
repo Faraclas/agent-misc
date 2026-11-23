@@ -215,10 +215,14 @@ pub fn build_secure_http_client() -> reqwest::Client {
         attempt.follow()
     });
 
+    // The 60 s total timeout bounds the other transports. HTTP tool calls replace it per request with a
+    // stall timeout (`transports::http::STALL_TIMEOUT`), so large uploads and downloads can take as long
+    // as they keep moving.
     let builder = reqwest::Client::builder()
         .user_agent(concat!("utcp-rs/", env!("CARGO_PKG_VERSION")))
         .redirect(redirect_policy)
         .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
@@ -233,7 +237,7 @@ pub fn build_secure_http_client() -> reqwest::Client {
 /// Fixed windows instead of `http2_adaptive_window`: h2 lets at most half the connection window's worth of small
 /// DATA frames wait unread, and the adaptive window starts at 64 KiB, so a server sending many tiny frames (Azure
 /// DevOps does) had the connection closed with "too_many_data_frames" (issue 021). 8 MiB keeps that limit, now at
-/// 4 MiB, and lets a response up to the 10 MB cap arrive in a few round trips.
+/// 4 MiB, and lets a large answer arrive in few round trips.
 const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 const HTTP2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 

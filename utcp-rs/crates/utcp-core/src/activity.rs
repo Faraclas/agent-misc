@@ -71,6 +71,16 @@ pub fn activity_detail(message: &str, env: &HashMap<String, String>) -> String {
     text
 }
 
+/// The activity log's command name for a call: `call` or `dry-run`, with ` --staged` for a staged manual.
+pub fn call_verb(dry_run: bool, staged: bool) -> &'static str {
+    match (dry_run, staged) {
+        (false, false) => "call",
+        (true, false) => "dry-run",
+        (false, true) => "call --staged",
+        (true, true) => "dry-run --staged",
+    }
+}
+
 /// `(ok, status, detail)` for a batch activity entry: status is `OK` when every item succeeded,
 /// otherwise `<ok>/<total> OK`, and `detail` lists each failed item as `<id> <tool>: <error>`.
 pub fn batch_activity_summary(
@@ -239,6 +249,7 @@ mod tests {
             activity_log_bak: base.join("state/activity.jsonl.bak"),
             socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: base.join("state/daemon.pid"),
+            separate_setup: true,
         }
     }
 

@@ -19,6 +19,7 @@ pub mod websocket;
 
 use crate::providers::base::Provider;
 use crate::tools::Tool;
+use crate::transfer::{CallOutput, CallerFiles};
 use crate::transports::stream::StreamResult;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -59,6 +60,20 @@ pub trait ClientTransport: Send + Sync {
         args: HashMap<String, Value>,
         prov: &dyn Provider,
     ) -> Result<Box<dyn StreamResult>>;
+    /// Invoke a tool that may upload a file (read through `files`) or answer with one. Only the
+    /// HTTP transport does either; the others answer with JSON through [`Self::call_tool`].
+    async fn call_tool_files(
+        &self,
+        tool_name: &str,
+        args: HashMap<String, Value>,
+        prov: &dyn Provider,
+        files: &dyn CallerFiles,
+    ) -> Result<CallOutput> {
+        let _ = files;
+        Ok(CallOutput::Json(
+            self.call_tool(tool_name, args, prov).await?,
+        ))
+    }
 }
 
 // CommunicationProtocol is the new name for transports; kept as a re-export for backwards

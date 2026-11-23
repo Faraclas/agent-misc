@@ -1087,6 +1087,7 @@ impl AppState {
                     dry_run,
                     fields: None,
                     caller_env: manual_caller_env(&self.paths),
+                    staged: false,
                 },
             };
             match try_send_ipc_sync(&self.paths, &req) {
@@ -1101,8 +1102,16 @@ impl AppState {
             }
         }
         let started = Instant::now();
-        let outcome = block_on(call_tool_direct(&self.paths, tool, args, dry_run, None))
-            .and_then(|r| r.map_err(|e| format!("{:#}", e)));
+        let outcome = block_on(call_tool_direct(
+            &self.paths,
+            tool,
+            args,
+            dry_run,
+            None,
+            false,
+            None,
+        ))
+        .and_then(|r| r.map_err(|e| format!("{:#}", e)));
         let ok = outcome.is_ok();
         let detail = outcome
             .as_ref()
@@ -1235,15 +1244,18 @@ impl AppState {
     }
 
     fn toggle_cache_on_register(&mut self) {
-        self.settings.cache_on_register = !self.settings.cache_on_register;
-        match self.settings.save(&self.paths) {
+        let wanted = !self.settings.cache_on_register;
+        match utcp_core::settings_file::set_top_level_setting(
+            &self.paths,
+            "cache_on_register",
+            wanted.into(),
+        ) {
             Ok(()) => {
-                self.status_message = format!(
-                    "Saved settings.toml: cache_on_register = {}",
-                    self.settings.cache_on_register
-                );
+                self.settings.cache_on_register = wanted;
+                self.status_message =
+                    format!("Saved settings.toml: cache_on_register = {}", wanted);
             }
-            Err(e) => self.status_message = format!("Failed saving settings.toml: {}", e),
+            Err(e) => self.status_message = format!("Failed saving settings.toml: {:#}", e),
         }
     }
 
@@ -3911,6 +3923,7 @@ mod tests {
             activity_log_bak: state_dir.join("activity.jsonl.bak"),
             socket_endpoint: root.join("utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: state_dir.join("daemon.pid"),
+            separate_setup: true,
             cache_dir: root.join("cache"),
             media_dir: root.join("media"),
             config_dir,

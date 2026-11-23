@@ -24,20 +24,35 @@ pub struct UtcpPaths {
     pub activity_log_bak: PathBuf,
     pub socket_endpoint: String,
     pub daemon_pid_file: PathBuf,
+    /// A setup with its own config or cache folder (`--config`, `UTCP_CONFIG`, `UTCP_CONFIG_DIR`,
+    /// `UTCP_CACHE_DIR`). It has its own daemon endpoint, and `utcp daemon` never manages the systemd unit
+    /// for it.
+    pub separate_setup: bool,
 }
 
 impl UtcpPaths {
     /// Resolve paths using `directories::ProjectDirs::from("", "", "utcp")` and environment overrides:
     /// - `UTCP_CONFIG` overrides `.utcp_config.json` path directly
     /// - `UTCP_CONFIG_DIR`, `UTCP_CACHE_DIR`, `UTCP_STATE_DIR`, `UTCP_MEDIA_DIR` override base directories
-    /// - `UTCP_SOCKET_PATH` overrides the local IPC socket / pipe endpoint
+    /// - `UTCP_SOCKET_PATH` overrides the local IPC socket / pipe endpoint. Without it, a setup with its own
+    ///   config or cache folder (`--config`, `UTCP_CONFIG`, `UTCP_CONFIG_DIR`, `UTCP_CACHE_DIR`) gets its own
+    ///   daemon endpoint too, so it never reaches the daemon of the default setup
+    /// - a setup with its own config (`--config`, `UTCP_CONFIG`, `UTCP_CONFIG_DIR`) but no `UTCP_CACHE_DIR`
+    ///   gets its own cache folder, `setups/<hash of its config file path>` in the default one, so it never
+    ///   shares cached manuals or the search index with the default setup
     ///
-    /// The platform folders are looked up only for a directory without an override. On Windows that lookup
-    /// goes through the Known Folders API, which fails when `%USERPROFILE%` points at a missing folder.
+    /// An empty variable counts as unset. The platform folders are looked up only for a directory without an
+    /// override. On Windows that lookup goes through the Known Folders API, which fails when `%USERPROFILE%`
+    /// points at a missing folder.
     pub fn resolve(explicit_config: Option<&Path>) -> Result<Self> {
-        let config_override = std::env::var_os("UTCP_CONFIG_DIR").map(PathBuf::from);
-        let cache_override = std::env::var_os("UTCP_CACHE_DIR").map(PathBuf::from);
-        let state_override = std::env::var_os("UTCP_STATE_DIR").map(PathBuf::from);
+        let config_override = env_path("UTCP_CONFIG_DIR");
+        let cache_override = env_path("UTCP_CACHE_DIR");
+        let state_override = env_path("UTCP_STATE_DIR");
+        let config_file_override = env_path("UTCP_CONFIG");
+        let own_config = explicit_config.is_some()
+            || config_file_override.is_some()
+            || config_override.is_some();
+        let separate_setup = own_config || cache_override.is_some();
         let proj =
             if config_override.is_some() && cache_override.is_some() && state_override.is_some() {
                 None
@@ -53,21 +68,27 @@ impl UtcpPaths {
         };
 
         let config_dir = config_override.unwrap_or_else(|| proj().config_dir().to_path_buf());
-        let cache_dir = cache_override.unwrap_or_else(|| proj().cache_dir().to_path_buf());
+        let config_file = if let Some(cfg) = explicit_config {
+            cfg.to_path_buf()
+        } else if let Some(env_cfg) = config_file_override {
+            env_cfg
+        } else {
+            config_dir.join(".utcp_config.json")
+        };
+        let cache_dir = match cache_override {
+            Some(dir) => dir,
+            None if own_config => proj()
+                .cache_dir()
+                .join("setups")
+                .join(setup_key(&config_file)),
+            None => proj().cache_dir().to_path_buf(),
+        };
         let state_dir = state_override.unwrap_or_else(|| {
             proj()
                 .state_dir()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| proj().data_local_dir().to_path_buf())
         });
-
-        let config_file = if let Some(cfg) = explicit_config {
-            cfg.to_path_buf()
-        } else if let Some(env_cfg) = std::env::var_os("UTCP_CONFIG") {
-            PathBuf::from(env_cfg)
-        } else {
-            config_dir.join(".utcp_config.json")
-        };
 
         let settings_file = config_dir.join("settings.toml");
         let settings = UtcpSettings::load_from_file(&settings_file);
@@ -82,7 +103,7 @@ impl UtcpPaths {
         let activity_log_bak = state_dir.join("activity.jsonl.bak");
         let daemon_pid_file = state_dir.join("daemon.pid");
 
-        let socket_endpoint = resolve_socket_endpoint(&cache_dir);
+        let socket_endpoint = resolve_socket_endpoint(&cache_dir, separate_setup);
 
         Ok(Self {
             config_dir,
@@ -100,6 +121,7 @@ impl UtcpPaths {
             activity_log_bak,
             socket_endpoint,
             daemon_pid_file,
+            separate_setup,
         })
     }
 
@@ -148,17 +170,21 @@ impl UtcpPaths {
 
     /// Path to a cached manual `.utcp.json` file for `manual_name`.
     pub fn cached_manual_path(&self, manual_name: &str) -> PathBuf {
-        let safe_name: String = manual_name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.manuals_dir.join(format!("{}.utcp.json", safe_name))
+        self.manuals_dir.join(manual_file_name(manual_name))
+    }
+
+    /// Where `utcp stage` keeps the staged copy of `manual_name` until it is promoted or discarded.
+    pub fn staged_manual_path(&self, manual_name: &str) -> PathBuf {
+        self.manuals_dir
+            .join("staged")
+            .join(manual_file_name(manual_name))
+    }
+
+    /// Where `utcp promote` keeps the version a promotion replaced, for `utcp rollback`.
+    pub fn previous_manual_path(&self, manual_name: &str) -> PathBuf {
+        self.manuals_dir
+            .join("previous")
+            .join(manual_file_name(manual_name))
     }
 
     /// Acquire an exclusive advisory lock on `.utcp.lock` for cold-path mutations.
@@ -177,6 +203,37 @@ impl UtcpPaths {
     }
 }
 
+/// A path from the environment variable `name`; unset or empty is `None`.
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The cache subfolder name of a setup with its own config: 12 hex digits of the SHA-256 of the config file's
+/// absolute path, so each config file keeps the same cache folder and two never share one.
+fn setup_key(config_file: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let absolute = std::path::absolute(config_file).unwrap_or_else(|_| config_file.to_path_buf());
+    let digest = Sha256::digest(absolute.to_string_lossy().as_bytes());
+    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `<name>.utcp.json`, with every character other than ASCII letters, digits, `-` and `_` replaced by `_`.
+fn manual_file_name(manual_name: &str) -> String {
+    let safe_name: String = manual_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{}.utcp.json", safe_name)
+}
+
 fn resolve_media_dir(configured: Option<&str>) -> PathBuf {
     if let Some(env_dir) = std::env::var_os("UTCP_MEDIA_DIR") {
         if !env_dir.is_empty() {
@@ -188,6 +245,11 @@ fn resolve_media_dir(configured: Option<&str>) -> PathBuf {
             return PathBuf::from(cfg.trim());
         }
     }
+    default_media_dir()
+}
+
+/// The media folder when neither `UTCP_MEDIA_DIR` nor `media_dir` sets one.
+pub fn default_media_dir() -> PathBuf {
     #[cfg(not(windows))]
     {
         if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -202,7 +264,9 @@ fn resolve_media_dir(configured: Option<&str>) -> PathBuf {
     }
 }
 
-fn resolve_socket_endpoint(cache_dir: &Path) -> String {
+/// The daemon endpoint. `separate_setup` (its own config or cache folder) gives a setup its own endpoint: on Unix
+/// `utcp.sock` in its cache folder, on Windows a pipe name with a hash of that folder.
+fn resolve_socket_endpoint(cache_dir: &Path, separate_setup: bool) -> String {
     if let Ok(explicit) = std::env::var("UTCP_SOCKET_PATH") {
         if !explicit.trim().is_empty() {
             return explicit;
@@ -210,7 +274,14 @@ fn resolve_socket_endpoint(cache_dir: &Path) -> String {
     }
     #[cfg(windows)]
     {
-        let _ = cache_dir;
+        let suffix = if separate_setup {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(cache_dir.to_string_lossy().as_bytes());
+            let hex: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+            format!("-{hex}")
+        } else {
+            String::new()
+        };
         let user = std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_else(|_| "default".to_string());
@@ -224,10 +295,13 @@ fn resolve_socket_endpoint(cache_dir: &Path) -> String {
                 }
             })
             .collect();
-        format!(r"\\.\pipe\utcp-{}", safe_user)
+        format!(r"\\.\pipe\utcp-{}{}", safe_user, suffix)
     }
     #[cfg(not(windows))]
     {
+        if separate_setup {
+            return cache_dir.join("utcp.sock").to_string_lossy().into_owned();
+        }
         if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
             let p = PathBuf::from(runtime_dir).join("utcp.sock");
             return p.to_string_lossy().into_owned();
@@ -279,13 +353,23 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// User-level management settings persisted in `settings.toml`.
+/// User-level management settings persisted in `settings.toml`. Every field must also be in
+/// [`crate::settings_file::settings`], which writes the template and adds new settings to old files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtcpSettings {
     #[serde(default = "default_true")]
     pub cache_on_register: bool,
     #[serde(default)]
     pub daemon_idle_timeout_mins: u64,
+    /// Largest file a tool may upload, in MB. `None` (absent or commented out): no limit. `0`: uploads off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_upload_mb: Option<u64>,
+    /// Largest file a tool may download, in MB. `None`: no limit. `0`: downloads off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_download_mb: Option<u64>,
+    /// Where downloaded files go. `None`: the user's Downloads folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_dir: Option<String>,
     #[serde(default = "default_max_media_files")]
@@ -330,6 +414,9 @@ impl Default for UtcpSettings {
         Self {
             cache_on_register: true,
             daemon_idle_timeout_mins: 0,
+            max_upload_mb: None,
+            max_download_mb: None,
+            download_dir: None,
             media_dir: None,
             max_media_files: default_max_media_files(),
             media_ttl_mins: default_media_ttl_mins(),
@@ -359,12 +446,6 @@ impl UtcpSettings {
     pub fn load(paths: &UtcpPaths) -> Self {
         Self::load_from_file(&paths.settings_file)
     }
-
-    pub fn save(&self, paths: &UtcpPaths) -> Result<()> {
-        paths.ensure_dirs()?;
-        let serialized = toml::to_string_pretty(self)?;
-        write_atomic(&paths.settings_file, serialized.as_bytes())
-    }
 }
 
 #[cfg(test)]
@@ -390,6 +471,22 @@ pub(crate) mod test_support {
             activity_log_bak: base.join("state/activity.jsonl.bak"),
             socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: base.join("state/daemon.pid"),
+            separate_setup: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setup_key;
+    use std::path::Path;
+
+    #[test]
+    fn setup_key_is_stable_and_differs_per_config_file() {
+        let a = setup_key(Path::new("/srv/one/.utcp_config.json"));
+        assert_eq!(a.len(), 12);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, setup_key(Path::new("/srv/one/.utcp_config.json")));
+        assert_ne!(a, setup_key(Path::new("/srv/two/.utcp_config.json")));
     }
 }

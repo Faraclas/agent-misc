@@ -8,7 +8,7 @@ description: >-
 ---
 
 <!-- Written by utcp from its built-in template and your registered manuals; edits here are overwritten. Change
-manuals and hints with `{{BIN_NAME}} register`, `deregister` or `set-hint`, which update this file. -->
+manuals and hints with `{{BIN_NAME}} register`, `promote`, `deregister` or `set-hint`, which update this file. -->
 
 # UTCP Direct Tool Calling (`{{BIN_NAME}}`)
 
@@ -18,13 +18,13 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 
 ## 1. Discover & Inspect Tools Lazily
 
-- **Step 1 — Search tools by keyword (compact summary):**
+- **Step 1: Search tools by keyword (compact summary):**
 
   ```sh
   {{BIN_NAME}} search "<keywords>"
   ```
 
-- **Step 2 — Fetch the exact JSON input schema for only the tool you need:**
+- **Step 2: Fetch the exact JSON input schema for only the tool you need:**
 
   ```sh
   {{BIN_NAME}} schema <manual.tool>
@@ -34,6 +34,14 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 
   ```sh
   {{BIN_NAME}} list
+  ```
+
+- **Staged manuals** (added with `{{BIN_NAME}} stage` for testing, not yet promoted) are not in `search` or `list`.
+  Reach them only when the user asks you to test one, with `--staged` on `list`, `schema`, `call` and `batch`:
+
+  ```sh
+  {{BIN_NAME}} list --staged
+  {{BIN_NAME}} call --staged <manual.tool> '{"param": "value"}'
   ```
 
 ## 2. Call a Tool
@@ -48,10 +56,26 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 - **Images and Binary Media:** If a tool writes an image or binary payload to a file path on disk (for example,
   `"type": "media_file"` with a `"path"`), pass that file path to your multimodal file-reading/vision tool only when
   visual inspection is needed.
+- **Files a tool answers with** (an archive, a log, a PDF): utcp saves the file and prints
+  `{"type": "file", "path": ..., "mime_type": ..., "bytes": ..., "filename": ...}` instead of its content
+  (`mime_type` is the bare media type, such as `application/zip`, without parameters). Without `--out` it goes to
+  the user's Downloads folder (`a.zip` becomes `a (1).zip` if it exists; nothing is overwritten). To choose the
+  place, pass `--out <path>` (overwrites, like `curl -o`; a folder keeps the server's file name), or `--out -` to get
+  the raw bytes on stdout for a pipe. Open the file only if you need its content.
+- **Answers too large to print:** a JSON or text answer over 10 MB is saved to a file the same way, with a `note`.
+  Read the parts you need (for example with `jq`), or call again with `--fields` to get less. That folder is
+  emptied after a day, so use `--out` for a file you want to keep.
+- **Uploading a file:** a tool that uploads takes the file in its body argument (see `schema`) as
+  `{"file": "<path>"}`; add `"offset"` and `"length"` (bytes) to send one part. A relative path is relative to your
+  working folder, and utcp reads the file with your permissions.
+- **Size limits:** when an upload or download fails "only because of this limit", tell the user: the error names
+  the setting (`max_upload_mb` or `max_download_mb` in utcp's `settings.toml`) and how to change it. Do not change
+  it yourself unless the user asks.
 
 ## 3. Execute Multiple Calls in Parallel (`batch`)
 
-Each item in `batch` also accepts an optional `"fields": ["key1", "nested.key2"]` array:
+Each item in `batch` also accepts an optional `"fields": ["key1", "nested.key2"]` array, and `"out": "<path>"` to
+save that item's answer to a file:
 
 {{BATCH_EXAMPLE}}
 
@@ -66,6 +90,15 @@ it needs secrets, a `Required credentials` line.
 
   ```sh
   {{BIN_NAME}} register <name> <url_or_file_path> --hint '<few words>' [-H 'Authorization: Bearer ${API_TOKEN}'] [--base-url <url>]
+  ```
+
+- **Or stage it first** (same arguments as `register`) to review and test it before agents see it: `diff` shows what
+  changes, `call --staged` tests it, `promote` makes it active (`discard` drops it, `rollback` undoes a promote):
+
+  ```sh
+  {{BIN_NAME}} stage <name> <url_or_file_path> --hint '<few words>'
+  {{BIN_NAME}} diff [<name>]
+  {{BIN_NAME}} promote [<name>]
   ```
 
 - **Import an MCP server** (Model Context Protocol). `import-mcp` asks the server once for its tool list and saves
@@ -102,7 +135,7 @@ it needs secrets, a `Required credentials` line.
 - **Verify an import:**
 
   ```sh
-  {{BIN_NAME}} list --manual <name>
+  {{BIN_NAME}} list <name>
   {{BIN_NAME}} search "<keywords>"
   ```
 

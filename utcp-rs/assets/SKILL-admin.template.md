@@ -1,9 +1,9 @@
 ---
 name: utcp-admin
 description: >-
-  Change this machine's utcp setup: add, refresh or remove APIs and MCP servers (register, import-mcp, deregister),
-  set manual hints and secrets, restart the utcp daemon or a stuck local MCP server, and find out why utcp calls
-  fail. To find and call tools, use the utcp-tools skill instead.
+  Change this machine's utcp setup: add, stage, promote, refresh or remove APIs and MCP servers (register, stage,
+  import-mcp, deregister), set manual hints and secrets, restart the utcp daemon or a stuck local MCP server, and find
+  out why utcp calls fail. To find and call tools, use the utcp-tools skill instead.
 ---
 
 <!-- Written by utcp from its built-in template; edits here are overwritten. Rewrite it with
@@ -16,7 +16,7 @@ MCP servers. A change you make here changes them for all agents.
 
 ## Rules
 
-- Add, refresh or remove manuals only when the user asks for it.
+- Add, stage, promote, roll back, refresh or remove manuals only when the user asks for it.
 - Ask the user before `{{BIN_NAME}} deregister` (with or without `--purge-cache`) and before
   `{{BIN_NAME}} daemon stop` or `daemon restart`: they affect every agent, and a daemon restart fails other agents'
   calls in progress. Restarting one hung local MCP server (`daemon restart-server`) needs no permission.
@@ -26,13 +26,21 @@ MCP servers. A change you make here changes them for all agents.
   yourself: it prints the values. `{{BIN_NAME}} doctor` shows which secrets are set and where they come from.
 - Always pass `--hint` with a few words (60 characters at most) saying what the manual is for. Agents see it next to
   the manual's name in the utcp-tools skill.
-- After a change, check it: `{{BIN_NAME}} list --manual <name>`, `{{BIN_NAME}} search "<keywords>"`, or
+- After a change, check it: `{{BIN_NAME}} list <name>`, `{{BIN_NAME}} search "<keywords>"`, or
   `{{BIN_NAME}} doctor`.
+- Settings are in `settings.toml` (`{{BIN_NAME}} doctor` shows where, and the upload and download limits). It is the
+  user's file: change it only when the user asks, by editing the one line (remove or add the `#`), never by
+  deleting lines. `operating.md` section 2 lists every setting.
 
 ## Key Commands
 
 ```sh
 {{BIN_NAME}} register <name> <url_or_file> --hint '<few words>'           # OpenAPI spec or UTCP manual
+{{BIN_NAME}} stage <name> <url_or_file> --hint '<few words>'              # the same, staged for review first
+{{BIN_NAME}} diff [<name>]                       # staged vs active: tools added, removed, changed
+{{BIN_NAME}} call --staged <manual.tool> '<json>' # test a staged manual
+{{BIN_NAME}} promote [<name>]                    # make staged manuals active (discard drops them)
+{{BIN_NAME}} rollback <name>                     # back to the version the last promote replaced
 {{BIN_NAME}} import-mcp <name> --url <url> --register --hint '<few words>' # MCP server over HTTP
 {{BIN_NAME}} import-mcp <name> --command <program> --arg <a> --arg <b> --register --hint '<few words>'
 {{BIN_NAME}} set-hint <name> '<few words>'       # add or change a hint
@@ -49,8 +57,8 @@ MCP servers. A change you make here changes them for all agents.
 `operating.md`, next to this file, covers each task step by step. Read only the section you need:
 
 1. What Runs Where (files and paths)
-2. First Setup
-3. Adding Tools (secrets and the secrets command, MCP servers in containers)
+2. First Setup (and every setting in `settings.toml`)
+3. Adding Tools (staging, secrets and the secrets command, MCP servers in containers, files tools send and receive)
 4. Changing and Removing Manuals
 5. The Daemon
 6. Local MCP Servers

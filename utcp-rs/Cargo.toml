@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["Elias Faraclas"]
@@ -64,6 +64,8 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
     "rustls-tls-native-roots",
 ] }
 toml = "0.8"
+# Edits one line of settings.toml and keeps the user's comments (already in the lock file through toml).
+toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
 url = "2.5"
 urlencoding = "2.1"
 

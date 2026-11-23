@@ -1,10 +1,11 @@
 # `utcp-rs`: Direct UTCP Rust Workspace Specification (Zero-MCP, Dual-Mode CLI + Daemon, Linux & Windows)
 
-- **Status:** v1.11 (Implemented — Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
+- **Status:** v1.13 (Implemented: Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
   manual lifecycle (deregister / re-register / purge), env var allow-list, per-manual skill hints, 6-tab TUI with Try
   popup and MCP import, concurrent stdio MCP routing, stdio MCP process-tree cleanup, clear rate-limit errors,
   `utcp log recent`, stdio MCP server management, interruptible direct mode, `utcp-admin` skill and operating guide,
-  secrets command)
+  secrets command, staging (stage / diff / promote / discard / rollback), file uploads and downloads with limits,
+  large answers saved to files, stall timeout, self-updating `settings.toml` template)
 - **Repository:** `agent-misc` (`/utcp-rs`)
 - **License:** MIT. `utcp-core` is derived from `rs-utcp` 0.3.2 (`MIT OR Apache-2.0`; its Apache-2.0 text is kept as
   `crates/utcp-core/LICENSE-UPSTREAM-RS-UTCP`, see `NOTICE`).
@@ -102,11 +103,11 @@ feature flags that upstream omitted.
 
 Upstream `rs-utcp/Cargo.toml` defines **zero Cargo feature flags**, unconditionally compiling three heavy subsystems:
 
-1. `webrtc = "0.14"` — Pulls in ~150 crates (DTLS, SRTP, STUN, TURN, ICE, SDP, MDNS) and `openssl-sys`.
-2. `tonic = "0.11"` + `prost` + `tonic-build` — Pulls in ~60 gRPC crates and runs a `build.rs` requiring `protoc`.
-3. `rhai = "1.18"` — Embedded scripting engine for the `codemode` plugin, which **currently fails to compile** on
+1. `webrtc = "0.14"`: Pulls in ~150 crates (DTLS, SRTP, STUN, TURN, ICE, SDP, MDNS) and `openssl-sys`.
+2. `tonic = "0.11"` + `prost` + `tonic-build`: Pulls in ~60 gRPC crates and runs a `build.rs` requiring `protoc`.
+3. `rhai = "1.18"`: Embedded scripting engine for the `codemode` plugin, which **currently fails to compile** on
    crates.io because `rhai 1.27` uses `smartstring` without enabling `smartstring/serde`.
-4. `reqwest` & `tokio-tungstenite` with `native-tls` — Pulls in system `OpenSSL` instead of `rustls`.
+4. `reqwest` & `tokio-tungstenite` with `native-tls`: Pulls in system `OpenSSL` instead of `rustls`.
 
 #### What We Keep Active by Default in `utcp-core` (100% Upstream Code, Zero Rewriting)
 
@@ -117,16 +118,16 @@ upstream's core engine and outbound transports active out of the box:
 - **Core Spec & OpenAPI Ingest (`src/spec.rs`, `src/call_templates.rs`, `src/openapi/`, `src/auth/`, `src/security.rs`):**
   Full UTCP 1.0 manual parsing, OpenAPI 2.0/3.x conversion, authentication schemes, and SSRF validation.
 - **Default Pure-Rust Outbound Transports (`src/transports/`):**
-  - `http` & `http_stream` (`reqwest` with `rustls`) — REST APIs, OpenAPI endpoints, local HTTP services.
-  - `websocket` (`tokio-tungstenite` with `rustls`) — Bidirectional WebSocket services (e.g., an agent container's
+  - `http` & `http_stream` (`reqwest` with `rustls`): REST APIs, OpenAPI endpoints, local HTTP services.
+  - `websocket` (`tokio-tungstenite` with `rustls`): Bidirectional WebSocket services (e.g., an agent container's
     `ws://.../ws` endpoint or a streaming voice server).
-  - `sse` (`eventsource-stream`) — Server-Sent Events streaming endpoints.
-  - `graphql` — GraphQL queries, mutations, and subscriptions.
-  - `cli` (`tokio::process::Command`) — Structured JSON wrapper around local CLIs (e.g., a container management script).
-  - `text` — Local script execution transport (note: cached `ManualV1` `.utcp.json` files resolve tools directly to
+  - `sse` (`eventsource-stream`): Server-Sent Events streaming endpoints.
+  - `graphql`: GraphQL queries, mutations, and subscriptions.
+  - `cli` (`tokio::process::Command`): Structured JSON wrapper around local CLIs (e.g., a container management script).
+  - `text`: Local script execution transport (note: cached `ManualV1` `.utcp.json` files resolve tools directly to
     their underlying `http`/`websocket`/`cli` transports rather than routing through `TextTransport`).
-  - `tcp` & `udp` — Raw socket transports.
-  - `mcp` (Outbound Client Only, Default-Compiled) — Pure-Rust JSON-RPC 2.0 client (`stdio` & `http`) requiring zero
+  - `tcp` & `udp`: Raw socket transports.
+  - `mcp` (Outbound Client Only, Default-Compiled): Pure-Rust JSON-RPC 2.0 client (`stdio` & `http`) requiring zero
     extra crates and running zero background activity unless a third-party MCP-only server is explicitly imported via
     `utcp import-mcp`. Allows IDEs, CLIs, and headless gateways to stay 100% free of MCP configurations even when a
     vendor only ships an MCP binary or URL.
@@ -202,12 +203,13 @@ upstream's core engine and outbound transports active out of the box:
 | Artifact | Purpose | Linux Path (XDG) | Windows Path (Known Folders) |
 | :--- | :--- | :--- | :--- |
 | **Binary (`PATH`)** | Single CLI & daemon executable | `/usr/bin/utcp` or `~/.local/bin/utcp` | `%LOCALAPPDATA%\Programs\utcp\utcp.exe` |
-| **Daemon IPC Socket** | Local IPC endpoint for Daemon Mode | `$XDG_RUNTIME_DIR/utcp.sock` (fallback `~/.cache/utcp/utcp.sock`) | `\\.\pipe\utcp-<USERNAME>` |
+| **Daemon IPC Socket** | Local IPC endpoint for Daemon Mode | `$XDG_RUNTIME_DIR/utcp.sock` (fallback `~/.cache/utcp/utcp.sock`; a separate setup: `utcp.sock` in its cache folder) | `\\.\pipe\utcp-<USERNAME>` (a separate setup: `utcp-<USERNAME>-<hash of its cache folder>`) |
 | **`utcp.sock.lock`** | Held by the running daemon, so only one can bind the socket (empty, `0600`) | Next to the socket | None: the pipe is created first-instance-only |
-| **`settings.toml`** | Management flags (`cache_on_register`, daemon/log opts, media spool) and the optional `[secrets]` command (`command`, `timeout_secs`); an invalid file is reported by the daemon and `doctor`, and the defaults apply | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
+| **`settings.toml`** | The user's settings (`cache_on_register`, `daemon_idle_timeout_mins`, `max_upload_mb`, `max_download_mb`, `download_dir`, media spool) and the optional `[secrets]` command (`command`, `timeout_secs`). Created from a commented template on first use; each run adds settings a newer utcp knows (never changing existing lines; old file kept as `settings.toml.bak`). One list in `settings_file.rs` drives the template, the sync and `doctor`'s unknown-setting check. An invalid file is left alone, reported by the daemon and `doctor`, and the defaults apply | `~/.config/utcp/settings.toml` | `%APPDATA%\utcp\config\settings.toml` |
 | **`.utcp_config.json`** | Shared UTCP manual registry (machine-wide per user) | `~/.config/utcp/.utcp_config.json` | `%APPDATA%\utcp\config\.utcp_config.json` |
 | **`.env`** | Namespaced API secrets (`chmod 600` / user ACL) | `~/.config/utcp/.env` | `%APPDATA%\utcp\config\.env` |
 | **`manuals/*.utcp.json`** | Converted & cached UTCP manuals on disk | `~/.cache/utcp/manuals/` | `%LOCALAPPDATA%\utcp\cache\manuals\` |
+| **`manuals/staged/`, `manuals/previous/`** | Staged manuals (`utcp stage`), and the version each `promote` replaced (`utcp rollback`) | `~/.cache/utcp/manuals/staged/`, `.../previous/` | `%LOCALAPPDATA%\utcp\cache\manuals\staged\`, `...\previous\` |
 | **`search_index.bin`** | Pre-computed tool metadata & schema index | `~/.cache/utcp/search_index.bin` | `%LOCALAPPDATA%\utcp\cache\search_index.bin` |
 | **`logging.enabled`** | Sentinel file present only when disk logging is on | `~/.local/state/utcp/logging.enabled` | `%LOCALAPPDATA%\utcp\data\logging.enabled` |
 | **`activity.jsonl`** | Opt-in call audit log (with `.bak` rotation) | `~/.local/state/utcp/activity.jsonl` | `%LOCALAPPDATA%\utcp\data\activity.jsonl` |
@@ -217,13 +219,21 @@ upstream's core engine and outbound transports active out of the box:
 
 ### Shared User Catalog & Explicit Override Rule
 
-1. By default, every `utcp` invocation—regardless of what directory Zed, VS Code, Antigravity, or Hermes was launched
-   from—uses the single shared user catalog (`~/.config/utcp/.utcp_config.json` and `~/.cache/utcp/`). No implicit
+1. By default, every `utcp` invocation, regardless of what directory Zed, VS Code, Antigravity, or Hermes was launched
+   from, uses the single shared user catalog (`~/.config/utcp/.utcp_config.json` and `~/.cache/utcp/`). No implicit
    `cwd` `.utcp_config.json` lookup is performed, avoiding directory-dependent surprises when agents start in `~`.
 2. Isolation for tests, containers, or custom registries is always explicit via `--config <path>` or `UTCP_CONFIG` /
    `UTCP_CONFIG_DIR` / `UTCP_CACHE_DIR` / `UTCP_STATE_DIR` environment variables. The platform folders are looked up
    only for a directory without an override: on Windows that lookup goes through the Known Folders API, which fails
-   when `%USERPROFILE%` points at a missing folder, so setting all three variables avoids it.
+   when `%USERPROFILE%` points at a missing folder, so setting all three variables avoids it. Such a separate setup
+   (`--config`, `UTCP_CONFIG`, `UTCP_CONFIG_DIR` or `UTCP_CACHE_DIR`) also gets its own daemon endpoint unless
+   `UTCP_SOCKET_PATH` is set, so it never reaches the default setup's daemon; `utcp daemon start`, `stop` and
+   `restart` never delegate to the systemd unit for it. A separate config (`--config`, `UTCP_CONFIG` or
+   `UTCP_CONFIG_DIR`) without `UTCP_CACHE_DIR` gets its own cache folder, `setups/<hash>` in the default one (12 hex
+   digits of the SHA-256 of the config file's absolute path), so it never shares cached manuals or `search_index.bin`
+   with the default setup. An empty variable counts as unset. A separate setup never rewrites skills folders
+   another registry wrote (each folder's `utcp-tools/.utcp-registry` names the `.utcp_config.json` that wrote it;
+   folders without that file belong to the default setup; `sync-ides` always writes and takes a folder over).
 3. The daemon watches its config folder (`.utcp_config.json`, `settings.toml`, `.env`) and `manuals/*.utcp.json`
    (`mtime` / `notify`) so registering manuals or updating API keys takes effect immediately without restarting
    `utcp daemon`.
@@ -243,7 +253,7 @@ is passed:
 1. **Non-Blocking IPC Probe (< 0.05 ms):**
    - `utcp` attempts to connect to the local IPC endpoint (`$XDG_RUNTIME_DIR/utcp.sock` on Linux,
      `\\.\pipe\utcp-<USERNAME>` on Windows).
-2. **If Daemon is Running (Daemon Fast Path — < 0.2 ms):**
+2. **If Daemon is Running (Daemon Fast Path: < 0.2 ms):**
    - The OS kernel creates a dedicated private bi-directional stream (Unix socket mode `0600` on Linux; multi-instance
      Named Pipe created ahead of accept on Windows) between that specific `utcp` CLI process and the daemon. A Windows
      client that still meets `ERROR_PIPE_BUSY` (all instances momentarily taken) retries for up to 2 seconds instead of
@@ -266,11 +276,20 @@ is passed:
    - The CLI sends one frame over its private stream: a `u32` little-endian length prefix, then JSON
      `{"caller", "force_log", "command": {"type": ..., ...}}`. The answer is framed the same way:
      `{"status": "ok", "data": {"kind": ..., "value": ...}}` or `{"status": "error", "message": ...}`.
+   - **Files on a `call` or `batch` connection (`ipc_files.rs`).** Before the answer, both sides may exchange file
+     frames. A length with its top bit set marks a data frame: a `u32` stream id, then bytes; an empty one ends that
+     stream. The daemon asks for an upload with `{"frame": "send_file", "id", "path", "offset", "length"}`; the CLI
+     opens the file itself (checking `max_upload_mb`) and answers `upload_ready {size}` and the bytes, or
+     `upload_failed {message}`. A file answer, or a JSON answer over 10 MB, comes as `{"frame": "file", "id", "item",
+     "meta"}` and bytes; the CLI writes a `.part` file (checking `max_download_mb`; `cancel {id, message}` stops the
+     daemon) and replaces `{"utcp_file_stream": id}` in the answer with the saved file's reference. The CLI stays
+     single-threaded and handles one frame at a time; the daemon reads and writes in separate tasks and always
+     drains what the CLI sends. So the daemon never opens a user's file, and an agent's sandbox stays the boundary.
    - The daemon spawns an isolated Tokio task for that connection, executes the request against its in-memory index and
      warm outbound connection pool, and writes the response back down that exact same private stream.
    - Because each caller has its own OS-managed socket file descriptor, 50 concurrent agents from different Zed/VS
      Code/Antigravity windows never collide or mix responses.
-3. **If Daemon is NOT Running (Direct Standalone Fallback — < 2 ms):**
+3. **If Daemon is NOT Running (Direct Standalone Fallback: < 2 ms):**
    - If the socket does not exist or refuses connection, `utcp` immediately executes the exact same `utcp-core` operation
      in-process against the disk cache (`search_index.bin` and `manuals/<name>.utcp.json`).
 
@@ -435,8 +454,8 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 
 `utcp-core` wraps upstream `rs-utcp`'s spec and OpenAPI ingestion behind a clean loader supporting:
 
-1. **Native UTCP Manual JSON** (`.utcp.json` or `/utcp` discovery endpoint—supporting `http`, `websocket`, `cli`, `sse`,
-   `graphql`, `tcp`, `udp`, and `text` call templates).
+1. **Native UTCP Manual JSON** (`.utcp.json` or `/utcp` discovery endpoint, supporting `http`, `websocket`, `cli`,
+   `sse`, `graphql`, `tcp`, `udp`, and `text` call templates).
 2. **OpenAPI 3.0 / 3.1** (JSON and YAML).
 3. **OpenAPI 2.0 / Swagger** (JSON and YAML).
 
@@ -523,6 +542,26 @@ Reads `cache_on_register` (default: `true`) from `settings.toml` (overridable vi
 - A manual's **hint** (`hint` in its registry entry) survives `refresh`, `deregister`, re-registration without a
   source, and re-registration from a source without `--hint`; `--purge-cache` deletes it with the entry.
 
+### Staging: Stage, Diff, Promote, Discard, Rollback
+
+Like git's index, one staging area lets a manual be reviewed and tested before agents see it.
+
+- `utcp stage <name> <source>` fetches and converts like `register` but stores the entry in a `staged` map in
+  `.utcp_config.json` and the copy in `manuals/staged/<name>.utcp.json`. At most one staged copy per name; staging
+  again replaces it. Without `--hint` it keeps the hint of the staged, active or deregistered manual of that name.
+- Staged manuals are not in `search_index.bin`, `list`, `search` or the skills. `list`, `schema`, `call` and `batch`
+  reach them with `--staged` (daemon or direct mode). The daemon loads them next to the active manuals, adds their
+  variable names to its allow-list and to the names it asks the secrets command for, and `doctor` lists their
+  credentials with `"staged": true`.
+- `utcp diff [<name>]` compares each staged manual with the manual it replaces: tools added, removed, changed (any
+  difference in description, schemas, tags or request) and unchanged, and the hint.
+- `utcp promote [<name>]` (all staged manuals when omitted) makes them active, keeps the registration each replaced
+  (active or deregistered) in a `previous` map with its copy in `manuals/previous/`, rebuilds the index, reloads the
+  daemon and rewrites the installed global skills. It is the only staging step that changes what agents see.
+- `utcp discard [<name>]` drops staged manuals. `utcp rollback <name>` swaps the active manual with its previous
+  version, so a second rollback undoes the first. `deregister --purge-cache` also deletes the staged copy and the
+  previous version. The `staged` and `previous` maps are omitted from the file while empty.
+
 ### Host + Per-Container Manual Pattern (Containerized Agents)
 
 For self-evolving containerized agents (for example a container named `myagent`, and sibling containers running on
@@ -538,11 +577,11 @@ other ports or hosts), tools naturally span two boundaries:
 
 `utcp-rs` supports two ways to expose both sides cleanly:
 
-- **Pattern A — Split Namespaces (Works Out of the Box):**
+- **Pattern A: Split Namespaces (Works Out of the Box):**
   Register one parameterized host manual (`agent_host.*` accepting `instance`) alongside one live manual per
   container (`utcp register myagent http://127.0.0.1:8765/utcp`, `utcp register <next> http://127.0.0.1:8766/utcp`).
   Unified `utcp search` discovers both host airlock tools and container-specific tools together.
-- **Pattern B — Single-Namespace Overlay Fusion (Planned Extension):**
+- **Pattern B: Single-Namespace Overlay Fusion (Planned Extension):**
   Add an optional `--overlay <host-template.utcp.json>` flag to `utcp register` / `utcp refresh` that merges the
   parameterized host-side `cli` templates (bound to that container's name and port) directly with the container's live
   `GET /utcp` tools into a single `<instance>.*` manual (`myagent.stage`, `myagent.harvest`, `myagent.get_state`, etc.).
@@ -557,29 +596,42 @@ bypass the daemon and force standalone execution.
 
 | Command | Description | Execution Path |
 | :--- | :--- | :--- |
-| Global flags: `--config <path>`, `--direct` | `--config` uses another `.utcp_config.json` instead of the shared user catalog; `--direct` skips the daemon. | All commands |
-| `utcp list [--manual <name>] [--json]` | Fast summary of all registered tools (`name`, `protocol`, `description`). | **Hot (Daemon IPC or Sync Direct)** |
+| Global flags: `--config <path>`, `--direct` | `--config` uses another `.utcp_config.json` instead of the shared user catalog (a separate setup with its own cache folder and daemon endpoint, section 3); `--direct` skips the daemon. | All commands |
+| `utcp list [<manual>] [--json] [--staged]` | Fast summary of all registered tools (`name`, `protocol`, `description`), or of one manual's; with `--staged`, of the staged manuals' tools. A manual with no match errors and says what to run instead (for example `--staged` for a staged manual). | **Hot (Daemon IPC or Sync Direct)** |
 | `utcp search <query> [--limit 10] [--schemas] [--json]` | Ranked keyword/tag search returning compact 1-line tool summaries by default (the first line of each description; or full schemas with `--schemas`). Matches tool names, descriptions, tags and the manual's hint words. | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp schema <manual.tool>` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms. | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--pretty \| --compact] [--dry-run] [--log]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); dotted paths pass through arrays (`workflow_runs.id`), and when no field names a top-level key it projects the response's list (`items`/`results`/`data`, else its only array of objects). | **Hot (Daemon IPC or Async Direct)** |
-| `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--pretty \| --compact] [--log]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` as well as `--fields`). | **Hot (Daemon IPC or Async Direct)** |
-| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds) and none of `UTCP_SOCKET_PATH`, `UTCP_CONFIG_DIR` or `UTCP_CONFIG` is set (for `start` and `restart`, also no `--config` or `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run. | Management |
+| `utcp schema <manual.tool> [--staged]` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms. | **Hot (Daemon IPC or Sync Direct)** |
+| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--pretty \| --compact] [--dry-run] [--log] [--staged] [-o \| --out <path>]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); dotted paths pass through arrays (`workflow_runs.id`), and when no field names a top-level key it projects the response's list (`items`/`results`/`data`, else its only array of objects). `--staged` calls a staged manual (logged as `call --staged`). When the call fails because the manual is only on the other side of `--staged`, the error gives the command with or without `--staged`; `utcp call x y` (a tool name where the JSON goes) errors with `utcp call x.y` instead of a JSON parse error. `schema` does the same for `--staged`. A file answer (non-JSON, non-text, sent with `Content-Disposition: attachment`, or the template's `"response_type": "file"`) is saved and its reference `{"type": "file", "path", "mime_type", "bytes", "filename"}` printed (`mime_type` is the `Content-Type` essence, lowercased, without parameters: `application/zip; api-version=7.1` becomes `application/zip`; `application/octet-stream` when the server sends none): to `--out <path>` (overwritten; a folder keeps the server's name; `-` is stdout), else `download_dir`, the Downloads folder, or `<cache>/downloads`. A JSON answer over 10 MB after `--fields` goes to `<cache>/downloads` (pruned after a day) with a `note`; with `--out` any JSON answer goes to that file. A template's `"body_type": "file"` uploads `{"file": "<path>", "offset"?, "length"?}`, read by the calling process; only POST, PUT and PATCH carry it, so on GET, DELETE or HEAD the call fails before sending (a broken manual). Limits: `max_upload_mb`, `max_download_mb`. | **Hot (Daemon IPC or Async Direct)** |
+| `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--pretty \| --compact] [--log] [--staged]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` as well as `--fields`, and per-item `"out": "<path>"` like `call --out`, but not `-`). With `--staged`, every item calls a staged manual. | **Hot (Daemon IPC or Async Direct)** |
+| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds), the setup is the default one (not a separate setup, section 3) and `UTCP_SOCKET_PATH` is not set (for `start` and `restart`, also no `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run. | Management |
 | `utcp daemon servers [--json]` | Lists the local (stdio) MCP servers of registered manuals: state, PID, uptime, restart count, program name. Errors when no daemon is running (in direct mode each call starts and stops its own server). | Management (Daemon IPC) |
 | `utcp daemon stop-server <manual>` | Stops a manual's local MCP server now; waiting calls fail at once and the next call starts it again. Errors for unknown manuals and manuals without a local server. | Management (Daemon IPC) |
 | `utcp daemon restart-server <manual>` | Stops a manual's local MCP server and starts it again now, printing the new PID (or the start error). | Management (Daemon IPC) |
 | `utcp import <source> [-o <path>] [--name <ns>] [--base-url <url>] [-H <k:v>] [--register [--hint <text>]]` | Proactive OpenAPI/Swagger/UTCP conversion to disk ("cache-before-register"). The name defaults to the first URL host label or the file name. `${VAR}` placeholders in `-H` are resolved for the spec download (also `register` and `refresh`) but saved as placeholders; a failed download names unset ones. | Cold |
 | `utcp import-mcp [<name>] (--command <program> [--arg <a>...] [-e KEY=VALUE...] \| --url <url> [-H <k:v>...]) [-o <path>] [--register [--hint <text>]]` | Discovers tools via MCP `initialize` + `tools/list` (60 s timeout) and writes a lazy `.utcp.json` manual (`mcp` outbound client). `--command` is the program only; each `--arg` is one argument (values may start with `-`). `${VAR}` placeholders in `-e`/`-H` are resolved for discovery from the shell, `.env` and the secrets command but saved as placeholders; discovery errors name unset ones. The name defaults to the URL host (`mcp.context7.com` -> `context7`) or the launched package (`npx -y @upstash/context7-mcp` -> `context7`). | Cold |
 | `utcp register <name> [<source>] [--cache \| --no-cache] [--base-url <url>] [-H <k:v>] [--hint <text>]` | Registers a manual into `.utcp_config.json`, caches `manuals/<name>.utcp.json`, and rebuilds `search_index.bin`. Without `<source>`, re-registers a deregistered manual offline from its saved copy (`--hint` is still allowed). `--hint` sets the few words shown next to the name in the skill description; without it an existing hint is kept. Prints a `Hint` line (or how to add one). | Cold |
+| `utcp stage <name> <source> [--base-url <url>] [-H <k:v>] [--hint <text>]` | Like `register`, into the staging area (`manuals/staged/`); the active manuals, index and skills are untouched, and the daemon reloads so `--staged` calls work. Prints `Staged`, `Replaces`, `Hint`, `Secrets` and `Next` lines. | Cold |
+| `utcp diff [<name>] [--json]` | Compares staged manuals with the manuals they replace: `new manual, N tools`, or counts plus `+` added, `-` removed and `~` changed tool names, and a hint change. Ends with a `Next` list: see the tools (`utcp list <manual> --staged`), test, promote, discard. | Cold (Sync) |
+| `utcp promote [<name>]` | Makes staged manuals (all when omitted) active, keeping the replaced registration for `rollback`; rebuilds the index, reloads the daemon, rewrites the installed global skills. | Cold (Sync) |
+| `utcp discard [<name>]` | Drops staged manuals (all when omitted). | Cold (Sync) |
+| `utcp rollback <name>` | Swaps the active manual with the version the last `promote` replaced (twice undoes it); rebuilds, reloads, rewrites skills. | Cold (Sync) |
 | `utcp set-hint <name> (<text> \| --clear)` | Sets or clears a registered or deregistered manual's hint (whitespace collapsed, at most 60 characters, no control characters). For an active manual it also rebuilds the search index (hint words are searchable), tells the daemon to reload, and rewrites the installed global skill copies. | Cold |
 | `utcp get-hint [<name>]` | Prints one manual's hint (or how to add one), or every registered manual with its hint (`-` when none). | Cold (Sync) |
-| `utcp deregister <name> [--purge-cache]` | Removes a manual from search and calls, keeping its settings and saved copy for `utcp register <name>`; `--purge-cache` deletes both for good. Rebuilds index. | Cold |
+| `utcp deregister <name> [--purge-cache]` | Removes a manual from search and calls, keeping its settings and saved copy for `utcp register <name>`; `--purge-cache` deletes both for good, with any staged copy and previous version. Rebuilds index. | Cold |
 | `utcp refresh [<name>]` | Re-fetches and updates cached `.utcp.json` manuals from their recorded `source_url`, or for `import-mcp` manuals asks the MCP server again (recovered from the saved manual, placeholders resolved as at import), and rebuilds `search_index.bin`. | Cold |
 | `utcp log <on \| off \| status \| clear>` | Explicitly enables/disables opt-in disk activity logging (`logging.enabled` sentinel) or clears `activity.jsonl` / `.bak`. | Cold (Sync) |
 | `utcp log recent [--limit 20] [--failed] [--json]` | Shows recent calls, newest first, with the full redacted error text of failures. Reads the daemon's in-memory ring (last 500 calls, works with logging off); without a daemon it reads the log files. | Hot (Daemon IPC) |
 | `utcp media <status \| clear>` | Inspects or clears the bounded media spool (`$XDG_RUNTIME_DIR/utcp-media` on Linux, `%TEMP%\utcp-media` on Windows). | Cold (Sync) |
-| `utcp doctor [--json]` | Checks daemon status, config paths, index freshness, credential status (`SET` vs. `MISSING`, with the source: `secrets command`, `caller shell`, `daemon environment`, or `environment` without a daemon), the secrets command's last run, an invalid `settings.toml`, logging state, and IDE skills. With the daemon running, the credentials and secrets command are the daemon's (what calls use). | Cold (Sync) |
+| `utcp doctor [--json]` | Checks daemon status, config paths, index freshness, the number of staged manuals, credential status (`SET` vs. `MISSING`, with the source: `secrets command`, `caller shell`, `daemon environment`, or `environment` without a daemon; one line per secret listing every manual that uses it, staged ones marked), the secrets command (always shown: its last run, or `not set`), the `.env` file (always shown, with whether it exists), an invalid `settings.toml`, the settings file and any setting in it with no effect (with a hint such as a commented section header), the upload and download limits, the downloads folder and where it comes from, logging state, and IDE skills. With the daemon running, the credentials and secrets command are the daemon's (what calls use). | Cold (Sync) |
 | `utcp sync-ides [--global] [--workspace <dir>] [--status] [--print-skill]` | Installs or repairs the `utcp-tools` and `utcp-admin` skills (plus `utcp-admin/operating.md`) across Zed, VS Code, Copilot CLI, Antigravity CLI, and Hermes without requiring Windows Admin symlink privileges. `--print-skill` writes the rendered `utcp-tools` skill to stdout (release archives and ebuilds). | Cold (Sync) |
 | `utcp ui` | Launches the interactive `ratatui` companion Terminal UI (does not auto-enable logging). | Interactive |
+
+**Text output.** `list` and `search` rows start with `* `, so a long description that wraps is not mistaken for a
+new tool. In a terminal, tool names (`list`, `search`) and manual names (`diff`) are blue, and `SET` (`doctor`) and
+`UP TO DATE` (`doctor`, `sync-ides --status`) are green. Color is off when stdout is not a terminal, `NO_COLOR` is set,
+or `TERM=dumb`, so agents, pipes and `--json` get plain text. When stdout closes early (`utcp list | head`,
+`utcp call ... --out - | head -c 100`), the rest of the output is dropped and the command ends quietly with exit code
+0 (a download to stdout stops); SIGPIPE stays ignored, so a closed daemon socket or MCP server pipe is an ordinary
+error, never a crash.
 
 ---
 
@@ -604,10 +656,10 @@ strictly read-only until the user triggers an action.
    - **Key hints are light blue:** every on-screen hint (`Enter: Browse tools`, `[Shift+D]`, `x: clear`, ...) in
      titles, hint lines, popups, the header and the status line is drawn in light blue, while labels and `|`
      separators keep their normal colour, so the available keys are easy to spot on every tab.
-2. **Tab 1 — Manuals & Cache Inspector:**
+2. **Tab 1: Manuals & Cache Inspector:**
    - Table of registered manuals showing: Name, Protocol(s) (`http`, `ws`, `cli`, etc.), Mode (Cached Disk / Live
      Remote), Tool Count, File Size, SHA-256 (short), `.env` Credential Status (`SET` in green vs
-     `MISSING: my__api_TOKEN` in red—never exposing secret values), and State (last column).
+     `MISSING: my__api_TOKEN` in red, never exposing secret values), and State (last column).
    - `a` toggles **Registered Manuals** (default) and **All Manuals**, which also lists deregistered manuals and saved
      `.utcp.json` files with no registry entry. Those rows are dim and italic, with State `○ deregistered`,
      `○ saved file`, or `○ copy missing` (cannot be restored offline) instead of a green `● registered`.
@@ -627,7 +679,7 @@ strictly read-only until the user triggers an action.
      (too long, control characters) keeps the popup open with the error. Saving an active manual's hint rewrites
      the installed global skill copies and reloads the search index (hint words are searchable) right away. Every
      key goes to the popup; the mouse is ignored.
-3. **Tab 2 — Tool Search & Schema Browser:**
+3. **Tab 2: Tool Search & Schema Browser:**
    - Live interactive search bar querying the catalog as you type, showing latency in microseconds, 1-line tool
      summaries on the left (Matches pane), and a vertically scrollable right pane (with a visual scrollbar) for the
      selected tool. Outside the search box, `x` clears the query. `Esc` / `Backspace` returns directly to Tab 1 with
@@ -665,7 +717,7 @@ strictly read-only until the user triggers an action.
      wheel moves the selection. While capture is on, most terminals need `Shift`+drag to select text.
    - Scroll limits, the `Line X/Y` title, and the scrollbar count **wrapped** terminal rows (ratatui
      `Paragraph::line_count`, feature `unstable-rendered-line-info`), so long description lines are reachable.
-4. **Tab 3 — Import (OpenAPI / UTCP spec or MCP server):**
+4. **Tab 3: Import (OpenAPI / UTCP spec or MCP server):**
    - A mode line on top; `m` switches between **OpenAPI / UTCP spec** and **MCP server**. Each mode keeps its own
      form, so switching loses nothing. Five fields: Source (spec URL or file; or MCP server URL or command line),
      Name (optional; the field title shows the inferred default), Hint (optional; a few words for the skill
@@ -685,8 +737,9 @@ strictly read-only until the user triggers an action.
      After `r` with an empty Hint it suggests adding one with Tab 1 `h`.
    - The panel below the fields shows mode-specific examples (`https://petstore3.swagger.io/api/v3/openapi.json`,
      `https://mcp.context7.com/mcp`, `npx -y @modelcontextprotocol/server-everything`); `?` has the full guide.
-5. **Tab 4 — Settings & Skills:**
-   - Toggle switches for the daemon (`D`), `cache_on_register` (`c`, updates `settings.toml`), and opt-in
+5. **Tab 4: Settings & Skills:**
+   - Toggle switches for the daemon (`D`), `cache_on_register` (`c`, rewrites only that line of `settings.toml`,
+     keeping every comment, and uncomments it if needed), and opt-in
      `record_activity_log` (`L`, toggles the `logging.enabled` sentinel), plus the config registry path.
    - **Agent Skills: Your Account** lists the account-wide skills folders (Zed, VS Code + Copilot CLI, Antigravity
      `agy`, Hermes) as `UP TO DATE` / `OUTDATED` / `NOT INSTALLED`. `s` rewrites them (**Sync / Repair**).
@@ -695,7 +748,7 @@ strictly read-only until the user triggers an action.
      `w` adds or updates `.agents/skills/utcp-tools/` and `utcp-admin/` there after a Yes/No popup (default No); a
      folder that cannot be written reports the error in the status bar. `s` only updates this copy once it exists, so
      it never creates files in the start folder. To manage another repo, project, or workspace, start `utcp ui` there.
-6. **Tab 5 — Recent Activity Feed (`activity.jsonl` + Daemon Ring Buffer):**
+6. **Tab 5: Recent Activity Feed (`activity.jsonl` + Daemon Ring Buffer):**
    - Live-tailing table of recorded `search`, `call`, and `batch` invocations across the daemon ring buffer and
      `activity.jsonl` (plus `.bak`): Time (local; `HH:MM:SS` for today, `MM-DD HH:MM:SS` for earlier days; the log
      keeps the RFC 3339 UTC timestamp), Mode (`daemon` / `direct`), Caller (`zed`, `vscode`, `agy`, `hermes`, `tui`,
@@ -706,7 +759,7 @@ strictly read-only until the user triggers an action.
      It keeps a copy of the row, so the live reload does not change it. `↑`/`↓`/`j`/`k`, mouse wheel,
      `PgUp`/`PgDn`, and `Home`/`End` scroll it; `Esc`, `Enter`, or `q` close it.
    - Actions: `L` toggles the disk log, `x` clears `activity.jsonl` and `.bak`.
-7. **Tab 6 — Daemon & Environment Monitor (`--user` Service & Spool Inspector):**
+7. **Tab 6: Daemon & Environment Monitor (`--user` Service & Spool Inspector):**
    - Live daemon telemetry: PID, socket/pipe path, uptime, requests served, loaded manuals/tools, count of env vars
      used by manuals (the only ones the daemon keeps),
      Linux `systemd --user` `utcp-daemon.service` unit state, and media spool usage (`files`, `bytes`, `TTL`).
@@ -722,7 +775,7 @@ strictly read-only until the user triggers an action.
 ### Lazy Context Loading & Token Budget (Why UTCP Beats Eager MCP)
 
 Traditional MCP servers inject the full JSON schema of every registered tool into every agent's system prompt at
-session startup—burning thousands of tokens before the user even types a message. `utcp-rs` uses **5-stage lazy
+session startup, burning thousands of tokens before the user even types a message. `utcp-rs` uses **5-stage lazy
 progressive disclosure** so an agent's context window is never polluted with unused tool definitions:
 
 | Stage | What Happens | Context Cost | What Stays Hidden from Context |
@@ -751,7 +804,7 @@ and Windows so Windows never fails on unprivileged symlink creation):
   (`%APPDATA%\utcp\config\.env`, `\\.\pipe\utcp-<USERNAME>`). Messages from the CLI and TUI name the `.env` file this
   machine actually uses.
 - **Daemon-Transparent:** In both cases, the skill instructions for agents remain 100% identical whether `utcp daemon`
-  is running or not—the CLI handles Daemon vs. Direct mode transparently.
+  is running or not: the CLI handles Daemon vs. Direct mode transparently.
 
 ### Manual Hints in the Skill Description
 
@@ -792,7 +845,8 @@ Copilot agent asked to "make an echo call to mocktest" (an imported MCP server) 
   so it always matches the installed version. The admin skill lists its sections; agents read only the one they need.
 
 `exists` (`NOT INSTALLED` otherwise) means `utcp-tools/SKILL.md` is there; `UP TO DATE` means all three files match
-this binary. Register, deregister and hint changes rewrite all three in every global folder that has the tools skill.
+this binary. Register, deregister, promote, rollback and hint changes rewrite all three in every global folder that has
+the tools skill (and that this registry wrote, see section 3).
 
 | Client | Workspace Skills Folder (Linux & Windows) | Global Skills Folder (Linux) | Global Skills Folder (Windows) |
 | :--- | :--- | :--- | :--- |
@@ -801,7 +855,7 @@ this binary. Register, deregister and hint changes rewrite all three in every gl
 | **Hermes Agent** | `.agents/skills/` | `~/.hermes/skills/software-development/` (only when `~/.hermes/skills` exists) | `%USERPROFILE%\.hermes\skills\software-development\` (only when `%USERPROFILE%\.hermes\skills` exists) |
 | **VS Code (1.146+, Copilot Chat, default Copilot harness)** | `.github/skills/` (documented; not written by utcp). A root `.agents/skills/` appears to load too (observed, not documented) | `~/.copilot/skills/` | `%USERPROFILE%\.copilot\skills\` |
 | **GitHub Copilot CLI** | `.agents/skills/` | `~/.copilot/skills/` (also reads `~/.agents/skills/`) | `%USERPROFILE%\.copilot\skills\` |
-| **Gentoo System Share** | — | `/usr/share/utcp/SKILL.md` (tools skill only; installed by the ebuild in the separate `adaptive-overlay` repo) | — |
+| **Gentoo System Share** | - | `/usr/share/utcp/SKILL.md` (tools skill only; installed by the ebuild in the separate `adaptive-overlay` repo) | - |
 
 The old Gemini CLI path (`~/.gemini/skills`) is not a target: Antigravity replaced Gemini CLI and does not read it.
 VS Code's default Copilot harness documents `~/.copilot/skills/` and `.github/skills/` and does not read
@@ -826,7 +880,7 @@ description: >-
 ---
 
 <!-- Written by utcp from its built-in template and your registered manuals; edits here are overwritten. Change
-manuals and hints with `utcp register`, `deregister` or `set-hint`, which update this file. -->
+manuals and hints with `utcp register`, `promote`, `deregister` or `set-hint`, which update this file. -->
 
 # UTCP Direct Tool Calling (`utcp`)
 
@@ -836,13 +890,13 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 
 ## 1. Discover & Inspect Tools Lazily
 
-- **Step 1 — Search tools by keyword (compact summary):**
+- **Step 1: Search tools by keyword (compact summary):**
 
   ```sh
   utcp search "<keywords>"
   ```
 
-- **Step 2 — Fetch the exact JSON input schema for only the tool you need:**
+- **Step 2: Fetch the exact JSON input schema for only the tool you need:**
 
   ```sh
   utcp schema <manual.tool>
@@ -852,6 +906,14 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 
   ```sh
   utcp list
+  ```
+
+- **Staged manuals** (added with `utcp stage` for testing, not yet promoted) are not in `search` or `list`.
+  Reach them only when the user asks you to test one, with `--staged` on `list`, `schema`, `call` and `batch`:
+
+  ```sh
+  utcp list --staged
+  utcp call --staged <manual.tool> '{"param": "value"}'
   ```
 
 ## 2. Call a Tool
@@ -884,10 +946,26 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 - **Images and Binary Media:** If a tool writes an image or binary payload to a file path on disk (for example,
   `"type": "media_file"` with a `"path"`), pass that file path to your multimodal file-reading/vision tool only when
   visual inspection is needed.
+- **Files a tool answers with** (an archive, a log, a PDF): utcp saves the file and prints
+  `{"type": "file", "path": ..., "mime_type": ..., "bytes": ..., "filename": ...}` instead of its content
+  (`mime_type` is the bare media type, such as `application/zip`, without parameters). Without `--out` it goes to
+  the user's Downloads folder (`a.zip` becomes `a (1).zip` if it exists; nothing is overwritten). To choose the
+  place, pass `--out <path>` (overwrites, like `curl -o`; a folder keeps the server's file name), or `--out -` to get
+  the raw bytes on stdout for a pipe. Open the file only if you need its content.
+- **Answers too large to print:** a JSON or text answer over 10 MB is saved to a file the same way, with a `note`.
+  Read the parts you need (for example with `jq`), or call again with `--fields` to get less. That folder is
+  emptied after a day, so use `--out` for a file you want to keep.
+- **Uploading a file:** a tool that uploads takes the file in its body argument (see `schema`) as
+  `{"file": "<path>"}`; add `"offset"` and `"length"` (bytes) to send one part. A relative path is relative to your
+  working folder, and utcp reads the file with your permissions.
+- **Size limits:** when an upload or download fails "only because of this limit", tell the user: the error names
+  the setting (`max_upload_mb` or `max_download_mb` in utcp's `settings.toml`) and how to change it. Do not change
+  it yourself unless the user asks.
 
 ## 3. Execute Multiple Calls in Parallel (`batch`)
 
-Each item in `batch` also accepts an optional `"fields": ["key1", "nested.key2"]` array:
+Each item in `batch` also accepts an optional `"fields": ["key1", "nested.key2"]` array, and `"out": "<path>"` to
+save that item's answer to a file:
 
 ```sh
 utcp batch --stdin <<'EOF'
@@ -909,6 +987,15 @@ it needs secrets, a `Required credentials` line.
 
   ```sh
   utcp register <name> <url_or_file_path> --hint '<few words>' [-H 'Authorization: Bearer ${API_TOKEN}'] [--base-url <url>]
+  ```
+
+- **Or stage it first** (same arguments as `register`) to review and test it before agents see it: `diff` shows what
+  changes, `call --staged` tests it, `promote` makes it active (`discard` drops it, `rollback` undoes a promote):
+
+  ```sh
+  utcp stage <name> <url_or_file_path> --hint '<few words>'
+  utcp diff [<name>]
+  utcp promote [<name>]
   ```
 
 - **Import an MCP server** (Model Context Protocol). `import-mcp` asks the server once for its tool list and saves
@@ -945,7 +1032,7 @@ it needs secrets, a `Required credentials` line.
 - **Verify an import:**
 
   ```sh
-  utcp list --manual <name>
+  utcp list <name>
   utcp search "<keywords>"
   ```
 

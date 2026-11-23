@@ -19,11 +19,9 @@ use process_tree::ServerProcess;
 use crate::auth::AuthConfig;
 use crate::providers::base::Provider;
 use crate::providers::mcp::McpProvider;
-use crate::security::{validate_size_limit, validate_url_security};
+use crate::security::validate_url_security;
 use crate::tools::Tool;
 use crate::transports::{stream::StreamResult, ClientTransport, McpServerState, McpServerStatus};
-
-const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 /// How long one stdio MCP request may wait for its answer. Matches the HTTP client timeout and
 /// `catalog::MCP_DISCOVERY_TIMEOUT`, so a first-run `npx`/`uvx` download still fits.
@@ -165,9 +163,7 @@ async fn stdio_read_loop<R: AsyncRead + Unpin>(
         let Some(tx) = pending.lock().ok().and_then(|mut map| map.remove(&id)) else {
             continue; // the caller already gave up (timeout or cancelled)
         };
-        let outcome = if let Err(e) = validate_size_limit(trimmed.as_bytes(), MAX_RESPONSE_SIZE) {
-            Err(e)
-        } else if let Some(error) = msg.get("error") {
+        let outcome = if let Some(error) = msg.get("error") {
             Err(anyhow!("MCP error: {}", error))
         } else {
             msg.get("result")
@@ -561,7 +557,6 @@ impl McpTransport {
             .map(str::to_string);
 
         let body_bytes = resp.bytes().await?;
-        validate_size_limit(&body_bytes, MAX_RESPONSE_SIZE)?;
         if !body_bytes.is_empty() {
             let parsed = Self::parse_mcp_http_body(&body_bytes)?;
             if let Some(err) = parsed.get("error") {
@@ -631,7 +626,6 @@ impl McpTransport {
         }
 
         let body_bytes = response.bytes().await?;
-        validate_size_limit(&body_bytes, MAX_RESPONSE_SIZE)?;
         let result = Self::parse_mcp_http_body(&body_bytes)?;
 
         if let Some(error) = result.get("error") {

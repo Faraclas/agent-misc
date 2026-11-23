@@ -1,3 +1,29 @@
+use utcp_core::transfer::{stdout_closed, stdout_write_error};
+
+/// Prints to stdout. Once stdout is closed (`utcp list | head`), output is dropped instead of panicking
+/// and the command finishes normally (see `utcp_core::transfer::stdout_closed`).
+fn write_stdout(args: std::fmt::Arguments) {
+    use std::io::Write;
+    if stdout_closed() {
+        return;
+    }
+    if let Err(e) = std::io::stdout().lock().write_fmt(args) {
+        let err = stdout_write_error(e);
+        if !stdout_closed() {
+            panic!("failed printing to stdout: {err:#}");
+        }
+    }
+}
+
+// These shadow std's `print!`/`println!` in this crate (defined before the `mod`s so they apply there).
+macro_rules! print {
+    ($($arg:tt)*) => { $crate::write_stdout(format_args!($($arg)*)) };
+}
+macro_rules! println {
+    () => { $crate::write_stdout(format_args!("\n")) };
+    ($($arg:tt)*) => { $crate::write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
 mod daemon;
 mod tui;
 
@@ -10,7 +36,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::time::Instant;
 use utcp_core::activity::{
-    activity_detail, append_activity_entry, batch_activity_summary, clear_activity_logs,
+    activity_detail, append_activity_entry, batch_activity_summary, call_verb, clear_activity_logs,
     is_logging_enabled, read_recent_activity, set_logging_enabled, ActivityEntry,
 };
 use utcp_core::caller::detect_caller;
@@ -24,14 +50,21 @@ use utcp_core::catalog::{
 use utcp_core::index::ToolSummary;
 use utcp_core::ipc::{
     manual_caller_env, notify_daemon_reload, query_daemon_status, sync_caller_env_to_daemon,
-    try_send_ipc_sync, IpcCommand, IpcPayload, IpcRequest, IpcResponse, McpServerInfo,
+    try_send_ipc_sync, try_send_ipc_with_files, IpcCommand, IpcPayload, IpcRequest, IpcResponse,
+    McpServerInfo,
 };
+use utcp_core::ipc_files::ClientFiles;
 use utcp_core::media::{clear_media_spool, inspect_media_spool};
 use utcp_core::paths::UtcpPaths;
 use utcp_core::skills::{
     inspect_skill_targets, manual_label, refresh_installed_global_skills, registered_manual_labels,
     sync_ide_skills,
 };
+use utcp_core::staging::{
+    diff_staged, discard_staged, list_staged, promote_staged, rollback_manual, stage_manual,
+    ManualDiff, Replaces,
+};
+use utcp_core::transfer::{DownloadFolderSource, OutTarget};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,7 +73,8 @@ use utcp_core::skills::{
     about = "Fast, Zero-MCP Universal Tool Calling Protocol (UTCP) CLI, Daemon & TUI"
 )]
 struct Cli {
-    /// Explicit path to `.utcp_config.json` (overrides shared user catalog)
+    /// Explicit path to `.utcp_config.json` (overrides shared user catalog; a separate setup with its own
+    /// cache folder and daemon unless UTCP_CACHE_DIR / UTCP_SOCKET_PATH say otherwise)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -54,14 +88,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Fast summary of all registered tools
+    /// Fast summary of all registered tools, or of one manual's tools (`utcp list <manual>`)
     List {
-        /// Filter by manual name
-        #[arg(long)]
+        /// Only this manual's tools
         manual: Option<String>,
         /// Output raw JSON array
         #[arg(long)]
         json: bool,
+        /// List the tools of the staged manuals (`utcp stage`) instead of the active ones
+        #[arg(long)]
+        staged: bool,
     },
     /// Ranked keyword/tag search returning compact 1-line summaries by default
     Search {
@@ -81,6 +117,9 @@ enum Commands {
     Schema {
         /// Qualified tool name (`<manual>.<tool>`)
         target: String,
+        /// A tool of a staged manual (`utcp stage`)
+        #[arg(long)]
+        staged: bool,
     },
     /// Execute a registered UTCP tool and print response JSON to stdout
     Call {
@@ -110,6 +149,14 @@ enum Commands {
         /// Force recording this call to `activity.jsonl` even if global logging is off
         #[arg(long)]
         log: bool,
+        /// Call a tool of a staged manual (`utcp stage`), to test it before `utcp promote`
+        #[arg(long)]
+        staged: bool,
+        /// Save the answer to this file instead of printing it (an existing file is overwritten, like
+        /// `curl -o`; a folder keeps the server's file name). `-` writes a file answer's bytes to stdout.
+        /// Without it, a file answer goes to your Downloads folder and its path is printed.
+        #[arg(long, short = 'o', value_name = "PATH")]
+        out: Option<String>,
     },
     /// Execute multiple tool calls concurrently over a shared connection pool
     Batch {
@@ -134,6 +181,9 @@ enum Commands {
         /// Force recording this batch to `activity.jsonl`
         #[arg(long)]
         log: bool,
+        /// Every item calls a staged manual (`utcp stage`)
+        #[arg(long)]
+        staged: bool,
     },
     /// Manage the optional `--user` machine-wide local IPC daemon
     Daemon {
@@ -216,6 +266,48 @@ enum Commands {
         #[arg(long)]
         hint: Option<String>,
     },
+    /// Add an OpenAPI spec or UTCP manual to the staging area without making it active: review it with
+    /// `utcp diff`, test it with `utcp call --staged`, then `utcp promote` it (or `utcp discard` it).
+    /// Replaces a staged copy of the same name
+    Stage {
+        /// Manual namespace name
+        name: String,
+        /// URL or local file path
+        source: String,
+        /// Base URL override
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Extra static HTTP headers (`Key:Value`)
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// A few words on what the manual is for, shown in the agent skill once promoted (kept when omitted)
+        #[arg(long)]
+        hint: Option<String>,
+    },
+    /// Compare staged manuals with the active ones they would replace: tools added, removed and changed
+    Diff {
+        /// Staged manual name (all staged manuals when omitted)
+        name: Option<String>,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make staged manuals active (rebuilds search, refreshes the skills, reloads the daemon). The version
+    /// each replaces is kept for `utcp rollback`
+    Promote {
+        /// Staged manual name (all staged manuals when omitted)
+        name: Option<String>,
+    },
+    /// Drop staged manuals without making them active
+    Discard {
+        /// Staged manual name (all staged manuals when omitted)
+        name: Option<String>,
+    },
+    /// Make the version a `utcp promote` replaced active again. Run it twice to undo it
+    Rollback {
+        /// Manual namespace name
+        name: String,
+    },
     /// Set or clear a manual's hint: the few words shown next to its name in the agent skill's
     /// description, so agents know what an unclear name is for. Refreshes installed skills
     SetHint {
@@ -238,8 +330,9 @@ enum Commands {
     Deregister {
         /// Manual namespace name
         name: String,
-        /// Delete it for good: remove the registry entry and the saved `manuals/<name>.utcp.json`
-        /// (also works on an already-deregistered manual or an orphaned saved file)
+        /// Delete it for good: remove the registry entry and the saved `manuals/<name>.utcp.json`,
+        /// and any staged copy or previous version (also works on an already-deregistered manual
+        /// or an orphaned saved file)
         #[arg(long)]
         purge_cache: bool,
     },
@@ -258,8 +351,8 @@ enum Commands {
         #[command(subcommand)]
         action: MediaAction,
     },
-    /// Check daemon status, config paths, index freshness, credentials (and where each comes from),
-    /// the `[secrets]` command, `settings.toml`, media spool, and IDE skills
+    /// Check daemon status, config paths, index freshness, staged manuals, credentials (and where each
+    /// comes from), the `[secrets]` command, the `.env` file, `settings.toml`, media spool, and IDE skills
     Doctor {
         /// Output raw JSON
         #[arg(long)]
@@ -379,6 +472,11 @@ fn main() {
             eprintln!("utcp: interrupted ({})", signal_name(*signal));
             std::process::exit(128 + signal);
         }
+        // The reader stopped reading (`utcp call ... --out - | head -c 100`): what failed after that
+        // is a consequence, so end as quietly as when only printing stopped.
+        if stdout_closed() {
+            return;
+        }
         eprintln!("Error: {:#}", err);
         std::process::exit(1);
     }
@@ -454,46 +552,63 @@ fn block_on_interruptible<F: std::future::Future>(
 fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let paths = UtcpPaths::resolve(cli.config.as_deref())?;
+    // The daemon started by systemd has no one to tell; the next command a person runs adds the settings.
+    if !matches!(
+        cli.command,
+        Commands::Daemon {
+            action: DaemonAction::Run { .. }
+        }
+    ) {
+        sync_settings(&paths);
+    }
 
     match cli.command {
-        Commands::List { manual, json } => {
+        Commands::List {
+            manual,
+            json,
+            staged,
+        } => {
             let started = Instant::now();
             let caller = detect_caller();
 
-            if !cli.direct {
-                let req = IpcRequest {
-                    caller: caller.clone(),
-                    force_log: false,
-                    command: IpcCommand::List {
-                        manual: manual.clone(),
-                    },
-                };
-                if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
-                    return match resp {
-                        IpcResponse::Ok {
-                            data: IpcPayload::Tools(tools),
-                        } => {
-                            print_tool_summaries(&tools, json, false)?;
-                            Ok(())
-                        }
-                        IpcResponse::Error { message } => Err(anyhow!(message)),
-                        _ => Err(anyhow!("Unexpected IPC response payload")),
+            let tools = 'fetch: {
+                if !cli.direct {
+                    let req = IpcRequest {
+                        caller: caller.clone(),
+                        force_log: false,
+                        command: IpcCommand::List {
+                            manual: manual.clone(),
+                            staged,
+                        },
                     };
+                    if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
+                        match resp {
+                            IpcResponse::Ok {
+                                data: IpcPayload::Tools(tools),
+                            } => break 'fetch tools,
+                            IpcResponse::Error { message } => return Err(anyhow!(message)),
+                            _ => return Err(anyhow!("Unexpected IPC response payload")),
+                        }
+                    }
                 }
+                let tools = list_tools_sync(&paths, manual.as_deref(), staged)?;
+                maybe_log_direct(
+                    &paths,
+                    &caller,
+                    "list",
+                    manual.as_deref().unwrap_or("*"),
+                    true,
+                    "OK",
+                    started,
+                    false,
+                    None,
+                );
+                tools
+            };
+            if let (true, Some(manual)) = (tools.is_empty(), manual.as_deref()) {
+                let registry = UtcpRegistryConfig::load(&paths)?;
+                return Err(anyhow!(empty_list_message(&registry, manual, staged)));
             }
-
-            let tools = list_tools_sync(&paths, manual.as_deref())?;
-            maybe_log_direct(
-                &paths,
-                &caller,
-                "list",
-                manual.as_deref().unwrap_or("*"),
-                true,
-                "OK",
-                started,
-                false,
-                None,
-            );
             print_tool_summaries(&tools, json, false)
         }
 
@@ -545,7 +660,7 @@ fn run_cli() -> Result<()> {
             print_tool_summaries(&tools, json, schemas)
         }
 
-        Commands::Schema { target } => {
+        Commands::Schema { target, staged } => {
             let started = Instant::now();
             let caller = detect_caller();
 
@@ -555,6 +670,7 @@ fn run_cli() -> Result<()> {
                     force_log: false,
                     command: IpcCommand::Schema {
                         target: target.clone(),
+                        staged,
                     },
                 };
                 if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
@@ -565,13 +681,20 @@ fn run_cli() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&schema)?);
                             Ok(())
                         }
-                        IpcResponse::Error { message } => Err(anyhow!(message)),
+                        IpcResponse::Error { message } => Err(with_staged_hint(
+                            anyhow!(message),
+                            &paths,
+                            &target,
+                            staged,
+                            "schema",
+                        )),
                         _ => Err(anyhow!("Unexpected IPC response payload")),
                     };
                 }
             }
 
-            let schema = get_schema_sync(&paths, &target)?;
+            let schema = get_schema_sync(&paths, &target, staged)
+                .map_err(|e| with_staged_hint(e, &paths, &target, staged, "schema"))?;
             maybe_log_direct(
                 &paths, &caller, "schema", &target, true, "OK", started, false, None,
             );
@@ -589,8 +712,19 @@ fn run_cli() -> Result<()> {
             compact,
             dry_run,
             log,
+            staged,
+            out,
         } => {
+            if let Some(word) = json_args.as_deref() {
+                if !target.contains('.') && looks_like_tool_name(word) {
+                    let registry = UtcpRegistryConfig::load(&paths)?;
+                    return Err(anyhow!(split_target_message(
+                        &paths, &registry, &target, word, staged
+                    )));
+                }
+            }
             let args = parse_call_args(json_args, args_stdin, args_file)?;
+            let out = out.as_deref().map(OutTarget::parse);
             let started = Instant::now();
             let caller = detect_caller();
             let fields_opt = if fields.is_empty() {
@@ -609,14 +743,24 @@ fn run_cli() -> Result<()> {
                         dry_run,
                         fields: fields_opt.clone(),
                         caller_env: manual_caller_env(&paths),
+                        staged,
                     },
                 };
-                if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
+                let mut files = ClientFiles::new(&paths);
+                files.call_out = out.clone();
+                files.tool = target.clone();
+                if let Some(resp) = try_send_ipc_with_files(&paths, &req, &mut files)? {
                     return match resp {
                         IpcResponse::Ok {
                             data: IpcPayload::CallResult(val),
-                        } => print_json_output(&val, pretty, compact, &caller),
-                        IpcResponse::Error { message } => Err(anyhow!(message)),
+                        } => print_call_output(&val, out.as_ref(), pretty, compact, &caller),
+                        IpcResponse::Error { message } => Err(with_staged_hint(
+                            anyhow!(message),
+                            &paths,
+                            &target,
+                            staged,
+                            "call",
+                        )),
                         _ => Err(anyhow!("Unexpected IPC response payload")),
                     };
                 }
@@ -625,14 +769,22 @@ fn run_cli() -> Result<()> {
             let rt = build_tokio_runtime()?;
             let outcome = block_on_interruptible(
                 &rt,
-                call_tool_direct(&paths, &target, args, dry_run, fields_opt.as_deref()),
+                call_tool_direct(
+                    &paths,
+                    &target,
+                    args,
+                    dry_run,
+                    fields_opt.as_deref(),
+                    staged,
+                    out.as_ref(),
+                ),
             )?;
             match outcome {
                 Ok(val) => {
                     maybe_log_direct(
                         &paths,
                         &caller,
-                        if dry_run { "dry-run" } else { "call" },
+                        call_verb(dry_run, staged),
                         &target,
                         true,
                         "OK",
@@ -640,14 +792,14 @@ fn run_cli() -> Result<()> {
                         log,
                         None,
                     );
-                    print_json_output(&val, pretty, compact, &caller)
+                    print_call_output(&val, out.as_ref(), pretty, compact, &caller)
                 }
                 Err(err) => {
                     let detail = activity_detail(&format!("{:#}", err), &load_env_map(&paths));
                     maybe_log_direct(
                         &paths,
                         &caller,
-                        if dry_run { "dry-run" } else { "call" },
+                        call_verb(dry_run, staged),
                         &target,
                         false,
                         "ERR",
@@ -655,7 +807,7 @@ fn run_cli() -> Result<()> {
                         log,
                         Some(detail),
                     );
-                    Err(err)
+                    Err(with_staged_hint(err, &paths, &target, staged, "call"))
                 }
             }
         }
@@ -668,6 +820,7 @@ fn run_cli() -> Result<()> {
             pretty,
             compact,
             log,
+            staged,
         } => {
             let mut items = parse_batch_items(stdin, file)?;
             if !fields.is_empty() {
@@ -675,6 +828,22 @@ fn run_cli() -> Result<()> {
                     if item.fields.is_none() {
                         item.fields = Some(fields.clone());
                     }
+                }
+            }
+            let mut item_outs = HashMap::new();
+            for (i, item) in items.iter().enumerate() {
+                match item.out.as_deref().map(OutTarget::parse) {
+                    Some(OutTarget::Stdout) => {
+                        return Err(anyhow!(
+                            "batch item '{}': \"out\": \"-\" (stdout) works only with `utcp call --out -`; \
+                             give a file path",
+                            item.id
+                        ))
+                    }
+                    Some(target) => {
+                        item_outs.insert(i, target);
+                    }
+                    None => {}
                 }
             }
             let started = Instant::now();
@@ -689,9 +858,12 @@ fn run_cli() -> Result<()> {
                         items: items.clone(),
                         concurrency,
                         caller_env: manual_caller_env(&paths),
+                        staged,
                     },
                 };
-                if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
+                let mut files = ClientFiles::new(&paths);
+                files.item_outs = item_outs;
+                if let Some(resp) = try_send_ipc_with_files(&paths, &req, &mut files)? {
                     return match resp {
                         IpcResponse::Ok {
                             data: IpcPayload::BatchResults(results),
@@ -703,8 +875,10 @@ fn run_cli() -> Result<()> {
             }
 
             let rt = build_tokio_runtime()?;
-            let results =
-                block_on_interruptible(&rt, batch_call_direct(&paths, items, concurrency))??;
+            let results = block_on_interruptible(
+                &rt,
+                batch_call_direct(&paths, items, concurrency, staged),
+            )??;
             let env_for_redaction = if results.iter().all(|r| r.ok) {
                 HashMap::new()
             } else {
@@ -1051,6 +1225,139 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
+        Commands::Stage {
+            name,
+            source,
+            base_url,
+            headers,
+            hint,
+        } => {
+            let parsed_headers = parse_header_flags(&headers)?;
+            let rt = build_tokio_runtime()?;
+            let summary = block_on_interruptible(
+                &rt,
+                stage_manual(
+                    &paths,
+                    &name,
+                    &source,
+                    base_url.as_deref(),
+                    parsed_headers,
+                    hint.as_deref(),
+                ),
+            )??;
+            // The daemon loads staged manuals too, so `call --staged` gets the same secrets.
+            notify_daemon_reload(&paths);
+            let staged = list_staged(&paths)?;
+            let info = staged.iter().find(|s| s.name == name);
+            println!(
+                "Staged '{}' ({} tools, protocols: {}) -> {}",
+                summary.manual_name,
+                summary.tool_count,
+                summary.protocols.join(","),
+                summary.output_path
+            );
+            if let Some(info) = info {
+                println!("Replaces  : {}", replaces_text(info.replaces));
+                match &info.hint {
+                    Some(h) => println!("Hint      : {}", h),
+                    None => println!("Hint      : none (add one with --hint)"),
+                }
+            }
+            if !summary.required_env_vars.is_empty() {
+                println!(
+                    "Secrets   : {} (check with: utcp doctor)",
+                    summary.required_env_vars.join(", ")
+                );
+            }
+            println!(
+                "Next      : utcp diff {n}   (it shows how to see the tools, test, and promote or discard)",
+                n = name
+            );
+            Ok(())
+        }
+
+        Commands::Diff { name, json } => {
+            let diffs = diff_staged(&paths, name.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diffs)?);
+                return Ok(());
+            }
+            if diffs.is_empty() {
+                println!(
+                    "Nothing is staged. Stage a manual with: utcp stage <name> <url_or_file_path>"
+                );
+                return Ok(());
+            }
+            for d in &diffs {
+                print_manual_diff(d);
+            }
+            println!(
+                "\nNext: test any of the staged manuals, then either promote or discard them."
+            );
+            println!("- See the tools: utcp list <manual> --staged");
+            println!("- Test:          utcp call --staged <manual>.<tool> '<json args>'");
+            println!("- Promote:       utcp promote");
+            println!("- Discard:       utcp discard");
+            Ok(())
+        }
+
+        Commands::Promote { name } => {
+            let promoted = promote_staged(&paths, name.as_deref())?;
+            if promoted.is_empty() {
+                println!("Nothing is staged.");
+                return Ok(());
+            }
+            notify_daemon_reload(&paths);
+            for p in &promoted {
+                let replaced = match p.replaced {
+                    Replaces::Nothing => "new".to_string(),
+                    Replaces::Active => "replaced the active one".to_string(),
+                    Replaces::Deregistered => "replaced the deregistered one".to_string(),
+                };
+                if p.rollback_available {
+                    println!(
+                        "Promoted '{}' ({} tools, {}; undo with: utcp rollback {})",
+                        p.name, p.tool_count, replaced, p.name
+                    );
+                } else {
+                    println!(
+                        "Promoted '{}' ({} tools, {})",
+                        p.name, p.tool_count, replaced
+                    );
+                }
+            }
+            println!("Search, the daemon and the installed agent skills now list them.");
+            Ok(())
+        }
+
+        Commands::Discard { name } => {
+            let dropped = discard_staged(&paths, name.as_deref())?;
+            if dropped.is_empty() {
+                println!("Nothing is staged.");
+                return Ok(());
+            }
+            notify_daemon_reload(&paths);
+            println!("Discarded the staged copy of: {}", dropped.join(", "));
+            Ok(())
+        }
+
+        Commands::Rollback { name } => {
+            let r = rollback_manual(&paths, &name)?;
+            notify_daemon_reload(&paths);
+            if r.undo_available {
+                println!(
+                    "Rolled back '{}' to its previous version ({} tools). Run `utcp rollback {}` again to undo.",
+                    r.name, r.tool_count, r.name
+                );
+            } else {
+                println!(
+                    "Rolled back '{}' to its previous version ({} tools).",
+                    r.name, r.tool_count
+                );
+            }
+            Ok(())
+        }
+
         Commands::SetHint { name, text, clear } => {
             let text = if clear { None } else { text };
             let update = set_manual_hint(&paths, &name, text.as_deref())?;
@@ -1271,6 +1578,13 @@ fn run_cli() -> Result<()> {
             );
             println!("cache_on_register : {}", report.cache_on_register);
             println!(
+                "Staged Manuals    : {}",
+                match report.staged_count {
+                    0 => "none".to_string(),
+                    n => format!("{n} (review: utcp diff; activate: utcp promote)"),
+                }
+            );
+            println!(
                 "Activity Logging  : {}",
                 if report.logging_enabled {
                     "ON"
@@ -1282,53 +1596,81 @@ fn run_cli() -> Result<()> {
             if let Some(error) = &report.settings_error {
                 println!("Settings          : NOT USED, the defaults apply: {error}");
             }
-            if let Some(s) = &report.secrets_command {
-                match &s.error {
-                    Some(error) => println!("Secrets Command   : FAILED: {error}\n                    `{}`", s.command),
+            println!("Settings File     : {}", report.settings_file);
+            for unknown in &report.unknown_settings {
+                match &unknown.hint {
+                    Some(hint) => println!(
+                        "Unknown Setting   : `{}` has no effect ({hint})",
+                        unknown.key
+                    ),
+                    None => println!(
+                        "Unknown Setting   : `{}` has no effect (utcp does not know it; check the spelling)",
+                        unknown.key
+                    ),
+                }
+            }
+            println!(
+                "Upload Limit      : {}",
+                describe_limit(report.max_upload_mb, "max_upload_mb")
+            );
+            println!(
+                "Download Limit    : {}",
+                describe_limit(report.max_download_mb, "max_download_mb")
+            );
+            println!(
+                "Downloads Folder  : {} ({})",
+                report.download_dir,
+                match report.download_dir_source {
+                    Some(DownloadFolderSource::Setting) => "download_dir",
+                    Some(DownloadFolderSource::UserDownloads) => "your Downloads folder",
+                    _ => "utcp's own: no Downloads folder found; files are deleted after a day",
+                }
+            );
+            match &report.secrets_command {
+                Some(s) => match &s.error {
+                    Some(error) => println!(
+                        "Secrets Command   : FAILED: {error}\n                    `{}`",
+                        s.command
+                    ),
                     None => println!(
                         "Secrets Command   : OK, printed {} of the wanted names\n                    `{}`",
                         s.provided.len(),
                         s.command
                     ),
-                }
+                },
+                None => println!(
+                    "Secrets Command   : not set (optional, see \"The Secrets Command\" in operating.md)"
+                ),
             }
+            println!(
+                "Secrets File      : {} ({})",
+                report.env_file,
+                if report.env_file_exists {
+                    "exists"
+                } else {
+                    "not created"
+                }
+            );
 
             if !report.credentials.is_empty() {
                 if d_info.is_some() {
                     println!("\nCredentials (as the running daemon sees them):");
                 } else {
-                    println!(
-                        "\nCredentials (secrets command, environment, {}):",
-                        paths.env_file.display()
-                    );
+                    println!("\nCredentials (secrets command, environment, secrets file):");
                 }
-                for c in &report.credentials {
-                    if c.is_set {
-                        let via = c.resolved_via.as_deref().unwrap_or(&c.env_var);
-                        let via = match &c.source {
-                            Some(source) => format!("{via}, from {source}"),
-                            None => via.to_string(),
-                        };
-                        println!(
-                            "  [SET]     {:<24} (manual: {}, via {})",
-                            c.env_var, c.manual, via
-                        );
-                    } else {
-                        println!("  [MISSING] {:<24} (manual: {})", c.env_var, c.manual);
-                    }
+                for line in credential_lines(&report.credentials, color_enabled()) {
+                    println!("{line}");
                 }
             }
 
             println!("\nAgent Skills (utcp-tools + utcp-admin in each skills folder):");
             for s in skills {
-                let tag = if s.up_to_date {
-                    "UP TO DATE"
-                } else if s.exists {
-                    "OUTDATED"
-                } else {
-                    "NOT INSTALLED"
-                };
-                println!("  [{:<13}] {} -> {}", tag, s.client, s.path);
+                println!(
+                    "  {} {} -> {}",
+                    skill_tag(&s, color_enabled()),
+                    s.client,
+                    s.path
+                );
             }
             Ok(())
         }
@@ -1355,14 +1697,12 @@ fn run_cli() -> Result<()> {
             if status {
                 let items = inspect_skill_targets(&paths, include_global, workspace.as_deref());
                 for s in items {
-                    let tag = if s.up_to_date {
-                        "UP TO DATE"
-                    } else if s.exists {
-                        "OUTDATED"
-                    } else {
-                        "NOT INSTALLED"
-                    };
-                    println!("[{:<13}] {} -> {}", tag, s.client, s.path);
+                    println!(
+                        "{} {} -> {}",
+                        skill_tag(&s, color_enabled()),
+                        s.client,
+                        s.path
+                    );
                 }
                 return Ok(());
             }
@@ -1375,6 +1715,31 @@ fn run_cli() -> Result<()> {
         }
 
         Commands::Ui => tui::run_tui(paths, cli.config.as_deref()),
+    }
+}
+
+/// Create `settings.toml`, or add the settings a newer utcp knows, and say so once on stderr.
+fn sync_settings(paths: &UtcpPaths) {
+    use utcp_core::settings_file::{backup_path, sync_settings_file, SyncOutcome};
+    let file = paths.settings_file.display();
+    match sync_settings_file(paths) {
+        Ok(SyncOutcome::Created) => eprintln!(
+            "utcp: created {file} with the default settings (see \"Settings\" in operating.md)."
+        ),
+        Ok(SyncOutcome::Added(lines)) => {
+            eprintln!(
+                "utcp: added the settings this version knows to {file}; the old file is {}:",
+                backup_path(&paths.settings_file).display()
+            );
+            for line in lines {
+                eprintln!("  {line}");
+            }
+            eprintln!("A line starting with # is off. See \"Settings\" in operating.md.");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "utcp: warning: {e:#}. utcp uses its built-in settings until the file is fixed."
+        ),
     }
 }
 
@@ -1400,6 +1765,282 @@ fn print_hint_line(paths: &UtcpPaths, name: &str) {
             "Hint      : none; agents see only '{}' in the skill. Add one: utcp set-hint {} \"<few words>\"",
             name, name
         ),
+    }
+}
+
+/// `utcp doctor`: one line per credential, listing every manual that uses it. Manuals that read it under
+/// another name (`via`) or get it from another place get their own line.
+fn credential_lines(
+    credentials: &[utcp_core::catalog::CredentialStatus],
+    color: bool,
+) -> Vec<String> {
+    type Key = (String, bool, Option<String>, Option<String>);
+    let mut groups: Vec<(Key, Vec<String>)> = Vec::new();
+    for c in credentials {
+        let via = c.resolved_via.clone().filter(|v| *v != c.env_var);
+        let key = (c.env_var.clone(), c.is_set, via, c.source.clone());
+        let manual = if c.staged {
+            format!("{} (staged)", c.manual)
+        } else {
+            c.manual.clone()
+        };
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, manuals)) => manuals.push(manual),
+            None => groups.push((key, vec![manual])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((var, is_set, via, source), manuals)| {
+            let manuals = format!(
+                "{}: {}",
+                if manuals.len() == 1 {
+                    "manual"
+                } else {
+                    "manuals"
+                },
+                manuals.join(", ")
+            );
+            if is_set {
+                let mut parts = Vec::new();
+                if let Some(via) = via {
+                    parts.push(format!("via {via}"));
+                }
+                if let Some(source) = source {
+                    parts.push(format!("from {source}"));
+                }
+                parts.push(manuals);
+                format!(
+                    "  [{}]     {:<24} ({})",
+                    paint("SET", GREEN, color),
+                    var,
+                    parts.join("; ")
+                )
+            } else {
+                format!("  [MISSING] {:<24} ({})", var, manuals)
+            }
+        })
+        .collect()
+}
+
+fn replaces_text(r: Replaces) -> &'static str {
+    match r {
+        Replaces::Nothing => "nothing (a new manual)",
+        Replaces::Active => "the active manual of that name",
+        Replaces::Deregistered => "the deregistered manual of that name",
+    }
+}
+
+/// Why `utcp list <manual>` found no tools, and what to run instead.
+fn empty_list_message(registry: &UtcpRegistryConfig, manual: &str, staged: bool) -> String {
+    let active = registry.manuals.contains_key(manual);
+    let is_staged = registry.staged.contains_key(manual);
+    match (staged, active, is_staged) {
+        (false, false, true) => format!(
+            "'{manual}' is staged, not active yet. List its tools with: utcp list {manual} --staged"
+        ),
+        (true, true, false) => {
+            format!("'{manual}' is active, not staged. List its tools with: utcp list {manual}")
+        }
+        (false, true, _) | (true, _, true) => format!("Manual '{manual}' has no tools"),
+        _ => format!(
+            "No manual named '{manual}' is registered or staged. See every tool with: utcp list \
+             (staged ones: utcp list --staged)"
+        ),
+    }
+}
+
+/// Where `manual.tool` can be called: which side of `--staged` holds the manual, whether that
+/// manual has the tool, and, when it does not, its tools whose names contain `tool`.
+struct ToolLookup {
+    staged: bool,
+    found: bool,
+    similar: Vec<String>,
+}
+
+/// `None` when no manual of that name is registered or staged.
+fn lookup_tool(
+    paths: &UtcpPaths,
+    registry: &UtcpRegistryConfig,
+    manual: &str,
+    tool: &str,
+    staged: bool,
+) -> Option<ToolLookup> {
+    let active = registry.manuals.contains_key(manual);
+    let is_staged = registry.staged.contains_key(manual);
+    let side = match (staged, active, is_staged) {
+        (true, _, true) | (false, false, true) => true,
+        (false, true, _) | (true, true, false) => false,
+        _ => return None,
+    };
+    let tools = list_tools_sync(paths, Some(manual), side).unwrap_or_default();
+    let full = format!("{manual}.{tool}");
+    let needle = tool.to_ascii_lowercase();
+    let similar = tools
+        .iter()
+        .filter(|t| {
+            let short = t
+                .name
+                .strip_prefix(&format!("{manual}."))
+                .unwrap_or(&t.name);
+            short.to_ascii_lowercase().contains(&needle)
+        })
+        .map(|t| t.name.clone())
+        .take(5)
+        .collect();
+    Some(ToolLookup {
+        staged: side,
+        found: tools.iter().any(|t| t.name == full),
+        similar,
+    })
+}
+
+fn staged_flag(staged: bool) -> &'static str {
+    if staged {
+        " --staged"
+    } else {
+        ""
+    }
+}
+
+/// `'x' has no tool named 'y'.`, the tools with `y` in their name, and how to list them all.
+fn no_such_tool(l: &ToolLookup, manual: &str, tool: &str) -> String {
+    let flag = staged_flag(l.staged);
+    let mut s = format!(
+        "'{manual}'{} has no tool named '{tool}'.",
+        if l.staged { " (staged)" } else { "" }
+    );
+    if !l.similar.is_empty() {
+        s.push_str(&format!(
+            " Tools with '{tool}' in the name: {}.",
+            l.similar.join(", ")
+        ));
+    }
+    s.push_str(&format!(
+        " See all of its tools with: utcp list {manual}{flag}"
+    ));
+    s
+}
+
+/// `utcp call azdo_core get_all_teams`: the tool name landed where the JSON arguments go.
+/// Suggests the corrected command only when that tool exists (with `--staged` when it is staged).
+fn split_target_message(
+    paths: &UtcpPaths,
+    registry: &UtcpRegistryConfig,
+    target: &str,
+    word: &str,
+    staged: bool,
+) -> String {
+    let joined = "The manual and the tool are joined by a dot: utcp call <manual>.<tool>.";
+    match lookup_tool(paths, registry, target, word, staged) {
+        None => format!(
+            "{joined} No manual named '{target}' is registered or staged. See every tool with: \
+             utcp list (staged ones: utcp list --staged)"
+        ),
+        Some(l) if l.found => {
+            let flag = staged_flag(l.staged);
+            format!(
+                "{joined}\nDid you mean: utcp call{flag} {target}.{word}\n\
+                 (JSON arguments, if the tool needs any, come after it: utcp call{flag} \
+                 {target}.{word} '{{\"key\": \"value\"}}')"
+            )
+        }
+        Some(l) => format!("{joined}\n{}", no_such_tool(&l, target, word)),
+    }
+}
+
+/// True for `get_all_teams`: a bare name that is not JSON arguments.
+fn looks_like_tool_name(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && serde_json::from_str::<Value>(word).is_err()
+}
+
+/// A call or schema on `manual.tool` failed. When the tool exists only on the other side of
+/// `--staged`, give the command that works; when the manual has no such tool, name similar ones.
+/// `None` when the tool is where the command looked (it failed for another reason).
+fn target_hint(
+    paths: &UtcpPaths,
+    registry: &UtcpRegistryConfig,
+    target: &str,
+    staged: bool,
+    verb: &str,
+) -> Option<String> {
+    let (manual, tool) = target.split_once('.')?;
+    let l = lookup_tool(paths, registry, manual, tool, staged)?;
+    match (l.found, l.staged == staged) {
+        (true, true) => None,
+        (true, false) if l.staged => Some(format!(
+            "'{manual}' is staged, not active yet. Add --staged: utcp {verb} --staged {target}"
+        )),
+        (true, false) => Some(format!(
+            "'{manual}' is active, not staged. Leave out --staged: utcp {verb} {target}"
+        )),
+        (false, _) => Some(no_such_tool(&l, manual, tool)),
+    }
+}
+
+/// Append [`target_hint`] to a failed call or schema. Reads the registry only on this error path.
+fn with_staged_hint(
+    err: anyhow::Error,
+    paths: &UtcpPaths,
+    target: &str,
+    staged: bool,
+    verb: &str,
+) -> anyhow::Error {
+    match UtcpRegistryConfig::load(paths)
+        .ok()
+        .and_then(|r| target_hint(paths, &r, target, staged, verb))
+    {
+        Some(hint) => anyhow!("{:#}\n{}", err, hint),
+        None => err,
+    }
+}
+
+/// `utcp diff`: one staged manual against the manual it replaces. The name is blue in a terminal.
+fn print_manual_diff(d: &ManualDiff) {
+    let name = paint(&d.name, BLUE, color_enabled());
+    match d.replaces {
+        Replaces::Nothing => println!("{}: new manual, {} tools", name, d.tool_count),
+        r => {
+            let what = if r == Replaces::Active {
+                "active"
+            } else {
+                "deregistered"
+            };
+            println!(
+                "{}: replaces the {} manual, {} tools ({} added, {} removed, {} changed, {} unchanged)",
+                name,
+                what,
+                d.tool_count,
+                d.added.len(),
+                d.removed.len(),
+                d.changed.len(),
+                d.unchanged
+            );
+            for t in &d.added {
+                println!("  + {}", t);
+            }
+            for t in &d.removed {
+                println!("  - {}", t);
+            }
+            for t in &d.changed {
+                println!("  ~ {}", t);
+            }
+        }
+    }
+    if d.replaces == Replaces::Nothing {
+        if let Some(h) = &d.hint_after {
+            println!("  hint: {}", h);
+        }
+    } else if d.hint_before != d.hint_after {
+        println!(
+            "  hint: {} -> {}",
+            d.hint_before.as_deref().unwrap_or("none"),
+            d.hint_after.as_deref().unwrap_or("none")
+        );
     }
 }
 
@@ -1555,15 +2196,75 @@ fn print_tool_summaries(tools: &[ToolSummary], as_json: bool, with_schemas: bool
         println!("No matching tools found.");
         return Ok(());
     }
+    let color = color_enabled();
     for t in tools {
-        println!(
-            "{:<36} [{:<9}] {}",
-            t.name,
-            t.protocol,
-            first_line(&t.description)
-        );
+        println!("{}", tool_line(t, color));
     }
     Ok(())
+}
+
+/// One `list`/`search` row: a bullet, so a long description that wraps is not mistaken for a new
+/// tool, then the tool name (blue in a terminal), protocol and the description's first line.
+fn tool_line(t: &ToolSummary, color: bool) -> String {
+    let pad = 36usize.saturating_sub(t.name.chars().count());
+    format!(
+        "* {}{:pad$} [{:<9}] {}",
+        paint(&t.name, BLUE, color),
+        "",
+        t.protocol,
+        first_line(&t.description)
+    )
+}
+
+const BLUE: &str = "34";
+const GREEN: &str = "32";
+
+/// Whether to color text output: stdout is a terminal, `NO_COLOR` is unset and `TERM` is not `dumb`.
+/// Pipes, agents and `--json` get plain text.
+fn color_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::io::stdout().is_terminal()
+            && !matches!(std::env::var_os("NO_COLOR"), Some(v) if !v.is_empty())
+            && std::env::var("TERM").as_deref() != Ok("dumb")
+            && ansi_supported()
+    })
+}
+
+/// Windows consoles show ANSI colors only once virtual terminal processing is on; this turns it on.
+#[cfg(windows)]
+fn ansi_supported() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+fn ansi_supported() -> bool {
+    true
+}
+
+fn paint(text: &str, code: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// A skills folder's state for `doctor` and `sync-ides --status`: `[UP TO DATE   ]` (green), etc.
+fn skill_tag(s: &utcp_core::skills::IdeSkillTargetStatus, color: bool) -> String {
+    let tag = if s.up_to_date {
+        "UP TO DATE"
+    } else if s.exists {
+        "OUTDATED"
+    } else {
+        "NOT INSTALLED"
+    };
+    let shown = if s.up_to_date {
+        paint(tag, GREEN, color)
+    } else {
+        tag.to_string()
+    };
+    format!("[{shown}{:pad$}]", "", pad = 13 - tag.len())
 }
 
 /// The first non-empty line of a description, so text output stays one line per tool.
@@ -1648,6 +2349,32 @@ fn parse_env_flags(raw_envs: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(map)
 }
 
+/// A size limit for `doctor`: where it comes from and what it does.
+fn describe_limit(mb: Option<u64>, key: &str) -> String {
+    match mb {
+        None => format!("no limit ({key} is not set)"),
+        Some(0) => format!("OFF, every file is refused ({key} = 0)"),
+        Some(mb) => format!("{mb} MB ({key})"),
+    }
+}
+
+/// A call's answer: nothing more when `--out -` already wrote a file's bytes to stdout.
+fn print_call_output(
+    val: &Value,
+    out: Option<&OutTarget>,
+    pretty: bool,
+    compact: bool,
+    caller: &str,
+) -> Result<()> {
+    let streamed_to_stdout = out == Some(&OutTarget::Stdout)
+        && val.get("type").and_then(Value::as_str) == Some("file")
+        && val.get("path").and_then(Value::as_str) == Some("-");
+    if streamed_to_stdout {
+        return Ok(());
+    }
+    print_json_output(val, pretty, compact, caller)
+}
+
 fn print_json_output<T: serde::Serialize>(
     value: &T,
     force_pretty: bool,
@@ -1701,7 +2428,89 @@ fn maybe_log_direct(
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, format_uptime};
+    use super::{
+        credential_lines, first_line, format_uptime, paint, skill_tag, tool_line, BLUE, GREEN,
+    };
+    use utcp_core::catalog::CredentialStatus;
+    use utcp_core::index::ToolSummary;
+    use utcp_core::skills::IdeSkillTargetStatus;
+
+    #[test]
+    fn doctor_lists_each_credential_once_with_its_manuals() {
+        let cred = |manual: &str, var: &str, via: Option<&str>, staged: bool| CredentialStatus {
+            manual: manual.into(),
+            env_var: var.into(),
+            resolved_via: via.map(Into::into),
+            is_set: via.is_some(),
+            source: via.map(|_| "secrets command".into()),
+            staged,
+        };
+        let creds = [
+            cred("a_core", "PAT", Some("PAT"), false),
+            cred("a_git", "PAT", Some("PAT"), true),
+            cred("gh", "TOKEN", Some("GH_TOKEN"), false),
+            cred("x", "KEY", None, false),
+        ];
+        let lines = credential_lines(&creds, false);
+        assert_eq!(
+            lines,
+            [
+                format!(
+                    "  [SET]     {:<24} (from secrets command; manuals: a_core, a_git (staged))",
+                    "PAT"
+                ),
+                format!(
+                    "  [SET]     {:<24} (via GH_TOKEN; from secrets command; manual: gh)",
+                    "TOKEN"
+                ),
+                format!("  [MISSING] {:<24} (manual: x)", "KEY"),
+            ]
+        );
+        let colored = credential_lines(&creds, true);
+        assert!(colored[0].starts_with("  [\x1b[32mSET\x1b[0m]     PAT "));
+        assert_eq!(colored[2], lines[2], "only SET is colored");
+    }
+
+    #[test]
+    fn tool_rows_have_a_bullet_and_a_blue_name_that_keeps_the_columns() {
+        let tool = ToolSummary {
+            name: "pets.get_user".into(),
+            manual: "pets".into(),
+            protocol: "http".into(),
+            description: "Fetch a user.\nMore text.".into(),
+            tags: Vec::new(),
+            inputs: None,
+            outputs: None,
+        };
+        let plain = tool_line(&tool, false);
+        assert_eq!(
+            plain,
+            format!("* {:<36} [http     ] Fetch a user.", "pets.get_user")
+        );
+        let colored = tool_line(&tool, true);
+        assert_eq!(
+            colored,
+            plain.replace("pets.get_user", &paint("pets.get_user", BLUE, true))
+        );
+        assert_eq!(paint("x", BLUE, true), "\x1b[34mx\x1b[0m");
+    }
+
+    #[test]
+    fn skill_tags_keep_their_width_and_only_up_to_date_is_green() {
+        let status = |exists, up_to_date| IdeSkillTargetStatus {
+            client: "Zed".into(),
+            path: "/p".into(),
+            exists,
+            up_to_date,
+        };
+        assert_eq!(skill_tag(&status(true, true), false), "[UP TO DATE   ]");
+        assert_eq!(skill_tag(&status(false, false), false), "[NOT INSTALLED]");
+        assert_eq!(
+            skill_tag(&status(true, true), true),
+            format!("[{}   ]", paint("UP TO DATE", GREEN, true))
+        );
+        assert_eq!(skill_tag(&status(true, false), true), "[OUTDATED     ]");
+    }
 
     #[test]
     fn uptime_is_short_and_readable() {

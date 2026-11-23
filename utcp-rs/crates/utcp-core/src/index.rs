@@ -394,6 +394,7 @@ mod tests {
             activity_log_bak: root.join("state/activity.jsonl.bak"),
             socket_endpoint: root.join("utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: root.join("state/daemon.pid"),
+            separate_setup: true,
         }
     }
 

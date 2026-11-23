@@ -11,21 +11,15 @@ use utcp_core::ipc::{
 };
 use utcp_core::paths::{UtcpPaths, UtcpSettings};
 
-/// Returns true on Linux when running against the default user session (no test/custom path overrides)
-/// AND `utcp-daemon.service` is registered in `systemd --user`, so `utcp daemon start|stop|restart`
-/// and `utcp ui` delegate cleanly to `systemctl --user` instead of spawning an unmanaged process.
-fn should_delegate_to_systemd_user(
-    explicit_config: Option<&Path>,
-    idle_timeout_mins: Option<u64>,
-) -> bool {
+/// Returns true on Linux when running against the default user setup (not a separate setup, no custom
+/// endpoint, no idle timeout) AND `utcp-daemon.service` is registered in `systemd --user`, so
+/// `utcp daemon start|stop|restart` and `utcp ui` delegate cleanly to `systemctl --user` instead of
+/// spawning an unmanaged process.
+fn should_delegate_to_systemd_user(paths: &UtcpPaths, idle_timeout_mins: Option<u64>) -> bool {
     #[cfg(target_os = "linux")]
     {
-        if explicit_config.is_some()
-            || idle_timeout_mins.is_some()
-            || std::env::var_os("UTCP_SOCKET_PATH").is_some()
-            || std::env::var_os("UTCP_CONFIG_DIR").is_some()
-            || std::env::var_os("UTCP_CONFIG").is_some()
-        {
+        let custom_endpoint = std::env::var_os("UTCP_SOCKET_PATH").is_some_and(|v| !v.is_empty());
+        if !systemd_unit_may_serve(paths.separate_setup, custom_endpoint, idle_timeout_mins) {
             return false;
         }
         Command::new("systemctl")
@@ -39,9 +33,20 @@ fn should_delegate_to_systemd_user(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (explicit_config, idle_timeout_mins);
+        let _ = (paths, idle_timeout_mins);
         false
     }
+}
+
+/// The systemd unit runs the default setup's daemon, on the default endpoint, with the settings' idle
+/// timeout. Anything else is a daemon of its own that `utcp daemon` starts and stops itself.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_unit_may_serve(
+    separate_setup: bool,
+    custom_endpoint: bool,
+    idle_timeout_mins: Option<u64>,
+) -> bool {
+    !separate_setup && !custom_endpoint && idle_timeout_mins.is_none()
 }
 
 /// The detached daemon just started, watched so `daemon start` stops waiting as soon as it exits.
@@ -198,7 +203,7 @@ pub fn start_daemon_background(
 
     // None under systemd: the unit's process is not ours to watch.
     let mut spawned: Option<SpawnedDaemon> = None;
-    if should_delegate_to_systemd_user(explicit_config, idle_timeout_mins) {
+    if should_delegate_to_systemd_user(paths, idle_timeout_mins) {
         let status = Command::new("systemctl")
             .args(["--user", "start", "utcp-daemon.service"])
             .status()
@@ -289,7 +294,7 @@ pub fn stop_daemon(paths: &UtcpPaths) -> Result<bool> {
         return Ok(false);
     }
 
-    if should_delegate_to_systemd_user(None, None) {
+    if should_delegate_to_systemd_user(paths, None) {
         let _ = Command::new("systemctl")
             .args(["--user", "stop", "utcp-daemon.service"])
             .status();
@@ -341,7 +346,16 @@ pub fn execute_daemon_run(paths: UtcpPaths, idle_timeout_mins: Option<u64>) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::push_windows_arg;
+    use super::{push_windows_arg, systemd_unit_may_serve};
+
+    #[test]
+    fn only_the_default_setup_is_left_to_the_systemd_unit() {
+        assert!(systemd_unit_may_serve(false, false, None));
+        // A separate setup (--config, UTCP_CONFIG, UTCP_CONFIG_DIR or UTCP_CACHE_DIR), for start and stop alike.
+        assert!(!systemd_unit_may_serve(true, false, None));
+        assert!(!systemd_unit_may_serve(false, true, None));
+        assert!(!systemd_unit_may_serve(false, false, Some(5)));
+    }
 
     fn quoted(arg: &str) -> String {
         let mut line = Vec::new();

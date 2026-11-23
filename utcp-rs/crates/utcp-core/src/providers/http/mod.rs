@@ -19,6 +19,14 @@ pub struct HttpProvider {
     pub body_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_fields: Option<Vec<String>>,
+    /// `"file"`: the `body_field` argument names a file to upload (`{"file": "<path>"}`), sent as the
+    /// raw body with the `Content-Type` from `headers`. Default: the body is JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_type: Option<String>,
+    /// `"file"`: the answer is always saved as a file, even when it is JSON or text. Default: a
+    /// non-JSON, non-text answer is a file and the rest is returned as JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_type: Option<String>,
 }
 
 impl Provider for HttpProvider {
@@ -51,6 +59,8 @@ impl HttpProvider {
             headers: None,
             body_field: None,
             header_fields: None,
+            body_type: None,
+            response_type: None,
         }
     }
 }

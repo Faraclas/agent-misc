@@ -264,6 +264,7 @@ mod tests {
             activity_log_bak: base.join("state/activity.jsonl.bak"),
             socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: base.join("state/daemon.pid"),
+            separate_setup: true,
         }
     }
 
@@ -302,15 +303,12 @@ mod tests {
     fn intercepts_mcp_base64_image_and_enforces_max_files_cap() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(&tmp);
-        let settings = UtcpSettings {
-            cache_on_register: true,
-            daemon_idle_timeout_mins: 0,
-            media_dir: None,
-            max_media_files: 3,
-            media_ttl_mins: 60,
-            secrets: None,
-        };
-        settings.save(&paths).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            &paths.settings_file,
+            "max_media_files = 3\nmedia_ttl_mins = 60\n",
+        )
+        .unwrap();
 
         let png_bytes = b"\x89PNG\r\n\x1a\nfake-image-payload";
         let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);

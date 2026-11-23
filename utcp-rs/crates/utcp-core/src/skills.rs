@@ -13,6 +13,9 @@ pub const OPERATING_GUIDE: &str = include_str!("../../../docs/operating.md");
 pub const TOOLS_SKILL: &str = "utcp-tools";
 /// Skill for changing the setup (register, secrets, daemon, servers, debugging).
 pub const ADMIN_SKILL: &str = "utcp-admin";
+/// File in each skills folder's `utcp-tools/` naming the registry (`.utcp_config.json`) whose manuals the skills
+/// list. Registering in another setup (a test, `UTCP_CONFIG_DIR`) then leaves these skills alone.
+pub const OWNER_FILE: &str = ".utcp-registry";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillTargetPlatform {
@@ -284,11 +287,33 @@ fn target_status(client: String, root: &Path, files: &[(PathBuf, String)]) -> Id
     }
 }
 
-fn write_skill_files(root: &Path, files: &[(PathBuf, String)]) -> Result<()> {
+fn write_skill_files(paths: &UtcpPaths, root: &Path, files: &[(PathBuf, String)]) -> Result<()> {
     for (rel, contents) in files {
         write_atomic(&root.join(rel), contents.as_bytes())?;
     }
-    Ok(())
+    write_atomic(
+        &root.join(TOOLS_SKILL).join(OWNER_FILE),
+        owner_marker(paths).as_bytes(),
+    )
+}
+
+fn owner_marker(paths: &UtcpPaths) -> String {
+    format!("{}\n", paths.config_file.to_string_lossy())
+}
+
+/// Whether `paths` is the default setup: no `--config`, `UTCP_CONFIG` or `UTCP_CONFIG_DIR` moved the registry.
+fn is_default_setup(paths: &UtcpPaths) -> bool {
+    directories::ProjectDirs::from("", "", "utcp")
+        .is_some_and(|p| p.config_dir().join(".utcp_config.json") == paths.config_file)
+}
+
+/// Whether the skills in `root` list the manuals of `paths`' registry: their [`OWNER_FILE`] names it or, for skills
+/// written before that file existed, `paths` is the default setup.
+fn owned_by(paths: &UtcpPaths, root: &Path) -> bool {
+    match std::fs::read_to_string(root.join(TOOLS_SKILL).join(OWNER_FILE)) {
+        Ok(owner) => owner.trim_end() == owner_marker(paths).trim_end(),
+        Err(_) => is_default_setup(paths),
+    }
 }
 
 /// Inspect the installed skills across target clients.
@@ -322,7 +347,7 @@ pub fn sync_ide_skills(
     let mut statuses = Vec::with_capacity(targets.len());
 
     for (client, root) in targets {
-        write_skill_files(&root, &files)?;
+        write_skill_files(paths, &root, &files)?;
         statuses.push(IdeSkillTargetStatus {
             client,
             path: root.to_string_lossy().into_owned(),
@@ -334,15 +359,16 @@ pub fn sync_ide_skills(
 }
 
 /// Refresh the skills in every global folder that already has the tools skill whenever manuals are
-/// registered or deregistered, so the 1-line `registered manuals: ...` hint stays current.
+/// registered or deregistered, so the 1-line `registered manuals: ...` hint stays current. Only folders whose skills
+/// this registry wrote ([`OWNER_FILE`]) are refreshed; `sync-ides` takes a folder over explicitly.
 pub fn refresh_installed_global_skills(paths: &UtcpPaths) {
     let files = skill_files(
         SkillTargetPlatform::current(),
         &registered_manual_labels(paths),
     );
     for (_, root) in resolve_skill_targets(true, None) {
-        if root.join(TOOLS_SKILL).join("SKILL.md").exists() {
-            let _ = write_skill_files(&root, &files);
+        if root.join(TOOLS_SKILL).join("SKILL.md").exists() && owned_by(paths, &root) {
+            let _ = write_skill_files(paths, &root, &files);
         }
     }
 }
@@ -418,7 +444,7 @@ mod tests {
             assert!(md.contains("--command npx --arg -y --arg @scope/some-mcp-server"));
             assert!(md.contains("-H 'Authorization: Bearer ${EXAMPLE_TOKEN}'"));
             assert!(md.contains("-e 'API_KEY=${SOME_API_KEY}'"));
-            assert!(md.contains("list --manual <name>"));
+            assert!(md.contains("list <name>"));
         }
         let linux = render_skill_markdown(SkillTargetPlatform::LinuxPosix, &[]);
         assert!(linux.contains("value in `~/.config/utcp/.env`"));
@@ -561,6 +587,7 @@ mod tests {
             activity_log_bak: base.join("state/activity.jsonl.bak"),
             socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: base.join("state/daemon.pid"),
+            separate_setup: true,
         }
     }
 

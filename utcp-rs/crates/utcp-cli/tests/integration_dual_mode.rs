@@ -409,6 +409,24 @@ fn run_ok(env: &IsolatedEnv, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// `utcp ... | head` closes stdout before utcp is done: it finishes quietly instead of panicking.
+#[test]
+fn closed_stdout_ends_the_output_without_a_panic() {
+    let env = IsolatedEnv::new();
+    let mut child = env
+        .cmd()
+        .args(["sync-ides", "--print-skill"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(out.status.success(), "{stderr}");
+}
+
 fn run_err(env: &IsolatedEnv, args: &[&str]) -> String {
     let out = env.cmd().args(args).output().unwrap();
     assert!(!out.status.success(), "utcp {:?} should have failed", args);
@@ -1311,7 +1329,7 @@ async fn import_mcp_resolves_placeholders_and_reports_clear_errors() {
         !saved.contains("tok-123"),
         "secret value leaked into the manual"
     );
-    assert!(run_ok(&env, &["list", "--manual", "authy"]).contains("authy.ping"));
+    assert!(run_ok(&env, &["list", "authy"]).contains("authy.ping"));
 
     // 3. No name: inferred (here from the 127.0.0.1 host); `-o` writes a file without registering.
     let file = env.tmp.path().join("inferred.utcp.json");
@@ -1423,7 +1441,7 @@ async fn spec_fetch_resolves_header_placeholders() {
     )
     .unwrap();
     run_ok(&env, &["register", "privy", &spec_url, "-H", auth]);
-    assert!(run_ok(&env, &["list", "--manual", "privy"]).contains("privy.ping"));
+    assert!(run_ok(&env, &["list", "privy"]).contains("privy.ping"));
     let config = read_config(&env);
     assert_eq!(
         config["manuals"]["privy"]["headers"]["Authorization"],
@@ -2296,4 +2314,657 @@ fn simultaneous_daemon_starts_leave_exactly_one_daemon() {
     assert!(!env.tmp.path().join("state/daemon.pid").exists());
     #[cfg(unix)]
     assert!(!env.tmp.path().join("utcp-test.sock").exists());
+}
+
+/// An OpenAPI spec served by `spawn_mock_api` (bearer auth, so the manual needs `<name>_API_KEY`), with one GET per
+/// `(operationId, path, summary)`.
+fn spec_file(env: &IsolatedEnv, file: &str, base_url: &str, ops: &[(&str, &str, &str)]) -> String {
+    let mut paths = serde_json::Map::new();
+    for (id, path, summary) in ops {
+        let params: Vec<Value> = path
+            .split('/')
+            .filter_map(|p| p.strip_prefix('{')?.strip_suffix('}'))
+            .map(|p| json!({"name": p, "in": "path", "required": true, "schema": {"type": "string"}}))
+            .collect();
+        paths.insert(
+            path.to_string(),
+            json!({"get": {"operationId": id, "summary": summary, "parameters": params,
+                           "responses": {"200": {"description": "ok"}}}}),
+        );
+    }
+    let spec = json!({
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "servers": [{"url": base_url}],
+        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+        "security": [{"bearerAuth": []}],
+        "paths": paths,
+    });
+    let path = env.tmp.path().join(file);
+    std::fs::write(&path, spec.to_string()).unwrap();
+    path.display().to_string()
+}
+
+fn call_staged_auth(env: &IsolatedEnv) -> Value {
+    let out = run_ok(
+        env,
+        &["call", "--staged", "pets.get_user", r#"{"user_id": "x"}"#],
+    );
+    serde_json::from_str::<Value>(&out).unwrap()["auth"].clone()
+}
+
+/// `stage` keeps a manual out of search, list and the skills while `--staged` calls reach it (direct and daemon,
+/// with the secrets command); `diff`, `promote`, `rollback` (twice undoes it), `discard`, and purge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stage_diff_promote_rollback_and_discard() {
+    let base_url = spawn_mock_api().await;
+    let env = IsolatedEnv::new();
+    configure_secret_source(&env, &json!({"values": {"pets_API_KEY": "from-secrets"}}));
+    std::fs::create_dir_all(env.tmp.path().join("home")).unwrap();
+    run_ok(&env, &["sync-ides", "--global"]);
+    let v1 = spec_file(
+        &env,
+        "v1.json",
+        &base_url,
+        &[
+            ("get_user", "/users/{user_id}", "Fetch user"),
+            ("old_tool", "/old", "Old"),
+        ],
+    );
+    let v2 = spec_file(
+        &env,
+        "v2.json",
+        &base_url,
+        &[
+            ("get_user", "/users/{user_id}", "Fetch a user by id"),
+            ("new_tool", "/new", "New"),
+        ],
+    );
+
+    // 1. Staged: not active anywhere, but callable with --staged in direct mode, with the secret.
+    let out = run_ok(&env, &["stage", "pets", &v1, "--hint", "pet store"]);
+    assert!(out.contains("Staged 'pets' (2 tools"), "{out}");
+    assert!(out.contains("Replaces  : nothing"), "{out}");
+    assert!(env
+        .tmp
+        .path()
+        .join("cache/manuals/staged/pets.utcp.json")
+        .exists());
+    assert!(!run_ok(&env, &["list"]).contains("pets."));
+    assert!(!run_ok(&env, &["search", "user"]).contains("pets."));
+    assert!(run_ok(&env, &["list", "--staged"]).contains("pets.get_user"));
+    assert!(run_ok(&env, &["list", "pets", "--staged"]).contains("pets.get_user"));
+    let err = run_err(&env, &["list", "pets"]);
+    assert!(err.contains("utcp list pets --staged"), "{err}");
+    let err = run_err(&env, &["list", "nope"]);
+    assert!(err.contains("No manual named 'nope'"), "{err}");
+    run_ok(&env, &["schema", "--staged", "pets.get_user"]);
+    let err = run_err(&env, &["schema", "pets.get_user"]);
+    assert!(err.contains("not found"), "{err}");
+    assert!(err.contains("utcp schema --staged pets.get_user"), "{err}");
+    let err = run_err(&env, &["call", "pets.get_user", "{}"]);
+    assert!(err.contains("utcp call --staged pets.get_user"), "{err}");
+    let err = run_err(&env, &["call", "pets", "get_user"]);
+    assert!(
+        err.contains("Did you mean: utcp call --staged pets.get_user"),
+        "{err}"
+    );
+    let err = run_err(&env, &["call", "pets", "get_us"]);
+    assert!(!err.contains("Did you mean"), "{err}");
+    assert!(
+        err.contains("'pets' (staged) has no tool named 'get_us'"),
+        "{err}"
+    );
+    assert!(
+        err.contains("Tools with 'get_us' in the name: pets.get_user."),
+        "{err}"
+    );
+    assert!(err.contains("utcp list pets --staged"), "{err}");
+    let err = run_err(&env, &["call", "pets.get_us", "{}"]);
+    assert!(!err.contains("Add --staged"), "{err}");
+    assert!(err.contains("has no tool named 'get_us'"), "{err}");
+    let err = run_err(&env, &["call", "nope", "get_user"]);
+    assert!(err.contains("No manual named 'nope'"), "{err}");
+    assert_eq!(call_staged_auth(&env), "Bearer from-secrets");
+    assert!(!installed_skill_description(&env).contains("pets"));
+    let doctor = doctor_json(&env);
+    assert_eq!(doctor["staged_count"], 1);
+    assert_eq!(credential(&doctor, "pets")["staged"], true);
+    assert_eq!(credential(&doctor, "pets")["source"], "secrets command");
+    let text = run_ok(&env, &["doctor"]);
+    assert!(text.contains("Staged Manuals    : 1"), "{text}");
+    assert!(
+        text.contains("(from secrets command; manual: pets (staged))"),
+        "{text}"
+    );
+    let out = run_ok(&env, &["diff"]);
+    assert!(out.contains("pets: new manual, 2 tools"), "{out}");
+    assert!(out.contains("hint: pet store"), "{out}");
+    assert!(
+        out.contains("- See the tools: utcp list <manual> --staged"),
+        "{out}"
+    );
+    assert!(out.contains("- Promote:       utcp promote"), "{out}");
+
+    // 2. The daemon loads staged manuals and asks the secrets command for their names too.
+    run_ok(&env, &["daemon", "start"]);
+    assert!(run_ok(&env, &["list", "--staged"]).contains("pets.get_user"));
+    assert!(!run_ok(&env, &["list"]).contains("pets."));
+    let err = run_err(&env, &["list", "pets"]);
+    assert!(err.contains("utcp list pets --staged"), "{err}");
+    let err = run_err(&env, &["call", "pets.get_user", "{}"]);
+    assert!(err.contains("utcp call --staged pets.get_user"), "{err}");
+    let err = run_err(&env, &["call", "pets.get_us", "{}"]);
+    assert!(
+        err.contains("Tools with 'get_us' in the name: pets.get_user."),
+        "{err}"
+    );
+    assert_eq!(call_staged_auth(&env), "Bearer from-secrets");
+    let doctor = doctor_json(&env);
+    assert_eq!(credential(&doctor, "pets")["is_set"], true);
+
+    // 3. Promote: active in the daemon, search and skills; the staged copy is gone.
+    let out = run_ok(&env, &["promote"]);
+    assert!(out.contains("Promoted 'pets' (2 tools, new)"), "{out}");
+    assert!(run_ok(&env, &["list"]).contains("pets.get_user"));
+    assert!(installed_skill_description(&env).contains("pets (pet store)"));
+    assert!(run_ok(&env, &["list", "--staged"]).contains("No matching tools"));
+    let err = run_err(&env, &["call", "--staged", "pets.get_user", "{}"]);
+    assert!(
+        err.contains("Leave out --staged: utcp call pets.get_user"),
+        "{err}"
+    );
+    assert!(!env
+        .tmp
+        .path()
+        .join("cache/manuals/staged/pets.utcp.json")
+        .exists());
+    assert_eq!(doctor_json(&env)["staged_count"], 0);
+
+    // 4. An update: diff names what changes; promote keeps the old version for rollback.
+    let out = run_ok(&env, &["stage", "pets", &v2]);
+    assert!(out.contains("Replaces  : the active manual"), "{out}");
+    assert!(out.contains("Hint      : pet store"), "{out}");
+    let out = run_ok(&env, &["diff", "pets"]);
+    assert!(
+        out.contains(
+            "replaces the active manual, 2 tools (1 added, 1 removed, 1 changed, 0 unchanged)"
+        ),
+        "{out}"
+    );
+    for line in ["  + new_tool", "  - old_tool", "  ~ get_user"] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    let diff: Value = serde_json::from_str(&run_ok(&env, &["diff", "--json"])).unwrap();
+    assert_eq!(diff[0]["replaces"], "active");
+    assert_eq!(diff[0]["changed"], json!(["get_user"]));
+    let out = run_ok(&env, &["promote", "pets"]);
+    assert!(out.contains("undo with: utcp rollback pets"), "{out}");
+    let list = run_ok(&env, &["list"]);
+    assert!(
+        list.contains("pets.new_tool") && !list.contains("pets.old_tool"),
+        "{list}"
+    );
+    assert!(installed_skill_description(&env).contains("pets (pet store)"));
+
+    // 5. Rollback swaps back; a second rollback undoes the first.
+    let out = run_ok(&env, &["rollback", "pets"]);
+    assert!(out.contains("again to undo"), "{out}");
+    assert!(run_ok(&env, &["list"]).contains("pets.old_tool"));
+    run_ok(&env, &["rollback", "pets"]);
+    assert!(run_ok(&env, &["list"]).contains("pets.new_tool"));
+    assert!(run_err(&env, &["rollback", "nope"]).contains("No previous version of 'nope'"));
+
+    // 6. Discard, and errors for names that are not staged.
+    run_ok(&env, &["stage", "pets", &v1]);
+    assert!(run_ok(&env, &["discard"]).contains("Discarded the staged copy of: pets"));
+    assert!(run_ok(&env, &["discard"]).contains("Nothing is staged."));
+    assert!(run_ok(&env, &["promote"]).contains("Nothing is staged."));
+    assert!(run_err(&env, &["promote", "nope"]).contains("'nope' is not staged"));
+    assert!(run_ok(&env, &["list"]).contains("pets.new_tool"));
+
+    // 7. Purge deletes the previous version and any staged copy too.
+    run_ok(&env, &["stage", "pets", &v1]);
+    run_ok(&env, &["deregister", "pets", "--purge-cache"]);
+    let cfg = read_config(&env);
+    assert!(
+        cfg.get("previous").is_none() && cfg.get("staged").is_none(),
+        "{cfg}"
+    );
+    for dir in ["previous", "staged"] {
+        let file = env
+            .tmp
+            .path()
+            .join(format!("cache/manuals/{dir}/pets.utcp.json"));
+        assert!(!file.exists(), "{}", file.display());
+    }
+}
+
+/// Registering in another setup (another config folder, same home) leaves the skills of the setup that wrote them
+/// alone, until `sync-ides` in the other setup takes them over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skills_are_refreshed_only_by_the_setup_that_wrote_them() {
+    let base_url = spawn_mock_api().await;
+    let spec_url = format!("{base_url}/openapi.json");
+    let env = IsolatedEnv::new();
+    std::fs::create_dir_all(env.tmp.path().join("home")).unwrap();
+    run_ok(&env, &["sync-ides", "--global"]);
+    run_ok(&env, &["register", "mine", &spec_url]);
+    assert!(installed_skill_description(&env).contains("mine"));
+
+    let other = |args: &[&str]| {
+        let root = env.tmp.path();
+        let out = env
+            .cmd()
+            .env("UTCP_CONFIG_DIR", root.join("other-config"))
+            .env("UTCP_CACHE_DIR", root.join("other-cache"))
+            .env("UTCP_STATE_DIR", root.join("other-state"))
+            .env_remove("UTCP_SOCKET_PATH")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    other(&["register", "theirs", &spec_url]);
+    let description = installed_skill_description(&env);
+    assert!(
+        description.contains("mine") && !description.contains("theirs"),
+        "{description}"
+    );
+
+    // Skills written before the owner file existed belong to the default setup only.
+    let owner = env
+        .tmp
+        .path()
+        .join("home/.agents/skills/utcp-tools/.utcp-registry");
+    std::fs::remove_file(&owner).unwrap();
+    other(&["deregister", "theirs"]);
+    run_ok(&env, &["register", "mine2", &spec_url]);
+    assert!(!installed_skill_description(&env).contains("mine2"));
+
+    // `sync-ides` takes the folders over explicitly.
+    other(&["register", "theirs"]);
+    other(&["sync-ides", "--global"]);
+    let description = installed_skill_description(&env);
+    assert!(
+        description.contains("theirs") && !description.contains("mine"),
+        "{description}"
+    );
+    run_ok(&env, &["deregister", "mine"]);
+    assert!(installed_skill_description(&env).contains("theirs"));
+}
+
+/// A setup with its own config or cache folder gets its own daemon endpoint unless `UTCP_SOCKET_PATH` says otherwise,
+/// so it never reaches the default setup's daemon.
+#[test]
+fn a_separate_setup_gets_its_own_daemon_endpoint() {
+    let endpoint = |env: &IsolatedEnv| {
+        let out = env
+            .cmd()
+            .env_remove("UTCP_SOCKET_PATH")
+            .args(["doctor", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["doctor"]["socket_endpoint"].as_str().unwrap().to_string()
+    };
+    let (a, b) = (IsolatedEnv::new(), IsolatedEnv::new());
+    let (ea, eb) = (endpoint(&a), endpoint(&b));
+    assert_ne!(ea, eb);
+    #[cfg(unix)]
+    assert_eq!(
+        ea,
+        a.tmp
+            .path()
+            .join("cache")
+            .join("utcp.sock")
+            .display()
+            .to_string()
+    );
+    #[cfg(windows)]
+    assert!(ea.starts_with(r"\\.\pipe\utcp-"), "{ea}");
+}
+
+/// A setup with its own config file but no `UTCP_CACHE_DIR` gets its own cache folder (and so its own search index
+/// and daemon endpoint), keyed by the config file, instead of sharing the default setup's.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_own_config_without_a_cache_dir_gets_its_own_cache() {
+    let env = IsolatedEnv::new();
+    let xdg_cache = env.tmp.path().join("xdg-cache");
+    let doctor = |config: &str| {
+        let out = env
+            .cmd()
+            .env_remove("UTCP_CACHE_DIR")
+            .env_remove("UTCP_SOCKET_PATH")
+            .env("XDG_CACHE_HOME", &xdg_cache)
+            .arg("--config")
+            .arg(env.tmp.path().join(config))
+            .args(["doctor", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let cache = v["doctor"]["cache_dir"].as_str().unwrap().to_string();
+        let endpoint = v["doctor"]["socket_endpoint"].as_str().unwrap().to_string();
+        (cache, endpoint)
+    };
+    let (cache_a, endpoint_a) = doctor("a.json");
+    let (cache_b, _) = doctor("b.json");
+    let setups = xdg_cache.join("utcp").join("setups");
+    assert!(
+        std::path::Path::new(&cache_a).parent() == Some(setups.as_path()),
+        "{cache_a}"
+    );
+    assert_ne!(cache_a, cache_b);
+    assert_eq!(
+        cache_a,
+        doctor("a.json").0,
+        "the same config keeps its cache"
+    );
+    assert_eq!(
+        endpoint_a,
+        std::path::Path::new(&cache_a)
+            .join("utcp.sock")
+            .display()
+            .to_string()
+    );
+}
+
+/// Bytes 0..=255 over and over, `len` of them.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+const ZIP_LEN: usize = 300 * 1024;
+
+/// A server with a file download, a text answer, an answer too large to print, and an upload.
+async fn spawn_file_api() -> String {
+    use axum::body::Bytes;
+    let zip = || async {
+        (
+            [
+                // Parameters as Azure DevOps sends them; the answer reports only the type.
+                ("content-type", "application/zip; api-version=7.1"),
+                ("content-disposition", "attachment; filename=\"build.zip\""),
+            ],
+            pattern(ZIP_LEN),
+        )
+    };
+    let log = || async { ([("content-type", "text/plain")], "line1\nline2") };
+    let big = || async { Json(json!({"blob": "x".repeat(11 * 1024 * 1024), "count": 1})) };
+    let upload = |headers: HeaderMap, body: Bytes| async move {
+        let header = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        Json(json!({
+            "len": body.len(),
+            "sum": body.iter().map(|b| *b as u64).sum::<u64>(),
+            "first": body.first(),
+            "content_type": header("content-type"),
+            "content_length": header("content-length"),
+        }))
+    };
+    let app = Router::new()
+        .route("/zip", get(zip))
+        .route("/log", get(log))
+        .route("/big", get(big))
+        .route("/upload", post(upload));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{}", addr)
+}
+
+fn file_manual(env: &IsolatedEnv, base: &str) -> String {
+    let tool = |name: &str, method: &str, path: &str, extra: Value| {
+        let mut template = json!({
+            "call_template_type": "http",
+            "http_method": method,
+            "url": format!("{base}{path}"),
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            template[k] = v.clone();
+        }
+        json!({"name": name, "description": name, "inputs": {"type": "object"},
+               "outputs": {"type": "object"}, "tool_call_template": template})
+    };
+    let manual = json!({
+        "manual_version": "1.0.0",
+        "utcp_version": "1.0.0",
+        "info": {"title": "files", "version": "1"},
+        "tools": [
+            tool("get_zip", "GET", "/zip", json!({})),
+            tool("get_log", "GET", "/log", json!({})),
+            tool("get_log_file", "GET", "/log", json!({"response_type": "file"})),
+            tool("get_big", "GET", "/big", json!({})),
+            tool("upload", "POST", "/upload", json!({
+                "body_field": "body",
+                "body_type": "file",
+                "headers": {"Content-Type": "application/octet-stream"},
+            })),
+        ],
+    });
+    let path = env.tmp.path().join("files.utcp.json");
+    std::fs::write(&path, manual.to_string()).unwrap();
+    path.display().to_string()
+}
+
+/// Downloads (default folder, `--out` file, folder and stdout), text answers, answers too large to print,
+/// uploads (whole, a part, a relative path), both limits and batch `out`: through the daemon and in direct mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_are_uploaded_and_downloaded_by_the_calling_process() {
+    let env = IsolatedEnv::new();
+    let base = spawn_file_api().await;
+    let root = env.tmp.path().to_path_buf();
+    let dl = root.join("dl");
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let settings = |extra: &str| {
+        std::fs::write(
+            root.join("config/settings.toml"),
+            format!(
+                "download_dir = {}\nmax_upload_mb = 1\n{extra}",
+                toml_string(&dl.display().to_string())
+            ),
+        )
+        .unwrap();
+    };
+    settings("");
+    run_ok(&env, &["register", "files", &file_manual(&env, &base)]);
+    std::fs::write(root.join("up.bin"), pattern(200 * 1024)).unwrap();
+    std::fs::write(root.join("too_big.bin"), pattern(2 * 1024 * 1024)).unwrap();
+
+    let call = |mode: &[&str], args: &[&str]| -> Value {
+        let mut all: Vec<&str> = mode.to_vec();
+        all.push("call");
+        all.extend_from_slice(args);
+        let out = env.cmd().current_dir(&root).args(&all).output().unwrap();
+        assert!(
+            out.status.success(),
+            "utcp {all:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let call_err = |mode: &[&str], args: &[&str]| -> String {
+        let mut all: Vec<&str> = mode.to_vec();
+        all.push("call");
+        all.extend_from_slice(args);
+        let out = env.cmd().current_dir(&root).args(&all).output().unwrap();
+        assert!(!out.status.success(), "utcp {all:?} should fail");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    for (label, mode) in [("daemon", &[][..]), ("direct", &["--direct"][..])] {
+        if label == "daemon" {
+            run_ok(&env, &["daemon", "start"]);
+        } else {
+            run_ok(&env, &["daemon", "stop"]);
+        }
+        let _ = std::fs::remove_dir_all(&dl);
+
+        // A file answer goes to the downloads folder under the server's name, never overwriting.
+        let r = call(mode, &["files.get_zip"]);
+        assert_eq!(r["type"], "file", "{label}: {r}");
+        assert_eq!(r["mime_type"], "application/zip");
+        assert_eq!(r["bytes"], ZIP_LEN);
+        assert_eq!(r["filename"], "build.zip");
+        let saved = std::path::PathBuf::from(r["path"].as_str().unwrap());
+        assert_eq!(saved, dl.join("build.zip"), "{label}");
+        assert_eq!(std::fs::read(&saved).unwrap(), pattern(ZIP_LEN));
+        let r = call(mode, &["files.get_zip"]);
+        assert!(
+            r["path"].as_str().unwrap().ends_with("build (1).zip"),
+            "{label}: {r}"
+        );
+
+        // --out overwrites a file, keeps the server's name in a folder, and `-` is stdout.
+        let out_file = root.join("x.zip");
+        std::fs::write(&out_file, "old").unwrap();
+        call(mode, &["files.get_zip", "--out", "x.zip"]);
+        assert_eq!(
+            std::fs::read(&out_file).unwrap(),
+            pattern(ZIP_LEN),
+            "{label}"
+        );
+        let folder = root.join("outdir");
+        std::fs::create_dir_all(&folder).unwrap();
+        call(
+            mode,
+            &["files.get_zip", "--out", &folder.display().to_string()],
+        );
+        assert!(folder.join("build.zip").is_file(), "{label}");
+        let mut args: Vec<&str> = mode.to_vec();
+        args.extend(["call", "files.get_zip", "--out", "-"]);
+        let raw = env.cmd().args(&args).output().unwrap();
+        assert!(raw.status.success(), "{label}");
+        assert_eq!(
+            raw.stdout,
+            pattern(ZIP_LEN),
+            "{label}: --out - writes only the bytes"
+        );
+        // A reader that stops early (`| head -c 100`) ends the download quietly.
+        let mut child = env
+            .cmd()
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let closed = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&closed.stderr);
+        assert!(closed.status.success(), "{label}: {stderr}");
+        assert!(stderr.is_empty(), "{label}: {stderr}");
+
+        // Text stays a JSON string unless the template marks the answer as a file.
+        assert_eq!(call(mode, &["files.get_log"]), json!("line1\nline2"));
+        let r = call(mode, &["files.get_log_file"]);
+        assert!(
+            r["path"].as_str().unwrap().ends_with("get_log_file.txt"),
+            "{label}: {r}"
+        );
+        // A JSON answer with --out goes to that file.
+        call(mode, &["files.get_log", "--out", "log.json"]);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(root.join("log.json")).unwrap())
+                .unwrap(),
+            json!("line1\nline2")
+        );
+
+        // An answer too large to print is saved in utcp's own folder, with a note.
+        let r = call(mode, &["files.get_big"]);
+        let big = std::path::PathBuf::from(r["path"].as_str().unwrap());
+        assert!(
+            big.starts_with(root.join("cache").join("downloads")),
+            "{label}: {r}"
+        );
+        assert!(r["note"].as_str().unwrap().contains("after a day"));
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&big).unwrap()).unwrap();
+        assert_eq!(parsed["count"], 1);
+        // --fields first: what is left is small enough to print.
+        assert_eq!(
+            call(mode, &["files.get_big", "--fields", "count"]),
+            json!({"count": 1})
+        );
+
+        // Uploads: the calling process reads the file (a relative path is relative to it).
+        let r = call(mode, &["files.upload", r#"{"body": {"file": "up.bin"}}"#]);
+        let sent = pattern(200 * 1024);
+        assert_eq!(r["len"], sent.len(), "{label}: {r}");
+        assert_eq!(r["sum"], sent.iter().map(|b| *b as u64).sum::<u64>());
+        assert_eq!(r["content_type"], "application/octet-stream");
+        assert_eq!(r["content_length"], sent.len().to_string());
+        let r = call(
+            mode,
+            &[
+                "files.upload",
+                r#"{"body": {"file": "up.bin", "offset": 10, "length": 1000}}"#,
+            ],
+        );
+        assert_eq!(
+            (r["len"].clone(), r["first"].clone()),
+            (json!(1000), json!(10))
+        );
+        let err = call_err(
+            mode,
+            &["files.upload", r#"{"body": {"file": "too_big.bin"}}"#],
+        );
+        assert!(err.contains("only because of this limit"), "{label}: {err}");
+        assert!(err.contains("max_upload_mb"), "{label}: {err}");
+        let err = call_err(
+            mode,
+            &["files.upload", r#"{"body": {"file": "missing.bin"}}"#],
+        );
+        assert!(err.contains("cannot upload"), "{label}: {err}");
+
+        // The download limit stops a file answer and keeps nothing; JSON answers are not limited.
+        settings("max_download_mb = 0\n");
+        let err = call_err(mode, &["files.get_zip", "--out", "limited.zip"]);
+        assert!(err.contains("downloads are turned off"), "{label}: {err}");
+        assert!(!root.join("limited.zip").exists());
+        assert!(!root.join("limited.zip.part").exists());
+        assert_eq!(call(mode, &["files.get_log"]), json!("line1\nline2"));
+        settings("");
+
+        // Batch: each item may have its own `out`.
+        let batch = json!([
+            {"id": "a", "tool": "files.get_zip", "out": root.join("b.zip").display().to_string()},
+            {"id": "b", "tool": "files.get_log"},
+            {"id": "c", "tool": "files.upload", "args": {"body": {"file": "up.bin"}}},
+        ]);
+        std::fs::write(root.join("batch.json"), batch.to_string()).unwrap();
+        let mut args: Vec<&str> = mode.to_vec();
+        args.extend(["batch", "--file", "batch.json"]);
+        let out = env.cmd().current_dir(&root).args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let results: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(results[0]["ok"], true, "{label}: {results}");
+        assert_eq!(std::fs::read(root.join("b.zip")).unwrap(), pattern(ZIP_LEN));
+        assert_eq!(results[1]["result"], json!("line1\nline2"));
+        assert_eq!(
+            results[2]["result"]["len"],
+            200 * 1024,
+            "{label}: {results}"
+        );
+        if label == "daemon" {
+            let status: Value =
+                serde_json::from_str(&run_ok(&env, &["daemon", "status", "--json"])).unwrap();
+            assert!(
+                status["requests_served"].as_u64().unwrap() >= 15,
+                "the calls went through the daemon: {status}"
+            );
+        }
+    }
 }

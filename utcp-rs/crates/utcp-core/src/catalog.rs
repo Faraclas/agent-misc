@@ -35,6 +35,13 @@ pub struct UtcpRegistryConfig {
     /// kept so `register <name>` (no source) can restore them offline. Not searchable or callable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deregistered: BTreeMap<String, RegisteredManualEntry>,
+    /// Manuals added with `stage`, waiting for `promote` (or `discard`). Their copy is in `manuals/staged/`. Not in
+    /// search, `list` or the skills; callable only with `--staged`. At most one staged copy per name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub staged: BTreeMap<String, RegisteredManualEntry>,
+    /// The registration each `promote` replaced, with its copy in `manuals/previous/`, for `rollback`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub previous: BTreeMap<String, RegisteredManualEntry>,
 }
 
 fn default_registry_version() -> String {
@@ -47,6 +54,8 @@ impl Default for UtcpRegistryConfig {
             version: default_registry_version(),
             manuals: BTreeMap::new(),
             deregistered: BTreeMap::new(),
+            staged: BTreeMap::new(),
+            previous: BTreeMap::new(),
         }
     }
 }
@@ -219,6 +228,9 @@ pub struct BatchRequestItem {
     pub args: HashMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
+    /// Save this item's answer to this file (overwritten) instead of printing it, as `call --out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +259,12 @@ pub struct DoctorReport {
     pub index_present: bool,
     pub manual_count: usize,
     pub tool_count: usize,
+    /// Manuals waiting in the staging area (`utcp list --staged`, `utcp diff`, `utcp promote`).
+    #[serde(default)]
+    pub staged_count: usize,
+    /// The utcp `.env` file, and whether it exists.
+    pub env_file: String,
+    pub env_file_exists: bool,
     pub credentials: Vec<CredentialStatus>,
     /// The last run of `[secrets] command`; `None` when none is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +272,21 @@ pub struct DoctorReport {
     /// Why `settings.toml` could not be used (utcp then runs with the default settings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_error: Option<String>,
+    #[serde(default)]
+    pub settings_file: String,
+    /// Settings in `settings.toml` that utcp does not know, so they have no effect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_settings: Vec<crate::settings_file::UnknownSetting>,
+    /// `max_upload_mb` / `max_download_mb`: `None` is no limit, `0` turned off.
+    #[serde(default)]
+    pub max_upload_mb: Option<u64>,
+    #[serde(default)]
+    pub max_download_mb: Option<u64>,
+    /// Where file answers go without `--out`, and why there.
+    #[serde(default)]
+    pub download_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir_source: Option<crate::transfer::DownloadFolderSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +299,9 @@ pub struct CredentialStatus {
     /// [`SOURCE_DAEMON_ENV`] or [`SOURCE_ENV`]. `None` when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// `manual` is a staged manual (`utcp stage`), not an active one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
 }
 
 /// [`CredentialStatus::source`]: printed by `[secrets] command`.
@@ -305,7 +341,7 @@ impl UtcpRegistryConfig {
 
     /// Make `entry` the active registration for `name`, dropping any kept deregistered entry.
     /// An entry without a hint keeps the hint of the registration it replaces.
-    fn activate(&mut self, name: &str, mut entry: RegisteredManualEntry) {
+    pub(crate) fn activate(&mut self, name: &str, mut entry: RegisteredManualEntry) {
         let previous = self.deregistered.remove(name);
         if entry.hint.is_none() {
             entry.hint = self
@@ -1544,12 +1580,16 @@ pub fn deregister_manual(
     }
 
     let kept = registry.deregistered.remove(name);
+    let staged = registry.staged.remove(name);
+    let previous = registry.previous.remove(name);
     let mut files: Vec<PathBuf> = [active.as_ref(), kept.as_ref()]
         .into_iter()
         .flatten()
         .filter_map(|e| e.cached_file.as_ref().map(PathBuf::from))
         .collect();
     files.push(paths.cached_manual_path(name));
+    files.push(paths.staged_manual_path(name));
+    files.push(paths.previous_manual_path(name));
     let mut removed_file = false;
     for f in files {
         if fs::remove_file(&f).is_ok() {
@@ -1557,7 +1597,7 @@ pub fn deregister_manual(
         }
     }
 
-    if active.is_none() && kept.is_none() {
+    if active.is_none() && kept.is_none() && staged.is_none() && previous.is_none() {
         return Ok(if removed_file {
             DeregisterOutcome::Purged
         } else {
@@ -1718,7 +1758,7 @@ pub fn list_unregistered_manuals(paths: &UtcpPaths) -> Result<Vec<UnregisteredMa
 }
 
 /// Read and parse a saved manual copy into its index summary.
-fn read_saved_manual(
+pub(crate) fn read_saved_manual(
     name: &str,
     entry: &RegisteredManualEntry,
     cf_path: &Path,
@@ -1848,14 +1888,24 @@ pub fn rebuild_search_index(paths: &UtcpPaths) -> Result<SearchIndex> {
     rebuild_search_index_locked(paths, &registry)
 }
 
-fn rebuild_search_index_locked(
+pub(crate) fn rebuild_search_index_locked(
     paths: &UtcpPaths,
     registry: &UtcpRegistryConfig,
 ) -> Result<SearchIndex> {
-    let mut manuals = Vec::with_capacity(registry.manuals.len());
+    let index = build_index(paths, &registry.manuals);
+    index.save_to_disk(paths)?;
+    Ok(index)
+}
+
+/// [`rebuild_search_index`] without saving, from any set of entries (the active or the staged manuals).
+pub(crate) fn build_index(
+    paths: &UtcpPaths,
+    entries: &BTreeMap<String, RegisteredManualEntry>,
+) -> SearchIndex {
+    let mut manuals = Vec::with_capacity(entries.len());
     let mut tools = Vec::new();
 
-    for (name, entry) in &registry.manuals {
+    for (name, entry) in entries {
         let cf_path = entry
             .cached_file
             .as_ref()
@@ -1905,14 +1955,12 @@ fn rebuild_search_index_locked(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let index = SearchIndex {
+    SearchIndex {
         magic: SEARCH_INDEX_MAGIC,
         built_at_unix_ms,
         manuals,
         tools,
-    };
-    index.save_to_disk(paths)?;
-    Ok(index)
+    }
 }
 
 /// Load `SearchIndex` synchronously in Direct Mode (rebuilding automatically if missing while `.utcp_config.json` exists).
@@ -1926,8 +1974,29 @@ pub fn load_or_build_index_sync(paths: &UtcpPaths) -> Result<SearchIndex> {
     Ok(SearchIndex::default())
 }
 
-pub fn list_tools_sync(paths: &UtcpPaths, manual: Option<&str>) -> Result<Vec<ToolSummary>> {
-    let idx = load_or_build_index_sync(paths)?;
+/// The active manuals' index or, with `staged`, an in-memory index of the staged manuals.
+fn index_for(paths: &UtcpPaths, staged: bool) -> Result<SearchIndex> {
+    if staged {
+        crate::staging::staged_index(paths)
+    } else {
+        load_or_build_index_sync(paths)
+    }
+}
+
+fn not_found_in(staged: bool) -> &'static str {
+    if staged {
+        "the staged manuals (utcp list --staged)"
+    } else {
+        "registered manuals"
+    }
+}
+
+pub fn list_tools_sync(
+    paths: &UtcpPaths,
+    manual: Option<&str>,
+    staged: bool,
+) -> Result<Vec<ToolSummary>> {
+    let idx = index_for(paths, staged)?;
     Ok(idx.list_tools(manual))
 }
 
@@ -1941,10 +2010,10 @@ pub fn search_tools_sync(
     Ok(idx.search(query, limit, include_schemas))
 }
 
-pub fn get_schema_sync(paths: &UtcpPaths, target: &str) -> Result<ToolSchemaDetail> {
-    let idx = load_or_build_index_sync(paths)?;
+pub fn get_schema_sync(paths: &UtcpPaths, target: &str, staged: bool) -> Result<ToolSchemaDetail> {
+    let idx = index_for(paths, staged)?;
     idx.get_schema(target)
-        .ok_or_else(|| anyhow!("Tool '{}' not found in registered manuals", target))
+        .ok_or_else(|| anyhow!("Tool '{}' not found in {}", target, not_found_in(staged)))
 }
 
 /// Load a single manual's cached JSON file directly (`O(1)` 1-file read from OS page cache).
@@ -2041,7 +2110,7 @@ pub fn dry_run_tool_from_manual(
             for k in consumed {
                 rem.remove(&k);
             }
-            return Ok(json!({
+            let mut preview = json!({
                 "dry_run": true,
                 "tool": format!("{}.{}", manual_name, entry.name),
                 "protocol": "http",
@@ -2050,7 +2119,14 @@ pub fn dry_run_tool_from_manual(
                 "headers": http_prov.headers,
                 "auth": http_prov.base.auth,
                 "args": rem,
-            }));
+            });
+            if let Some(body_type) = &http_prov.body_type {
+                preview["body_type"] = json!(body_type);
+            }
+            if let Some(response_type) = &http_prov.response_type {
+                preview["response_type"] = json!(response_type);
+            }
+            return Ok(preview);
         }
     }
 
@@ -2065,6 +2141,8 @@ pub fn dry_run_tool_from_manual(
 
 /// Execute a single tool given an already-loaded `CachedUtcpManual`, `env_map`, and `CommunicationProtocolRegistry`.
 /// Automatically intercepts inline base64 media payloads into `paths.media_dir` (`tmpfs` on Linux).
+/// A file the tool uploads is read through `files`; a file it answers with comes back unread.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_loaded_tool(
     manual: &CachedUtcpManual,
     manual_name: &str,
@@ -2073,7 +2151,8 @@ pub async fn execute_loaded_tool(
     env_map: &HashMap<String, String>,
     protocols: &CommunicationProtocolRegistry,
     paths: &UtcpPaths,
-) -> Result<Value> {
+    files: &dyn crate::transfer::CallerFiles,
+) -> Result<crate::transfer::CallOutput> {
     let entry = manual
         .tools
         .iter()
@@ -2094,11 +2173,19 @@ pub async fn execute_loaded_tool(
         .ok_or_else(|| anyhow!("Communication protocol '{}' is not enabled", proto_key))?;
 
     let call_name = format!("{}.{}", provider.name(), entry.name);
-    let mut output = transport
-        .call_tool(&call_name, args, provider.as_ref())
+    let output = transport
+        .call_tool_files(&call_name, args, provider.as_ref(), files)
         .await?;
-    crate::media::intercept_inline_media(&mut output, paths);
-    Ok(output)
+    Ok(match output {
+        crate::transfer::CallOutput::Json(mut value) => {
+            crate::media::intercept_inline_media(&mut value, paths);
+            crate::transfer::CallOutput::Json(value)
+        }
+        crate::transfer::CallOutput::File(mut file) => {
+            file.meta.tool = entry.name.clone();
+            crate::transfer::CallOutput::File(file)
+        }
+    })
 }
 
 /// Release what a manual holds open in `protocols`, for example its stdio MCP server and that
@@ -2243,15 +2330,27 @@ fn insert_projected_path(src: &Value, parts: &[&str], dst: &mut Value) {
 }
 
 /// Direct Mode single-tool execution: reads ONLY `manuals/<manual>.utcp.json` (and `.env` only when `${` is present).
+/// With `staged`, the staged copy in `manuals/staged/` instead. This process reads the files the tool
+/// uploads and saves the file it answers with (to `out`, else the downloads folder).
 pub async fn call_tool_direct(
     paths: &UtcpPaths,
     target: &str,
     args: HashMap<String, Value>,
     dry_run: bool,
     fields: Option<&[String]>,
+    staged: bool,
+    out: Option<&crate::transfer::OutTarget>,
 ) -> Result<Value> {
-    let (manual_name, tool_name) = resolve_manual_and_tool(target, None, paths)?;
-    let manual = load_single_cached_manual(paths, &manual_name)?;
+    let (manual_name, tool_name, manual) = if staged {
+        let index = crate::staging::staged_index(paths)?;
+        let (m, t) = resolve_manual_and_tool(target, Some(&index), paths)?;
+        let manual = crate::staging::load_staged_manual(paths, &m)?;
+        (m, t, manual)
+    } else {
+        let (m, t) = resolve_manual_and_tool(target, None, paths)?;
+        let manual = load_single_cached_manual(paths, &m)?;
+        (m, t, manual)
+    };
     let env_map = if dry_run
         || manual
             .tools
@@ -2277,7 +2376,11 @@ pub async fn call_tool_direct(
 
     let protocols =
         CommunicationProtocolRegistry::with_shared_http_client(build_secure_http_client());
-    let val = execute_loaded_tool(
+    let limits = crate::transfer::Limits::load(paths);
+    let files = crate::transfer::LocalFiles {
+        limits: limits.clone(),
+    };
+    let output = execute_loaded_tool(
         &manual,
         &manual_name,
         &tool_name,
@@ -2285,30 +2388,43 @@ pub async fn call_tool_direct(
         &env_map,
         &protocols,
         paths,
+        &files,
     )
     .await?;
-    Ok(match fields {
-        Some(f) if !f.is_empty() => project_json_fields(val, f),
-        _ => val,
-    })
+    crate::transfer::finish_output_locally(output, &tool_name, fields, out, paths, &limits).await
 }
 
 /// Execute a batch of tool calls concurrently in Direct Mode over a single shared HTTP/TLS connection pool.
+/// With `staged`, every item calls a staged manual.
 pub async fn batch_call_direct(
     paths: &UtcpPaths,
     items: Vec<BatchRequestItem>,
     concurrency: usize,
+    staged: bool,
 ) -> Result<Vec<BatchResultItem>> {
-    let index = load_or_build_index_sync(paths)?;
-    let env_map = load_env_map(paths);
+    let index = index_for(paths, staged)?;
+    let env_map = if staged {
+        load_env_map_for(paths, Some(&index.env_var_names()))
+    } else {
+        load_env_map(paths)
+    };
     let protocols =
         CommunicationProtocolRegistry::with_shared_http_client(build_secure_http_client());
+    let limits = crate::transfer::Limits::load(paths);
+    let files = crate::transfer::LocalFiles {
+        limits: limits.clone(),
+    };
 
     let mut manual_cache: HashMap<String, CachedUtcpManual> = HashMap::new();
     for item in &items {
         if let Ok((mname, _)) = resolve_manual_and_tool(&item.tool, Some(&index), paths) {
             if let std::collections::hash_map::Entry::Vacant(slot) = manual_cache.entry(mname) {
-                if let Ok(m) = load_single_cached_manual(paths, slot.key()) {
+                let loaded = if staged {
+                    crate::staging::load_staged_manual(paths, slot.key())
+                } else {
+                    load_single_cached_manual(paths, slot.key())
+                };
+                if let Ok(m) = loaded {
                     slot.insert(m);
                 }
             }
@@ -2322,22 +2438,30 @@ pub async fn batch_call_direct(
             let env_map = &env_map;
             let index = &index;
             let manual_cache = &manual_cache;
+            let files = &files;
+            let limits = &limits;
             async move {
                 let started = Instant::now();
                 let item_fields = item.fields.clone();
+                let out = item.out.as_deref().map(crate::transfer::OutTarget::parse);
                 let outcome = async {
                     let (mname, tname) = resolve_manual_and_tool(&item.tool, Some(index), paths)?;
                     let manual = manual_cache
                         .get(&mname)
                         .ok_or_else(|| anyhow!("Manual '{}' not found", mname))?;
-                    let val = execute_loaded_tool(
-                        manual, &mname, &tname, item.args, env_map, &protocols, paths,
+                    let output = execute_loaded_tool(
+                        manual, &mname, &tname, item.args, env_map, &protocols, paths, files,
                     )
                     .await?;
-                    Ok::<Value, anyhow::Error>(match item_fields.as_deref() {
-                        Some(f) if !f.is_empty() => project_json_fields(val, f),
-                        _ => val,
-                    })
+                    crate::transfer::finish_output_locally(
+                        output,
+                        &tname,
+                        item_fields.as_deref(),
+                        out.as_ref(),
+                        paths,
+                        limits,
+                    )
+                    .await
                 }
                 .await;
                 let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -2362,7 +2486,7 @@ pub async fn batch_call_direct(
                             ok: false,
                             status: "ERR".to_string(),
                             result: None,
-                            error: Some(err.to_string()),
+                            error: Some(format!("{err:#}")),
                             latency_ms,
                         },
                     ),
@@ -2390,9 +2514,13 @@ pub fn build_doctor_report(
         .err()
         .map(|e| format!("{e:#}"));
     let settings = UtcpSettings::load(paths);
+    let (download_dir, download_dir_source) = crate::transfer::download_folder(paths);
     let logging_enabled = crate::activity::is_logging_enabled(paths);
     let index_present = paths.search_index_file.exists();
     let idx = load_or_build_index_sync(paths)?;
+    let staged_idx = crate::staging::staged_index(paths).unwrap_or_default();
+    let mut wanted = idx.env_var_names();
+    wanted.extend(staged_idx.env_var_names());
     let mut env_map = load_file_env_map(paths);
     // With the daemon running, `doctor` reports the daemon's credentials and secrets command run.
     let secrets = settings
@@ -2400,7 +2528,7 @@ pub fn build_doctor_report(
         .as_ref()
         .filter(|_| !daemon_running)
         .map(|secrets| {
-            run_direct_secrets(paths, secrets, &idx.env_var_names()).unwrap_or_else(|| {
+            run_direct_secrets(paths, secrets, &wanted).unwrap_or_else(|| {
                 crate::secrets::SecretsRun {
                     values: HashMap::new(),
                     status: crate::secrets::SecretsCommandStatus {
@@ -2418,7 +2546,12 @@ pub fn build_doctor_report(
     env_map.extend(secret_values.clone());
 
     let mut credentials = Vec::new();
-    for m in &idx.manuals {
+    let all = idx
+        .manuals
+        .iter()
+        .map(|m| (m, false))
+        .chain(staged_idx.manuals.iter().map(|m| (m, true)));
+    for (m, staged) in all {
         for req_var in &m.required_env_vars {
             let resolved = resolve_secret_var(&m.name, req_var, &env_map);
             let is_set = resolved.is_some();
@@ -2436,6 +2569,7 @@ pub fn build_doctor_report(
                 resolved_via: resolved.map(|(_, via)| via),
                 is_set,
                 source,
+                staged,
             });
         }
     }
@@ -2452,9 +2586,20 @@ pub fn build_doctor_report(
         index_present,
         manual_count: idx.manuals.len(),
         tool_count: idx.tools.len(),
+        staged_count: staged_idx.manuals.len(),
+        env_file: paths.env_file.to_string_lossy().into_owned(),
+        env_file_exists: paths.env_file.is_file(),
         credentials,
         secrets_command: secrets.map(|run| run.status),
         settings_error,
+        settings_file: paths.settings_file.to_string_lossy().into_owned(),
+        unknown_settings: std::fs::read_to_string(&paths.settings_file)
+            .map(|text| crate::settings_file::unknown_settings(&text))
+            .unwrap_or_default(),
+        max_upload_mb: settings.max_upload_mb,
+        max_download_mb: settings.max_download_mb,
+        download_dir: download_dir.to_string_lossy().into_owned(),
+        download_dir_source: Some(download_dir_source),
     })
 }
 
@@ -2888,6 +3033,7 @@ mod hint_tests {
             activity_log_bak: base.join("state/activity.jsonl.bak"),
             socket_endpoint: base.join("cache/utcp.sock").to_string_lossy().into_owned(),
             daemon_pid_file: base.join("state/daemon.pid"),
+            separate_setup: true,
         }
     }
 

@@ -24,6 +24,10 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
   - **Bounded Media Spool (`$XDG_RUNTIME_DIR/utcp-media` on Linux, `%TEMP%\utcp-media` on Windows):** Automatically
     intercepts inline MCP base64 images/blobs into `0600` files with TTL and count pruning
     (`utcp media <status|clear>`).
+  - **Files In and Out:** A file answer (an archive, a log, an image) is streamed to the Downloads folder or
+    `--out <path>` and the call prints its path; a JSON answer over 10 MB is saved to a file instead of flooding the
+    context. Tools that upload take `{"file": "<path>"}`. The calling process reads and writes the files, never the
+    daemon, and `max_upload_mb` / `max_download_mb` in `settings.toml` set the limits.
 - **Dual-Mode Execution:**
   - **Daemon Mode (`utcp daemon start` / `utcp-daemon.service`):** `< 0.2 ms` Unix Domain Socket / Windows Named Pipe
     IPC with in-memory catalog, live `notify` reloads, `utcp daemon reload-env` shell sync (only env vars registered
@@ -53,6 +57,9 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
   daemon has them after a reboot without copying them anywhere. `utcp doctor` shows where each one comes from.
 - **Manual Lifecycle:** `utcp deregister` takes a manual out of search but keeps its settings, hint, and saved copy;
   `utcp register <name>` (no source) brings it back offline; `--purge-cache` deletes it for good.
+- **Staging:** `utcp stage` adds a manual (or a new version of one) without agents seeing it. `utcp diff` shows the
+  tools it adds, removes and changes, `utcp call --staged` tests it with the real secrets, `utcp promote` makes it
+  active, and `utcp rollback` brings back the version it replaced.
 - **6-Tab Companion TUI (`utcp ui`):** Interactive `ratatui` interface: 1 Manuals (`h` edits a hint, `a` shows
   deregistered manuals), 2 Search (`t` tries the selected tool: dry run or real call), 3 Import (OpenAPI / UTCP specs
   or MCP servers by URL or command, `m` switches), 4 Settings & Skills, 5 Live Activity (`Enter` shows a failed call's
@@ -106,6 +113,18 @@ utcp deregister myagent
 utcp register myagent
 utcp deregister myagent --purge-cache
 
+# Stage a manual to review and test it before agents see it, then make it active (or discard it)
+utcp stage petstore ./petstore.utcp.json --hint 'pet store demo API'
+utcp diff
+utcp call --staged petstore.get_pet '{"petId": 1}'
+utcp promote
+
+# After a promote replaced an older version of a manual, bring that version back (run it again to undo)
+utcp rollback petstore
+
+# Check paths, the daemon, staged manuals, the secrets command and .env, each secret, and the skills
+utcp doctor
+
 # Add, check, or clear the few words agents see next to a manual's name in the skill
 utcp set-hint context7 'library and framework docs'
 utcp get-hint
@@ -146,8 +165,8 @@ The unit puts `~/.local/bin` on `PATH` for CLI-based manuals. It does not load `
 daemon's environment: utcp reads that file itself, so the secrets do not leak to every program the daemon starts.
 A daemon started at login does not see what your shell exports (for example from `~/.bashrc`). To give it secrets you
 keep in a shell file or a password store, set a secrets command: copy
-[`examples/secret-source.sh`](./examples/secret-source.sh), adjust its allowlist, and add to
-`~/.config/utcp/settings.toml`:
+[`examples/secret-source.sh`](./examples/secret-source.sh), adjust its allowlist, and in
+`~/.config/utcp/settings.toml` (utcp creates it with the `[secrets]` section commented out, so remove the `#` signs):
 
 ```toml
 [secrets]

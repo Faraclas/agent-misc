@@ -1,21 +1,41 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use reqwest::{header, Client};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::auth::AuthConfig;
 use crate::providers::base::Provider;
 use crate::providers::http::HttpProvider;
 use crate::security::{validate_size_limit, validate_url_security};
 use crate::tools::Tool;
+use crate::transfer::{
+    content_disposition_filename, mime_essence, ByteStream, CallOutput, CallerFiles, FileDownload,
+    FileKind, FileMeta, NoFiles, UploadSpec,
+};
 use crate::transports::{stream::StreamResult, ClientTransport};
 
+/// Largest tool list `register_tool_provider` reads from an HTTP endpoint.
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
+/// A call fails when the server sends nothing for this long: no answer after the request (and its
+/// upload) went out, or no data in the middle of an answer. A transfer that keeps moving never
+/// times out, however long it takes.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Replaces the shared client's total timeout for a tool call (the stall timeout guards it instead).
+const NO_TOTAL_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// How much of a failed call's answer goes into the error.
+const MAX_ERROR_BODY: usize = 64 * 1024;
 
 /// Transport for synchronous HTTP providers that expose JSON APIs.
 pub struct HttpClientTransport {
     pub client: Client,
+    stall_timeout: Duration,
 }
 
 impl Default for HttpClientTransport {
@@ -27,14 +47,21 @@ impl Default for HttpClientTransport {
 impl HttpClientTransport {
     /// Build a new HTTP client transport with tuned defaults and SSRF protection.
     pub fn new() -> Self {
-        Self {
-            client: crate::security::build_secure_http_client(),
-        }
+        Self::with_client(crate::security::build_secure_http_client())
     }
 
     /// Build an HTTP client transport sharing an existing warm `reqwest::Client`.
     pub fn with_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            stall_timeout: STALL_TIMEOUT,
+        }
+    }
+
+    /// A different stall timeout (tests).
+    pub fn with_stall_timeout(mut self, stall_timeout: Duration) -> Self {
+        self.stall_timeout = stall_timeout;
+        self
     }
 
     /// Attach authentication headers or query params to the request builder.
@@ -134,10 +161,26 @@ impl ClientTransport for HttpClientTransport {
 
     async fn call_tool(
         &self,
-        _tool_name: &str,
+        tool_name: &str,
         args: HashMap<String, Value>,
         prov: &dyn Provider,
     ) -> Result<Value> {
+        match self.call_tool_files(tool_name, args, prov, &NoFiles).await? {
+            CallOutput::Json(value) => Ok(value),
+            CallOutput::File(file) => Err(anyhow!(
+                "{tool_name} answered with a file ({}), which only `utcp call` and `utcp batch` can save",
+                file.meta.mime_type
+            )),
+        }
+    }
+
+    async fn call_tool_files(
+        &self,
+        tool_name: &str,
+        args: HashMap<String, Value>,
+        prov: &dyn Provider,
+        files: &dyn CallerFiles,
+    ) -> Result<CallOutput> {
         // Downcast to HttpProvider using as_any
         let http_prov = prov
             .as_any()
@@ -202,16 +245,42 @@ impl ClientTransport for HttpClientTransport {
         }
 
         // Determine how to send remaining args
-        if method_upper == "POST" || method_upper == "PUT" || method_upper == "PATCH" {
+        let activity = Activity::new();
+        let has_body = method_upper == "POST" || method_upper == "PUT" || method_upper == "PATCH";
+        let upload = http_prov.body_type.as_deref() == Some("file");
+        if upload && !has_body {
+            return Err(anyhow!(
+                "tool `{tool_name}` is broken: its template uploads a file (`\"body_type\": \"file\"`) with \
+                 {method_upper}, which sends no body; an upload needs POST, PUT or PATCH. Fix the manual."
+            ));
+        }
+        if upload {
+            let field = http_prov.body_field.as_deref().unwrap_or("body");
+            let spec_val = remaining_args.remove(field).ok_or_else(|| {
+                anyhow!("this tool uploads a file: pass it as `{field}`: {{\"file\": \"<path>\"}}")
+            })?;
+            let spec = UploadSpec::from_value(&spec_val, field)?;
+            for (key, value) in &remaining_args {
+                request_builder = request_builder.query(&[(key, query_value(value))]);
+            }
+            let upload = files.open_upload(&spec).await?;
+            let has_content_type = http_prov.headers.as_ref().is_some_and(|h| {
+                h.keys()
+                    .any(|k| k.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()))
+            });
+            if !has_content_type {
+                request_builder =
+                    request_builder.header(header::CONTENT_TYPE, "application/octet-stream");
+            }
+            request_builder = request_builder
+                .header(header::CONTENT_LENGTH, upload.length)
+                .body(reqwest::Body::wrap_stream(activity.track(upload.stream)));
+        } else if has_body {
             if let Some(body_field) = &http_prov.body_field {
                 if let Some(body_val) = remaining_args.remove(body_field) {
                     // Any leftover parameters after extracting body_field are query parameters
                     for (key, value) in &remaining_args {
-                        let qval = match value {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        request_builder = request_builder.query(&[(key, qval)]);
+                        request_builder = request_builder.query(&[(key, query_value(value))]);
                     }
                     request_builder = request_builder.json(&body_val);
                 } else {
@@ -223,24 +292,33 @@ impl ClientTransport for HttpClientTransport {
         } else {
             // Send as query parameters without JSON quotes around strings
             for (key, value) in &remaining_args {
-                let qval = match value {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                request_builder = request_builder.query(&[(key, qval)]);
+                request_builder = request_builder.query(&[(key, query_value(value))]);
             }
         }
 
-        // Send request
-        let response =
-            crate::transports::rate_limit::reject_rate_limited(request_builder.send().await?)
-                .await?;
+        let host = url::Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| url.clone());
+        let response = self
+            .send_watching(request_builder.timeout(NO_TOTAL_TIMEOUT), &activity, &host)
+            .await?;
+        let response = crate::transports::rate_limit::reject_rate_limited(response).await?;
         let status = response.status();
-        let body_bytes = response.bytes().await?;
-        validate_size_limit(&body_bytes, MAX_RESPONSE_SIZE)?;
+        let headers = response.headers().clone();
+        let size = response.content_length();
+        let mut body = stall_guard(response.bytes_stream(), self.stall_timeout, host);
 
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&body_bytes);
+            let mut snippet = Vec::new();
+            while snippet.len() < MAX_ERROR_BODY {
+                match body.next().await {
+                    Some(Ok(chunk)) => snippet.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+            snippet.truncate(MAX_ERROR_BODY);
+            let snippet = String::from_utf8_lossy(&snippet);
             let trimmed = snippet.trim();
             if trimmed.is_empty() {
                 return Err(anyhow!("HTTP request failed with status: {}", status));
@@ -252,15 +330,64 @@ impl ClientTransport for HttpClientTransport {
             ));
         }
 
+        let header_str = |name: header::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header_str(header::CONTENT_TYPE);
+        let disposition = header_str(header::CONTENT_DISPOSITION);
+        let filename = disposition
+            .as_deref()
+            .and_then(content_disposition_filename);
+        let attachment = disposition.as_deref().is_some_and(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("attachment")
+        });
+        let forced = http_prov.response_type.as_deref() == Some("file") || attachment;
+        let meta = |mime: Option<&str>, size: Option<u64>| FileMeta {
+            kind: FileKind::Download,
+            mime_type: mime
+                .and_then(mime_essence)
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            filename: filename.clone(),
+            size,
+            tool: tool_name.to_string(),
+        };
+
+        let kind = classify(content_type.as_deref(), forced);
+        if kind == AnswerKind::File {
+            return Ok(CallOutput::File(FileDownload {
+                meta: meta(content_type.as_deref(), size),
+                stream: body,
+            }));
+        }
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            body_bytes.extend_from_slice(&chunk?);
+        }
         if body_bytes.is_empty() {
-            return Ok(Value::Null);
+            return Ok(CallOutput::Json(Value::Null));
         }
-        if let Ok(result) = serde_json::from_slice::<Value>(&body_bytes) {
-            return Ok(result);
+        if kind != AnswerKind::Text {
+            if let Ok(result) = serde_json::from_slice::<Value>(&body_bytes) {
+                return Ok(CallOutput::Json(result));
+            }
         }
-        Ok(Value::String(
-            String::from_utf8_lossy(&body_bytes).into_owned(),
-        ))
+        match String::from_utf8(body_bytes) {
+            Ok(text) => Ok(CallOutput::Json(Value::String(text))),
+            // Not text after all: keep the bytes as they are instead of mangling them.
+            Err(e) => {
+                let bytes = e.into_bytes();
+                let size = Some(bytes.len() as u64);
+                Ok(CallOutput::File(FileDownload::from_bytes(
+                    meta(content_type.as_deref(), size),
+                    bytes,
+                )))
+            }
+        }
     }
 
     async fn call_tool_stream(
@@ -270,6 +397,152 @@ impl ClientTransport for HttpClientTransport {
         _prov: &dyn Provider,
     ) -> Result<Box<dyn StreamResult>> {
         Err(anyhow!("Streaming not supported by HttpClientTransport"))
+    }
+}
+
+impl HttpClientTransport {
+    /// Send the request and wait for the answer's headers, failing only when nothing moved for the
+    /// stall timeout: an upload that keeps sending, or a server that answers, never times out.
+    async fn send_watching(
+        &self,
+        builder: reqwest::RequestBuilder,
+        activity: &Activity,
+        host: &str,
+    ) -> Result<reqwest::Response> {
+        let send = builder.send();
+        tokio::pin!(send);
+        loop {
+            let idle = activity.idle();
+            if idle >= self.stall_timeout {
+                return Err(anyhow!(stall_message(host, self.stall_timeout, true)));
+            }
+            tokio::select! {
+                sent = &mut send => return Ok(sent?),
+                _ = tokio::time::sleep(self.stall_timeout - idle) => {}
+            }
+        }
+    }
+}
+
+fn query_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn stall_message(host: &str, stall: Duration, waiting_for_answer: bool) -> String {
+    let secs = stall.as_secs();
+    if waiting_for_answer {
+        format!(
+            "{host} did not answer for {secs} s, so utcp stopped waiting (the connection stalled). \
+             A request that changes something may still have been carried out; check before retrying."
+        )
+    } else {
+        format!(
+            "{host} sent no data for {secs} s in the middle of its answer, so utcp stopped waiting \
+             (the connection stalled). Nothing partial was kept."
+        )
+    }
+}
+
+/// When the request last made progress (an upload chunk went out).
+struct Activity {
+    start: Instant,
+    last_ms: Arc<AtomicU64>,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            last_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_ms.load(Ordering::Relaxed));
+        self.start.elapsed().saturating_sub(last)
+    }
+
+    /// `stream`, noting the time of every chunk taken from it.
+    fn track(&self, stream: ByteStream) -> ByteStream {
+        let start = self.start;
+        let last_ms = self.last_ms.clone();
+        Box::pin(stream.inspect(move |_| {
+            last_ms.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }))
+    }
+}
+
+/// An answer's body, failing with a clear error when no data arrives for `stall`.
+fn stall_guard<S>(stream: S, stall: Duration, host: String) -> ByteStream
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+{
+    let state = Some(Box::pin(stream));
+    Box::pin(futures::stream::unfold(state, move |state| {
+        let host = host.clone();
+        async move {
+            let mut stream = state?;
+            match tokio::time::timeout(stall, stream.next()).await {
+                Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(stream))),
+                Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e)), None)),
+                Ok(None) => None,
+                Err(_) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        stall_message(&host, stall, false),
+                    )),
+                    None,
+                )),
+            }
+        }
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerKind {
+    Json,
+    Text,
+    /// No `Content-Type`: read it, then JSON if it parses, text if it is UTF-8, else a file.
+    Unknown,
+    File,
+}
+
+/// How to treat an answer, from its `Content-Type`.
+fn classify(content_type: Option<&str>, forced_file: bool) -> AnswerKind {
+    if forced_file {
+        return AnswerKind::File;
+    }
+    let Some(ct) = content_type else {
+        return AnswerKind::Unknown;
+    };
+    let essence = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if essence.is_empty() {
+        AnswerKind::Unknown
+    } else if essence == "application/json" || essence.ends_with("+json") || essence == "text/json"
+    {
+        AnswerKind::Json
+    } else if essence.starts_with("text/")
+        || essence.ends_with("+xml")
+        || matches!(
+            essence.as_str(),
+            "application/xml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/javascript"
+                | "application/x-www-form-urlencoded"
+        )
+    {
+        AnswerKind::Text
+    } else {
+        AnswerKind::File
     }
 }
 
@@ -420,6 +693,8 @@ mod tests {
             headers: None,
             body_field: None,
             header_fields: None,
+            body_type: None,
+            response_type: None,
         };
 
         let transport = HttpClientTransport::new();
@@ -490,6 +765,8 @@ mod tests {
             headers: None,
             body_field: None,
             header_fields: None,
+            body_type: None,
+            response_type: None,
         };
         let transport = HttpClientTransport::new();
 
@@ -511,5 +788,216 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("HTTP request failed with status 403"), "{err}");
+    }
+
+    #[test]
+    fn answers_are_json_text_or_files_by_content_type() {
+        assert_eq!(
+            classify(Some("application/json; charset=utf-8"), false),
+            AnswerKind::Json
+        );
+        assert_eq!(
+            classify(Some("application/vnd.api+json"), false),
+            AnswerKind::Json
+        );
+        assert_eq!(classify(Some("text/plain"), false), AnswerKind::Text);
+        assert_eq!(classify(Some("application/xml"), false), AnswerKind::Text);
+        assert_eq!(classify(Some("application/zip"), false), AnswerKind::File);
+        assert_eq!(
+            classify(Some("application/octet-stream"), false),
+            AnswerKind::File
+        );
+        assert_eq!(classify(None, false), AnswerKind::Unknown);
+        assert_eq!(classify(Some("application/json"), true), AnswerKind::File);
+    }
+
+    fn provider_at(url: String) -> HttpProvider {
+        let mut p = HttpProvider::new("t".into(), url, "GET".into(), None);
+        p.content_type = None;
+        p
+    }
+
+    async fn serve(app: Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// A transfer that keeps moving outlasts the stall timeout; one that stops fails with a clear
+    /// message, both before the answer starts and in its middle. Binary without a type is a file.
+    #[tokio::test]
+    async fn the_stall_timeout_stops_only_transfers_that_stop_moving() {
+        use axum::body::Body;
+        let slow_body = || async {
+            let chunks = futures::stream::unfold(0u32, |n| async move {
+                if n == 6 {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Some((
+                    Ok::<_, std::io::Error>(Bytes::from(vec![0xffu8; 10])),
+                    n + 1,
+                ))
+            });
+            Body::from_stream(chunks)
+        };
+        let stalled_body = || async {
+            let chunks = futures::stream::unfold(0u32, |n| async move {
+                if n > 0 {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), n + 1))
+            });
+            (
+                [("content-type", "application/octet-stream")],
+                Body::from_stream(chunks),
+            )
+        };
+        let silent = || async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            "late"
+        };
+        let addr = serve(
+            Router::new()
+                .route("/slow", get(slow_body))
+                .route("/stalled", get(stalled_body))
+                .route("/silent", get(silent)),
+        )
+        .await;
+        let transport = HttpClientTransport::new().with_stall_timeout(Duration::from_millis(300));
+
+        // 600 ms in all, never 300 ms without data; no type and not UTF-8, so a file.
+        let out = transport
+            .call_tool_files(
+                "t.slow",
+                HashMap::new(),
+                &provider_at(format!("http://{addr}/slow")),
+                &NoFiles,
+            )
+            .await
+            .unwrap();
+        let CallOutput::File(mut file) = out else {
+            panic!("expected a file")
+        };
+        assert_eq!(file.meta.mime_type, "application/octet-stream");
+        let mut got = 0;
+        while let Some(chunk) = file.stream.next().await {
+            got += chunk.unwrap().len();
+        }
+        assert_eq!(got, 60);
+
+        let out = transport
+            .call_tool_files(
+                "t.stalled",
+                HashMap::new(),
+                &provider_at(format!("http://{addr}/stalled")),
+                &NoFiles,
+            )
+            .await
+            .unwrap();
+        let CallOutput::File(mut file) = out else {
+            panic!("expected a file")
+        };
+        assert!(file.stream.next().await.unwrap().is_ok());
+        let err = file.stream.next().await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("sent no data for 0 s in the middle"), "{err}");
+        assert!(
+            file.stream.next().await.is_none(),
+            "a stall ends the stream"
+        );
+
+        let err = transport
+            .call_tool(
+                "t.silent",
+                HashMap::new(),
+                &provider_at(format!("http://{addr}/silent")),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(err.contains("may still have been carried out"), "{err}");
+    }
+
+    /// Upload chunks count as progress: an upload longer than the stall timeout succeeds.
+    #[tokio::test]
+    async fn a_slow_upload_is_progress_and_goes_out_with_its_length() {
+        use crate::transfer::{Upload, UploadSpec};
+        struct SlowFile;
+        #[async_trait]
+        impl CallerFiles for SlowFile {
+            async fn open_upload(&self, spec: &UploadSpec) -> Result<Upload> {
+                assert_eq!(spec.file, "a.bin");
+                let chunks = futures::stream::unfold(0u32, |n| async move {
+                    if n == 5 {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Some((Ok(Bytes::from(vec![7u8; 4])), n + 1))
+                });
+                Ok(Upload {
+                    length: 20,
+                    stream: Box::pin(chunks),
+                })
+            }
+        }
+        let echo = |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
+            Json(json!({
+                "len": body.len(),
+                "type": headers.get("content-type").and_then(|v| v.to_str().ok()),
+                "length": headers.get("content-length").and_then(|v| v.to_str().ok()),
+            }))
+        };
+        let addr = serve(Router::new().route("/up", post(echo))).await;
+        let mut prov = provider_at(format!("http://{addr}/up"));
+        prov.http_method = "POST".into();
+        prov.body_field = Some("body".into());
+        prov.body_type = Some("file".into());
+        let transport = HttpClientTransport::new().with_stall_timeout(Duration::from_millis(300));
+        let mut args = HashMap::new();
+        args.insert("body".to_string(), json!({"file": "a.bin"}));
+        let out = transport
+            .call_tool_files("t.up", args, &prov, &SlowFile)
+            .await
+            .unwrap();
+        let CallOutput::Json(v) = out else {
+            panic!("expected JSON")
+        };
+        assert_eq!(
+            v,
+            json!({"len": 20, "type": "application/octet-stream", "length": "20"})
+        );
+
+        // Without a file argument the error says how to pass one.
+        let err = transport
+            .call_tool_files("t.up", HashMap::new(), &prov, &SlowFile)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("{\"file\": \"<path>\"}"), "{err}");
+    }
+
+    /// A request without a body cannot carry an upload: the call fails instead of dropping the file.
+    #[tokio::test]
+    async fn an_upload_on_a_method_without_a_body_is_an_error() {
+        let transport = HttpClientTransport::new();
+        for method in ["GET", "DELETE", "HEAD"] {
+            // Nothing listens there: the call must fail before it sends anything.
+            let mut prov = provider_at("http://127.0.0.1:9/up".to_string());
+            prov.http_method = method.into();
+            prov.body_type = Some("file".into());
+            let mut args = HashMap::new();
+            args.insert("body".to_string(), json!({"file": "a.bin"}));
+            let err = transport
+                .call_tool_files("t.up", args, &prov, &NoFiles)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("POST, PUT or PATCH"), "{method}: {err}");
+            assert!(err.contains(method), "{err}");
+        }
     }
 }

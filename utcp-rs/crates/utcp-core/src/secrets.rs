@@ -212,7 +212,7 @@ fn is_var_name(name: &str) -> bool {
 }
 
 /// `~` or a leading `~/` (`~\` on Windows) becomes the home folder.
-fn expand_home(arg: &str) -> PathBuf {
+pub(crate) fn expand_home(arg: &str) -> PathBuf {
     let rest = if arg == "~" {
         Some("")
     } else {

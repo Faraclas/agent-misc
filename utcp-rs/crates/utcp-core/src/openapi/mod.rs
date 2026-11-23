@@ -406,6 +406,8 @@ impl OpenApiConverter {
             } else {
                 Some(headers)
             },
+            body_type: None,
+            response_type: None,
         };
 
         let provider_value = serde_json::to_value(provider)?;

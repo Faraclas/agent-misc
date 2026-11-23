@@ -12,10 +12,14 @@ use crate::catalog::{
 #[cfg(feature = "mcp")]
 use crate::catalog::{manual_stdio_mcp_servers, ManualStdioServer};
 use crate::index::{SearchIndex, ToolSchemaDetail, ToolSummary};
+use crate::ipc_files::{ClientFiles, ConnFiles};
 use crate::media::{inspect_media_spool, prune_media_spool, MediaSpoolStatus};
 use crate::paths::{UtcpPaths, UtcpSettings};
 use crate::secrets::{run_secrets_command, SecretsCommandStatus};
 use crate::security::build_secure_http_client;
+use crate::transfer::{
+    json_file_meta, oversized_json, CallOutput, CallerFiles, FileDownload, FileKind, NoFiles,
+};
 use crate::transports::registry::CommunicationProtocolRegistry;
 use crate::transports::McpServerState;
 use anyhow::{anyhow, Context, Result};
@@ -25,7 +29,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::io::{Read, Write};
+
 #[cfg(unix)]
 use std::path::Path;
 use std::sync::{
@@ -36,7 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch, RwLock};
 
-const MAX_IPC_FRAME_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_IPC_FRAME_BYTES: usize = 32 * 1024 * 1024;
 /// How many recent calls the daemon keeps in memory (TUI Tab 5, `utcp log recent`).
 pub const RING_BUFFER_CAPACITY: usize = 500;
 
@@ -59,6 +63,9 @@ pub enum IpcCommand {
     Shutdown,
     List {
         manual: Option<String>,
+        /// The staged manuals instead of the active ones.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staged: bool,
     },
     Search {
         query: String,
@@ -67,6 +74,8 @@ pub enum IpcCommand {
     },
     Schema {
         target: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staged: bool,
     },
     Call {
         target: String,
@@ -76,12 +85,16 @@ pub enum IpcCommand {
         fields: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         caller_env: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staged: bool,
     },
     Batch {
         items: Vec<BatchRequestItem>,
         concurrency: usize,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         caller_env: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staged: bool,
     },
     RecentActivity {
         limit: usize,
@@ -169,6 +182,9 @@ pub struct DaemonStatusInfo {
 struct InMemoryCatalog {
     index: SearchIndex,
     manuals: HashMap<String, CachedUtcpManual>,
+    /// The staged manuals (`utcp stage`), callable only with `--staged`.
+    staged_index: SearchIndex,
+    staged: HashMap<String, CachedUtcpManual>,
     /// Only the variables registered manuals can read (see `allowed_env`), never a whole environment.
     env_map: HashMap<String, String>,
     /// Allowed shell variables pushed via `utcp daemon reload-env` or absorbed from callers
@@ -290,12 +306,23 @@ fn load_in_memory_catalog(
             manuals.insert(m.name.clone(), loaded);
         }
     }
+    let staged_index = crate::staging::staged_index(paths)?;
+    let mut staged = HashMap::with_capacity(staged_index.manuals.len());
+    for m in &staged_index.manuals {
+        if let Ok(loaded) = crate::staging::load_staged_manual(paths, &m.name) {
+            staged.insert(m.name.clone(), loaded);
+        }
+    }
     let env_mtime = std::fs::metadata(&paths.env_file)
         .and_then(|m| m.modified())
         .ok();
     let mut allowed_env = index.env_var_names();
+    allowed_env.extend(staged_index.env_var_names());
     allowed_env.extend(manual_env_var_names(
-        manuals.iter().map(|(n, m)| (n.as_str(), m)),
+        manuals
+            .iter()
+            .chain(staged.iter())
+            .map(|(n, m)| (n.as_str(), m)),
     ));
     let mut pushed_shell_env = pushed_shell_env;
     retain_allowed_env(&mut pushed_shell_env, &allowed_env);
@@ -309,6 +336,8 @@ fn load_in_memory_catalog(
     Ok(InMemoryCatalog {
         index,
         manuals,
+        staged_index,
+        staged,
         env_map,
         pushed_shell_env,
         allowed_env,
@@ -317,10 +346,16 @@ fn load_in_memory_catalog(
     })
 }
 
-/// The daemon's required credentials, with where each value came from.
+/// The daemon's required credentials (active and staged manuals), with where each value came from.
 fn daemon_credentials(catalog: &InMemoryCatalog) -> Vec<CredentialStatus> {
     let mut credentials = Vec::new();
-    for m in &catalog.index.manuals {
+    let all = catalog
+        .index
+        .manuals
+        .iter()
+        .map(|m| (m, false))
+        .chain(catalog.staged_index.manuals.iter().map(|m| (m, true)));
+    for (m, staged) in all {
         for req_var in &m.required_env_vars {
             let resolved = resolve_secret_var(&m.name, req_var, &catalog.env_map);
             let source = resolved.as_ref().map(|(value, via)| {
@@ -342,6 +377,7 @@ fn daemon_credentials(catalog: &InMemoryCatalog) -> Vec<CredentialStatus> {
                 is_set: resolved.is_some(),
                 resolved_via: resolved.map(|(_, via)| via),
                 source,
+                staged,
             });
         }
     }
@@ -465,9 +501,12 @@ impl DaemonServerState {
         let removed: Vec<CachedUtcpManual> = {
             let mut guard = self.catalog.write().await;
             let old = std::mem::replace(&mut *guard, fresh);
+            let kept =
+                |name: &String| guard.manuals.contains_key(name) || guard.staged.contains_key(name);
             old.manuals
                 .into_iter()
-                .filter(|(name, _)| !guard.manuals.contains_key(name))
+                .chain(old.staged)
+                .filter(|(name, _)| !kept(name))
                 .map(|(_, manual)| manual)
                 .collect()
         };
@@ -580,7 +619,7 @@ impl DaemonServerState {
         }
     }
 
-    async fn handle_request(&self, req: IpcRequest) -> IpcResponse {
+    async fn handle_request(&self, req: IpcRequest, conn: Option<Arc<ConnFiles>>) -> IpcResponse {
         if matches!(
             req.command,
             IpcCommand::List { .. }
@@ -645,10 +684,14 @@ impl DaemonServerState {
             IpcCommand::Shutdown => IpcResponse::Ok {
                 data: IpcPayload::ShuttingDown,
             },
-            IpcCommand::List { manual } => {
+            IpcCommand::List { manual, staged } => {
                 let tools = {
                     let guard = self.catalog.read().await;
-                    guard.index.list_tools(manual.as_deref())
+                    if staged {
+                        guard.staged_index.list_tools(manual.as_deref())
+                    } else {
+                        guard.index.list_tools(manual.as_deref())
+                    }
                 };
                 self.record_activity(
                     ActivityEntry {
@@ -697,10 +740,14 @@ impl DaemonServerState {
                     data: IpcPayload::Tools(results),
                 }
             }
-            IpcCommand::Schema { target } => {
+            IpcCommand::Schema { target, staged } => {
                 let schema_opt = {
                     let guard = self.catalog.read().await;
-                    guard.index.get_schema(&target)
+                    if staged {
+                        guard.staged_index.get_schema(&target)
+                    } else {
+                        guard.index.get_schema(&target)
+                    }
                 };
                 match schema_opt {
                     Some(schema) => {
@@ -724,7 +771,15 @@ impl DaemonServerState {
                         }
                     }
                     None => IpcResponse::Error {
-                        message: format!("Tool '{}' not found in registered manuals", target),
+                        message: format!(
+                            "Tool '{}' not found in {}",
+                            target,
+                            if staged {
+                                "the staged manuals (utcp list --staged)"
+                            } else {
+                                "registered manuals"
+                            }
+                        ),
                     },
                 }
             }
@@ -734,6 +789,7 @@ impl DaemonServerState {
                 dry_run,
                 fields,
                 caller_env,
+                staged,
             } => {
                 self.refresh_env_if_modified().await;
                 if !caller_env.is_empty() {
@@ -741,13 +797,20 @@ impl DaemonServerState {
                 }
                 let resolved = {
                     let guard = self.catalog.read().await;
-                    resolve_manual_and_tool(&target, Some(&guard.index), &self.paths).and_then(
+                    let (index, manuals) = if staged {
+                        (&guard.staged_index, &guard.staged)
+                    } else {
+                        (&guard.index, &guard.manuals)
+                    };
+                    resolve_manual_and_tool(&target, Some(index), &self.paths).and_then(
                         |(mname, tname)| {
-                            let m = guard
-                                .manuals
-                                .get(&mname)
-                                .cloned()
-                                .ok_or_else(|| anyhow!("Manual '{}' not loaded", mname))?;
+                            let m = manuals.get(&mname).cloned().ok_or_else(|| {
+                                if staged {
+                                    anyhow!("Manual '{}' is not staged", mname)
+                                } else {
+                                    anyhow!("Manual '{}' not loaded", mname)
+                                }
+                            })?;
                             Ok((m, mname, tname, guard.env_map.clone()))
                         },
                     )
@@ -758,7 +821,11 @@ impl DaemonServerState {
                         if dry_run {
                             dry_run_tool_from_manual(&manual, &mname, &tname, &args, &env_map)
                         } else {
-                            execute_loaded_tool(
+                            let files: &dyn CallerFiles = match &conn {
+                                Some(c) => c.as_ref(),
+                                None => &NoFiles,
+                            };
+                            match execute_loaded_tool(
                                 &manual,
                                 &mname,
                                 &tname,
@@ -766,12 +833,22 @@ impl DaemonServerState {
                                 &env_map,
                                 &self.protocols,
                                 &self.paths,
+                                files,
                             )
                             .await
-                            .map(|val| match fields.as_deref() {
-                                Some(f) if !f.is_empty() => project_json_fields(val, f),
-                                _ => val,
-                            })
+                            {
+                                Ok(output) => {
+                                    deliver(
+                                        output,
+                                        &tname,
+                                        fields.as_deref(),
+                                        conn.as_deref(),
+                                        None,
+                                    )
+                                    .await
+                                }
+                                Err(e) => Err(e),
+                            }
                         }
                     }
                     Err(e) => Err(e),
@@ -785,7 +862,7 @@ impl DaemonServerState {
                                 timestamp: Utc::now().to_rfc3339(),
                                 mode: "daemon".into(),
                                 caller,
-                                command: if dry_run { "dry-run" } else { "call" }.into(),
+                                command: crate::activity::call_verb(dry_run, staged).into(),
                                 target,
                                 ok: true,
                                 status: "OK".into(),
@@ -800,7 +877,7 @@ impl DaemonServerState {
                         }
                     }
                     Err(err) => {
-                        let msg = err.to_string();
+                        let msg = format!("{:#}", err);
                         let detail = {
                             let guard = self.catalog.read().await;
                             activity_detail(&format!("{:#}", err), &guard.env_map)
@@ -810,7 +887,7 @@ impl DaemonServerState {
                                 timestamp: Utc::now().to_rfc3339(),
                                 mode: "daemon".into(),
                                 caller,
-                                command: if dry_run { "dry-run" } else { "call" }.into(),
+                                command: crate::activity::call_verb(dry_run, staged).into(),
                                 target,
                                 ok: false,
                                 status: "ERR".into(),
@@ -828,6 +905,7 @@ impl DaemonServerState {
                 items,
                 concurrency,
                 caller_env,
+                staged,
             } => {
                 self.refresh_env_if_modified().await;
                 if !caller_env.is_empty() {
@@ -835,11 +913,12 @@ impl DaemonServerState {
                 }
                 let (index_snap, manuals_snap, env_snap) = {
                     let guard = self.catalog.read().await;
-                    (
-                        guard.index.clone(),
-                        guard.manuals.clone(),
-                        guard.env_map.clone(),
-                    )
+                    let (index, manuals) = if staged {
+                        (&guard.staged_index, &guard.staged)
+                    } else {
+                        (&guard.index, &guard.manuals)
+                    };
+                    (index.clone(), manuals.clone(), guard.env_map.clone())
                 };
                 let max_conc = concurrency.max(1);
                 let count = items.len();
@@ -851,6 +930,7 @@ impl DaemonServerState {
                             let manuals = &manuals_snap;
                             let env_map = &env_snap;
                             let paths = &self.paths;
+                            let conn = conn.clone();
                             async move {
                                 let item_start = Instant::now();
                                 let item_fields = item.fields.clone();
@@ -860,15 +940,23 @@ impl DaemonServerState {
                                     let manual = manuals
                                         .get(&mname)
                                         .ok_or_else(|| anyhow!("Manual '{}' not loaded", mname))?;
-                                    let val = execute_loaded_tool(
+                                    let files: &dyn CallerFiles = match &conn {
+                                        Some(c) => c.as_ref(),
+                                        None => &NoFiles,
+                                    };
+                                    let output = execute_loaded_tool(
                                         manual, &mname, &tname, item.args, env_map, &protocols,
-                                        paths,
+                                        paths, files,
                                     )
                                     .await?;
-                                    Ok::<Value, anyhow::Error>(match item_fields.as_deref() {
-                                        Some(f) if !f.is_empty() => project_json_fields(val, f),
-                                        _ => val,
-                                    })
+                                    deliver(
+                                        output,
+                                        &tname,
+                                        item_fields.as_deref(),
+                                        conn.as_deref(),
+                                        Some(idx),
+                                    )
+                                    .await
                                 }
                                 .await;
                                 let latency_ms = item_start.elapsed().as_secs_f64() * 1000.0;
@@ -893,7 +981,7 @@ impl DaemonServerState {
                                             ok: false,
                                             status: "ERR".into(),
                                             result: None,
-                                            error: Some(e.to_string()),
+                                            error: Some(format!("{e:#}")),
                                             latency_ms,
                                         },
                                     ),
@@ -1102,9 +1190,41 @@ fn server_info(
     }
 }
 
+/// A call's output as the daemon answers it: JSON with `fields` applied, or a file (or a JSON answer
+/// too large to print) streamed to the caller, who saves it.
+async fn deliver(
+    output: CallOutput,
+    tool: &str,
+    fields: Option<&[String]>,
+    conn: Option<&ConnFiles>,
+    item: Option<usize>,
+) -> Result<Value> {
+    match output {
+        CallOutput::Json(value) => {
+            let value = match fields {
+                Some(f) if !f.is_empty() => project_json_fields(value, f),
+                _ => value,
+            };
+            match (conn, oversized_json(&value)) {
+                (Some(conn), Some(bytes)) => {
+                    let meta = json_file_meta(FileKind::LargeAnswer, tool, bytes.len());
+                    conn.pump(FileDownload::from_bytes(meta, bytes), item).await
+                }
+                _ => Ok(value),
+            }
+        }
+        CallOutput::File(file) => match conn {
+            Some(conn) => conn.pump(file, item).await,
+            None => Err(anyhow!(
+                "{tool} answered with a file, which only `utcp call` and `utcp batch` can save"
+            )),
+        },
+    }
+}
+
 async fn handle_async_stream<S>(stream: S, state: Arc<DaemonServerState>) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut len_buf = [0u8; 4];
@@ -1120,8 +1240,19 @@ where
     reader.read_exact(&mut payload).await?;
     let req: IpcRequest = serde_json::from_slice(&payload)?;
 
+    // A call may upload or download files, which takes the connection in both directions.
+    if matches!(
+        req.command,
+        IpcCommand::Call { .. } | IpcCommand::Batch { .. }
+    ) {
+        return crate::ipc_files::serve_call(reader, writer, |conn| async move {
+            state.handle_request(req, Some(conn)).await
+        })
+        .await;
+    }
+
     let shutting_down = matches!(req.command, IpcCommand::Shutdown);
-    let resp = state.handle_request(req).await;
+    let resp = state.handle_request(req, None).await;
     let resp_bytes = serde_json::to_vec(&resp)?;
     let resp_len = (resp_bytes.len() as u32).to_le_bytes();
     let sent = async {
@@ -1141,10 +1272,20 @@ where
     Ok(())
 }
 
-/// Synchronous, zero-Tokio IPC client call!
+/// Synchronous, zero-Tokio IPC client call! A call's uploads are read and its file answers saved in
+/// their default places; see [`try_send_ipc_with_files`] to choose where answers go.
 pub fn try_send_ipc_sync(paths: &UtcpPaths, req: &IpcRequest) -> Result<Option<IpcResponse>> {
+    let mut files = ClientFiles::new(paths);
+    try_send_ipc_with_files(paths, req, &mut files)
+}
+
+/// [`try_send_ipc_sync`], with `files` saying where a call's answers go (`--out`).
+pub fn try_send_ipc_with_files(
+    paths: &UtcpPaths,
+    req: &IpcRequest,
+    files: &mut ClientFiles,
+) -> Result<Option<IpcResponse>> {
     let payload = serde_json::to_vec(req)?;
-    let len_bytes = (payload.len() as u32).to_le_bytes();
 
     #[cfg(unix)]
     {
@@ -1166,22 +1307,14 @@ pub fn try_send_ipc_sync(paths: &UtcpPaths, req: &IpcRequest) -> Result<Option<I
             }
             Err(_) => return Ok(None),
         };
+        // Longer than the HTTP stall timeout: a transfer that keeps moving resets both.
         let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
-        stream.write_all(&len_bytes)?;
-        stream.write_all(&payload)?;
-        stream.flush()?;
-
-        let mut rlen = [0u8; 4];
-        stream.read_exact(&mut rlen)?;
-        let resp_len = u32::from_le_bytes(rlen) as usize;
-        if resp_len > MAX_IPC_FRAME_BYTES {
-            return Err(anyhow!("IPC response exceeded maximum frame size"));
-        }
-        let mut rbuf = vec![0u8; resp_len];
-        stream.read_exact(&mut rbuf)?;
-        let resp: IpcResponse = serde_json::from_slice(&rbuf)?;
-        Ok(Some(resp))
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(120)));
+        Ok(Some(crate::ipc_files::exchange(
+            &mut stream,
+            &payload,
+            files,
+        )?))
     }
 
     #[cfg(windows)]
@@ -1230,20 +1363,9 @@ pub fn try_send_ipc_sync(paths: &UtcpPaths, req: &IpcRequest) -> Result<Option<I
             ))
             .into());
         }
-        pipe.write_all(&len_bytes)?;
-        pipe.write_all(&payload)?;
-        pipe.flush()?;
-
-        let mut rlen = [0u8; 4];
-        pipe.read_exact(&mut rlen)?;
-        let resp_len = u32::from_le_bytes(rlen) as usize;
-        if resp_len > MAX_IPC_FRAME_BYTES {
-            return Err(anyhow!("IPC response exceeded maximum frame size"));
-        }
-        let mut rbuf = vec![0u8; resp_len];
-        pipe.read_exact(&mut rbuf)?;
-        let resp: IpcResponse = serde_json::from_slice(&rbuf)?;
-        Ok(Some(resp))
+        Ok(Some(crate::ipc_files::exchange(
+            &mut pipe, &payload, files,
+        )?))
     }
 }
 
@@ -1351,14 +1473,17 @@ pub fn query_daemon_status_checked(paths: &UtcpPaths) -> Result<Option<DaemonSta
 }
 
 /// Push the current caller's live shell environment variables into the running daemon's RAM.
-/// The part of this process's environment a registered manual may read: the only variables the
+/// The part of this process's environment a registered or staged manual may read: the only variables the
 /// CLI sends to the daemon (`call`, `batch`, `reload-env`). Sends nothing when the index cannot be
 /// read, rather than falling back to the whole environment.
 pub fn manual_caller_env(paths: &UtcpPaths) -> HashMap<String, String> {
     let Ok(index) = load_or_build_index_sync(paths) else {
         return HashMap::new();
     };
-    let allowed = index.env_var_names();
+    let mut allowed = index.env_var_names();
+    if let Ok(staged) = crate::staging::staged_index(paths) {
+        allowed.extend(staged.env_var_names());
+    }
     std::env::vars_os()
         .filter_map(|(k, v)| {
             let k = k.into_string().ok()?;
