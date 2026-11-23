@@ -59,7 +59,7 @@ pub fn fetch_routes(
     }
 }
 
-fn version_tuple(v: &str) -> Vec<u64> {
+pub fn version_tuple(v: &str) -> Vec<u64> {
     static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new("[0-9]+").unwrap());
     let head = v.split('-').next().unwrap_or("");
     let nums: Vec<u64> = DIGITS
@@ -103,6 +103,17 @@ fn segment_token(seg: &str) -> String {
         Some((head, _)) => format!("{head}*"),
         None => seg.to_lowercase(),
     }
+}
+
+/// The match tokens of a spec path (`/{organization}/{project}/_apis/git/...`), without the organization.
+pub fn path_segments(path: &str) -> Vec<String> {
+    path.split('?')
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "{organization}")
+        .map(segment_token)
+        .collect()
 }
 
 pub fn route_segments(route: &Value) -> Vec<String> {
@@ -234,6 +245,8 @@ pub struct CheckResult {
     pub unchecked: Vec<String>,
     /// Tools on a host in `NO_ROUTE_LIST`.
     pub no_route_list: Vec<String>,
+    /// OData tools (Analytics): OData has no `_apis` routes to check against.
+    pub odata: Vec<String>,
     /// Base (org shown as `<org>`) -> number of routes, in the order first asked.
     pub bases: IndexMap<String, usize>,
     pub base_errors: IndexMap<String, String>,
@@ -256,6 +269,10 @@ pub fn check(
             let shown_base = base.replace(org, "<org>");
             if NO_ROUTE_LIST.contains(&base.as_str()) {
                 results.no_route_list.push(name);
+                continue;
+            }
+            if url.contains("/_odata/") {
+                results.odata.push(name);
                 continue;
             }
             if !routes_by_base.contains_key(&base) {

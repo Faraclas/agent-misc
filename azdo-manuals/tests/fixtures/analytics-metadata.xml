@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hand-made fixture for the azdo-manuals tests, in the shape of an Analytics OData $metadata document. -->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Test.Analytics.Model" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="WorkItem">
+        <Key><PropertyRef Name="WorkItemId" /></Key>
+        <Property Name="WorkItemId" Type="Edm.Int32" Nullable="false"><Annotation Term="Display.DisplayName" String="Work Item Id" /></Property>
+        <Property Name="Title" Type="Edm.String" />
+        <Property Name="State" Type="Edm.String" />
+        <Property Name="ChangedDate" Type="Edm.DateTimeOffset" />
+        <Property Name="Custom_Alpha" Type="Edm.String" />
+        <Property Name="Custom_Beta" Type="Edm.Double" />
+        <NavigationProperty Name="Area" Type="Test.Analytics.Model.Area" />
+        <NavigationProperty Name="Children" Type="Collection(Test.Analytics.Model.WorkItem)" />
+        <NavigationProperty Name="Custom_Person" Type="Test.Analytics.Model.User" />
+        <Annotation Term="Display.Description" String="Current state of work items &amp; their fields." />
+      </EntityType>
+      <EntityType Name="WorkItemSnapshot">
+        <Key><PropertyRef Name="DateSK" /><PropertyRef Name="WorkItemId" /></Key>
+        <Property Name="DateSK" Type="Edm.Int32" Nullable="false" />
+        <Property Name="WorkItemId" Type="Edm.Int32" Nullable="false" />
+        <Property Name="State" Type="Edm.String" />
+      </EntityType>
+      <EnumType Name="Period" IsFlags="true"><Member Name="None" Value="0" /><Member Name="Day" Value="1" /></EnumType>
+    </Schema>
+    <Schema Namespace="Default" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityContainer Name="Container">
+        <EntitySet Name="WorkItems" EntityType="Test.Analytics.Model.WorkItem">
+          <NavigationPropertyBinding Path="Children" Target="WorkItems" />
+          <Annotation Term="Org.OData.Display.V1.DisplayName" String="Work Items" />
+        </EntitySet>
+        <EntitySet Name="WorkItemSnapshot" EntityType="Test.Analytics.Model.WorkItemSnapshot" />
+        <EntitySet Name="Orphans" EntityType="Test.Analytics.Model.Missing" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

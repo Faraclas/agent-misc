@@ -1,0 +1,173 @@
+{
+  "api_version": "7.1",
+  "source": {
+    "revision": "0000000000000000000000000000000000000000",
+    "revision_date": "2026-01-01T00:00:00+00:00",
+    "revision_message": "test"
+  },
+  "extra": {
+    "test": true
+  },
+  "manuals": {
+    "t_main": {
+      "hint": "test main, org contoso",
+      "areas": [
+        "alpha",
+        "beta",
+        "gamma",
+        "location"
+      ],
+      "areas_without_spec": [
+        "gamma"
+      ],
+      "tools": 25,
+      "sources": {
+        "spec": 14,
+        "node": 6,
+        "go": 5
+      },
+      "reads": 18,
+      "writes": 7,
+      "untested_writes": 6,
+      "bytes": 20353,
+      "approx_tokens": 5088,
+      "scopes": [
+        "vso.alpha_write",
+        "vso.beta_manage"
+      ],
+      "tools_without_scope": [
+        "get_connection_data"
+      ],
+      "tools_with_inferred_scopes": [
+        "create_attachment",
+        "create_gadget",
+        "get_board_settings",
+        "get_branch_filters",
+        "get_gadget",
+        "get_gadget_history",
+        "get_gadget_log",
+        "get_gadgets",
+        "update_gadget",
+        "update_gadget_parts"
+      ]
+    },
+    "azdo_analytics": {
+      "hint": "test analytics, org contoso",
+      "areas": [
+        "analytics"
+      ],
+      "areas_without_spec": [],
+      "tools": 2,
+      "sources": {
+        "odata": 2
+      },
+      "reads": 2,
+      "writes": 0,
+      "untested_writes": 0,
+      "bytes": 3969,
+      "approx_tokens": 992,
+      "scopes": [
+        "vso.analytics"
+      ],
+      "tools_without_scope": [],
+      "tools_with_inferred_scopes": []
+    }
+  },
+  "excluded_areas": [
+    {
+      "area": "delta",
+      "reason": "test exclusion"
+    }
+  ],
+  "left_out": [
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "DELETE",
+      "operation_id": "Widgets_Delete",
+      "reason": "DELETE not selected"
+    },
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "HEAD",
+      "operation_id": "Widgets_Exists",
+      "reason": "HEAD never included"
+    },
+    {
+      "manual": "t_main",
+      "area": "alpha",
+      "method": "DELETE",
+      "operation_id": "gadgets.DeleteGadget",
+      "reason": "DELETE not selected"
+    },
+    {
+      "manual": "t_main",
+      "area": "beta",
+      "method": "GET",
+      "operation_id": "Profiles_Get",
+      "reason": "skipped: test skip"
+    },
+    {
+      "manual": null,
+      "area": "clienttrace",
+      "method": "POST",
+      "operation_id": "Events.PublishEvents",
+      "guid": "11111111-0000-0000-0000-000000000005",
+      "reason": "client telemetry"
+    },
+    {
+      "manual": null,
+      "area": "mystery",
+      "method": "GET",
+      "operation_id": "things.GetMystery",
+      "guid": "11111111-0000-0000-0000-000000000006",
+      "reason": "route area Mystery is in no manual yet"
+    },
+    {
+      "manual": null,
+      "area": "alpha",
+      "method": "GET",
+      "operation_id": "future.GetFuture",
+      "guid": "11111111-0000-0000-0000-000000000007",
+      "reason": "starts at API 7.2; these manuals are for 7.1"
+    }
+  ],
+  "scopes": [
+    {
+      "scope": "vso.alpha_write",
+      "description": "Read and write alpha things."
+    },
+    {
+      "scope": "vso.analytics",
+      "description": "Grants the ability to query analytics data."
+    },
+    {
+      "scope": "vso.beta_manage",
+      "description": "Manage beta things."
+    }
+  ],
+  "read_scopes": [
+    {
+      "scope": "vso.alpha",
+      "description": "Read alpha things."
+    },
+    {
+      "scope": "vso.analytics",
+      "description": "Grants the ability to query analytics data."
+    },
+    {
+      "scope": "vso.beta",
+      "description": "Read beta things."
+    }
+  ],
+  "scopes_all": [
+    "vso.alpha",
+    "vso.alpha_manage",
+    "vso.alpha_write",
+    "vso.analytics",
+    "vso.beta",
+    "vso.beta_full",
+    "vso.beta_manage"
+  ]
+}

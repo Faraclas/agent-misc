@@ -1,0 +1,36 @@
+{
+  "_comment": "Hand-made fixture for the azdo-manuals tests: what resourceAreas and OPTIONS /_apis answer, for made-up areas.",
+  "resourceAreas": {
+    "count": 3,
+    "value": [
+      {"id": "a0000000-0000-0000-0000-000000000001", "name": "alpha", "locationUrl": "https://dev.azure.com/contoso/"},
+      {"id": "a0000000-0000-0000-0000-000000000002", "name": "beta", "locationUrl": "https://vsbeta.dev.azure.com/contoso/"},
+      {"id": "a0000000-0000-0000-0000-000000000003", "name": "Location", "locationUrl": "https://dev.azure.com/contoso/"}
+    ]
+  },
+  "routes": {
+    "dev.azure.com": [
+      {"id": "11111111-0000-0000-0000-000000000001", "area": "alpha", "resourceName": "widgets", "routeTemplate": "{project}/_apis/{area}/{resource}/{widgetId}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000020", "area": "alpha", "resourceName": "query", "routeTemplate": "{project}/{team}/_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000021", "area": "alpha", "resourceName": "things", "routeTemplate": "{project}/_apis/{area}/{resource}/${type}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000022", "area": "alpha", "resourceName": "logs", "routeTemplate": "_apis/{area}/{resource}/{logId}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000023", "area": "alpha", "resourceName": "archive", "routeTemplate": "_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000024", "area": "alpha", "resourceName": "widgetsBatch", "routeTemplate": "_apis/{area}/widgets", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000002", "area": "alpha", "resourceName": "gadgets", "routeTemplate": "{project}/_apis/{area}/{resource}/{gadgetId}", "resourceVersion": 3, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000003", "area": "alpha", "resourceName": "gadgetHistory", "routeTemplate": "{project}/_apis/{area}/gadgets/{gadgetId}/history", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000004", "area": "Location", "resourceName": "ConnectionData", "routeTemplate": "_apis/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000005", "area": "ClientTrace", "resourceName": "Events", "routeTemplate": "_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000006", "area": "Mystery", "resourceName": "things", "routeTemplate": "_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000007", "area": "alpha", "resourceName": "future", "routeTemplate": "_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "7.2", "maxVersion": "7.2", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000009", "area": "alpha", "resourceName": "filters", "routeTemplate": "{project}/_apis/{area}/repositories/{repository}/filters/{action}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000010", "area": "alpha", "resourceName": "attachments", "routeTemplate": "{project}/_apis/{area}/{resource}/{fileName}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000011", "area": "alpha", "resourceName": "parts", "routeTemplate": "{project}/_apis/{area}/gadgets/{gadgetId}/{resource}", "resourceVersion": 2, "minVersion": "1.0", "maxVersion": "5.0", "releasedVersion": "0.0"},
+      {"id": "11111111-0000-0000-0000-000000000012", "area": "alpha", "resourceName": "gadgetLogs", "routeTemplate": "{project}/_apis/{area}/{resource}/{logId}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000013", "area": "alpha", "resourceName": "boardsettings", "routeTemplate": "{project}/{team}/_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"}
+    ],
+    "vsbeta.dev.azure.com": [
+      {"id": "11111111-0000-0000-0000-000000000030", "area": "beta", "resourceName": "widgets", "routeTemplate": "_apis/{area}/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "7.1"},
+      {"id": "11111111-0000-0000-0000-000000000004", "area": "Location", "resourceName": "ConnectionData", "routeTemplate": "_apis/{resource}", "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.2", "releasedVersion": "0.0"}
+    ]
+  }
+}

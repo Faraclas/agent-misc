@@ -13,16 +13,17 @@ its secrets and its daemon. The [utcp operating guide](../../utcp-rs/docs/operat
 | What | Linux | Windows |
 | :--- | :--- | :--- |
 | The manuals and their reports (`--out` picks another folder) | `~/.local/share/azdo-manuals/<org>/` (`$XDG_DATA_HOME` when set) | `%LOCALAPPDATA%\azdo-manuals\manuals\<org>\` |
-| Downloaded API descriptions (about 5 MB; `--cache` picks another folder) | `~/.cache/azdo-manuals/` (`$XDG_CACHE_HOME` when set) | `%LOCALAPPDATA%\azdo-manuals\cache\` |
+| Downloaded API descriptions and client library files (about 13 MB; `--cache` picks another folder) | `~/.cache/azdo-manuals/` (`$XDG_CACHE_HOME` when set) | `%LOCALAPPDATA%\azdo-manuals\cache\` |
 
 In the manuals folder:
 
 | File | Written by | Holds |
 | :--- | :--- | :--- |
-| `azdo_*.utcp.json` | `generate` | The eight manuals. Your organization's name is in every URL. |
+| `azdo_*.utcp.json` | `generate` | The manuals (nine with the PAT, eight without). Your organization's name is in every URL. |
 | `report.json` | `generate` | Every manual's tools, size, hint and permissions, and every operation left out with its reason. |
 | `scopes.md` | `generate` | The PAT permissions, as the New Token page names them, and what each one allows. |
 | `readtest.json` | `read-test` | Every read tool's status, size, time and the arguments it was called with. |
+| `route-gaps.json` | `route-gaps` | Every live endpoint of the organization, and whether a tool covers it (maintainers). |
 | `writetest.json` | `write-test` | The arguments and answers of the write test (maintainers, sandbox organization only). |
 
 All of them name your organization, and the test results also hold its data (project names, ids, user names). Keep
@@ -84,15 +85,25 @@ PAT makes every call answer 401.
 
 ### Commands that read the PAT from the environment
 
-`read-test` and `generate` never need the PAT in your shell: `read-test` calls through utcp, which has it. Only the
-maintainer commands `check-routes` and `write-test` read `AZURE_DEVOPS_EXT_PAT` from the environment of the shell
-you run them in. They print tool names, statuses and sizes, never the token.
+`read-test` never needs the PAT in your shell: it calls through utcp, which has it. The others read
+`AZURE_DEVOPS_EXT_PAT` from the environment of the shell you run them in, and print tool names, statuses and sizes,
+never the token:
+
+- **`generate`** (optional): with the PAT it reads your organization's live route list and the Analytics description,
+  and adds about 400 tools that Microsoft's REST API descriptions leave out, plus the `azdo_analytics` manual.
+  Without it, the manuals hold what the descriptions have, and `generate` says so. `--spec-only` ignores a PAT that
+  is set.
+- **`check-routes`, `route-gaps`, `write-test`** (maintainers): required.
+
+Set it for that one command rather than in your shell profile, from wherever you keep it, so the token does not land
+in your shell history, for example `AZURE_DEVOPS_EXT_PAT="$(<command that prints it>)" azdo-manuals generate ...`.
+The same PAT that utcp uses is right: `generate` only reads.
 
 ## 3. Upgrading azdo-manuals
 
 A new version can change the manuals (new tools, fixed parameters, new hints). After installing it:
 
-1. Write and stage the new manuals:
+1. Write and stage the new manuals (with the PAT in the environment, section 2, for the full set):
 
    ```sh
    azdo-manuals generate --org contoso --stage
@@ -131,7 +142,7 @@ and promote.
 Each manual is staged with a hint, the few words agents see next to its name in the utcp skill. The hint ends with
 `, org <org>` (for example `Azure DevOps repos and PRs, org contoso`), so agents know which organization the tools
 reach: the organization is fixed in every URL, and no tool takes it as a parameter. utcp allows hints of up to 60
-characters; when your organization's name is too long for every hint to fit (more than 10 characters), all eight
+characters; when your organization's name is too long for every hint to fit (more than 10 characters), all the
 manuals get the plain hint instead. `utcp set-hint` changes a hint by hand, but the next `generate --stage` sets it
 again.
 
@@ -193,10 +204,18 @@ are known; when you see them there is nothing to fix:
 | `get_coverage_status_badge` (`azdo_test`) | `http 404` | The feature is turned off in the organization. |
 | `get_definition_yaml` (`azdo_pipelines`) | `http 404` | The pipeline the test picked is a classic (designer) pipeline, which has no YAML. `--seed definitionId=<a YAML pipeline's id>` tests it. |
 | `get_merge_bases` (`azdo_git`) | `http 500` | The service could not find one of the two commits in the repository. |
+| `get_estimated_billable_pushers_details_for_org` (`azdo_git`) | `http 403` | Advanced Security billing estimates need an organization administrator ("VS2150012"). |
+| `get_detected_build_frameworks` (`azdo_pipelines`) | `http 400` | It needs the repository's GUID; a `--seed repositoryId=<name>` gives a name. `--seed repositoryId=<GUID>` tests it. |
+| `get_definition_environments` (`azdo_pipelines`) | `http 400` | It needs `taskGroupId` or `propertyFilters`, one of the two; the test has neither. |
+| `get_descriptor_by_id` (`azdo_core`) | `http 400` | Only with `--seed id=me`: that seed is for `get_profile`, and this tool takes another kind of id. |
 
 `get_form_layout` and `get_system_controls` read an inherited process; Microsoft's built-in processes answer 400
 ("work item types are locked"). The test picks the first inherited process, and when the organization has none the
 two tools stay not exercised.
+
+Analytics snapshot sets (`query_work_item_snapshot`, `query_work_item_board_snapshot`, ...) hold millions of rows in a
+large organization; unfiltered they do not answer within utcp's 60 seconds. The test filters them to the last days,
+and their tool descriptions tell agents to do the same.
 
 ### Large answers
 
@@ -213,12 +232,17 @@ Downloads folder.
 | `the archive's rate limit (120 requests per hour) is used up; try again after HH:MM` | A first `generate` downloads 46 files; several cold runs in one hour can use up the archive's limit. | Wait until the time it names. Files already downloaded stay cached. |
 | `cannot reach the archive (...)` | No network path to `archive.softwareheritage.org`. | Check the network, proxy and CA (section 8). |
 | `<file>: the archive sent content with hash ..., pinned ...` | The download is not the pinned file (a proxy changed it, or the archive is broken). | Retry; if it repeats, report it. Nothing was cached. |
+| `resourceAreas: HTTP 401 (the PAT is not valid for this organization)` (`generate`) | `AZURE_DEVOPS_EXT_PAT` in your shell is wrong, expired, or for another organization. | Fix it, unset it, or run with `--spec-only`. |
+| `cannot download https://codeload.github.com/...` | No network path to GitHub, which serves Microsoft's client libraries. | Check the network and proxy (section 8), or run with `--spec-only`. |
+| `microsoft/azure-devops-...@<commit>: <file> has hash ..., pinned ...` | GitHub sent a file other than the pinned one. | Retry; if it repeats, report it. |
+| `Analytics left out: Analytics $metadata: HTTP 401` | The PAT lacks "Analytics: Read". | Add it to the PAT; the other manuals are written anyway. |
 | `utcp stage <manual> failed (output above; utcp 0.2.0 or newer is needed)` | utcp is older than 0.2.0, which added staging, or utcp's own message above says why. | Upgrade utcp, then run `generate --stage` again. |
 | `no utcp binary (use --utcp)` | utcp is not on `PATH`. | Put it on `PATH`, or pass `--utcp <path>`. |
 | `utcp has neither a staged nor an active manual named ...` (`read-test`) | The manuals were generated but never staged or registered. | `azdo-manuals generate --org contoso --stage`. |
 | `utcp doctor` shows `[MISSING] AZURE_DEVOPS_EXT_PAT` | utcp has no value for the secret. | Section 2, then `utcp daemon reload-env`. |
 | Every call answers 401 | The PAT is wrong, expired or revoked, or belongs to another organization. | Make a new PAT (section 2). |
 | Some calls answer 401, others work | The PAT lacks the permission those tools need. | Compare the PAT with `scopes.md`. |
+| A tool answers 401 although the PAT has every permission in `scopes.md` | It comes from Microsoft's client libraries, which name no permissions; its permission was inferred (`tools_with_inferred_scopes` in `report.json`) and is wrong. | Report it; it is then left out with that reason. |
 | A call prints an HTML page (a sign-in page) instead of JSON | Azure DevOps did not receive usable credentials. | Check `utcp doctor` and the secret's value; reload the daemon. |
 | 403 | Your account may not do that (an admin-only read or write). | Expected for those tools; the PAT cannot grant more. |
 | 404 on a tool that should work | A disabled feature, a classic pipeline (no YAML), or an id from another project. | See "Failures that are expected" in section 5. |
@@ -248,5 +272,7 @@ Hosts they contact:
 | Host | Who, when |
 | :--- | :--- |
 | `archive.softwareheritage.org` | `generate`, only for files not yet in the cache (the first run, or a new version's new pins). |
-| `dev.azure.com` and its service hosts: `vssps`, `vsrm`, `vstmr`, `vsaex`, `feeds`, `pkgs`, `artifacts`, `almsearch`, `auditservice` and `extmgmt` `.dev.azure.com` | utcp, for the tools; `read-test` through utcp. |
+| `codeload.github.com` | `generate` with the PAT, only when the client library files are not yet in the cache (two downloads). |
+| `api.github.com` | `pins-sdk` (maintainers), to find a branch's latest commit. |
+| `dev.azure.com` and its service hosts (`vssps`, `vsrm`, `vstmr`, `vsaex`, `feeds`, `pkgs`, `artifacts`, `almsearch`, `auditservice`, `extmgmt`, `advsec`, `analytics`, ... `.dev.azure.com`) | utcp, for the tools; `read-test` through utcp. `generate` with the PAT, `check-routes` and `route-gaps` read the route list of every host the organization's `resourceAreas` names (about 28). |
 | `status.dev.azure.com` | utcp, for `azdo_core.get_service_status` only (public, sent no PAT). |

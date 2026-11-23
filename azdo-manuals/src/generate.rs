@@ -126,8 +126,16 @@ fn resolve_ref<'a>(spec: &'a Value, reference: &str) -> Result<(String, &'a Valu
     Ok((name, node))
 }
 
-/// The api-version an operation needs, from its `#/parameters/api-Version[-preview.N]` reference.
+/// The api-version an operation needs: a library operation's own (`x-azdo-manuals`), else from its
+/// `#/parameters/api-Version[-preview.N]` reference.
 pub fn api_version_of(op: &Value, base_version: &str) -> Result<String> {
+    if let Some(v) = op
+        .get("x-azdo-manuals")
+        .and_then(|x| x.get("api-version"))
+        .and_then(Value::as_str)
+    {
+        return Ok(v.to_string());
+    }
     let op_id = shown(op.get("operationId"));
     for p in array_of(op, "parameters") {
         let reference = str_of(p, "$ref");
@@ -149,7 +157,7 @@ pub fn api_version_of(op: &Value, base_version: &str) -> Result<String> {
     err(format!("{op_id}: no api-version parameter"))
 }
 
-fn scopes_of(spec: &Value, op: &Value) -> Vec<String> {
+pub(crate) fn scopes_of(spec: &Value, op: &Value) -> Vec<String> {
     let security = op.get("security").or_else(|| spec.get("security"));
     let mut scopes = BTreeSet::new();
     for entry in security
@@ -455,6 +463,10 @@ pub struct Entry {
     pub scopes: Vec<String>,
     /// A GET or a POST that only reads.
     pub read: bool,
+    /// Where a tool that is not from the spec comes from: `go`, `node` (client libraries) or `odata`.
+    pub source: Option<String>,
+    /// Its scopes were inferred (a client-library operation; see `sdkops`).
+    pub scopes_inferred: bool,
     pub name: String,
     pub tool: Map<String, Value>,
 }
@@ -683,6 +695,16 @@ fn build_tool(
         method_name: method_name.map(String::from),
         scopes: scopes_of(spec, op),
         read: is_read_op(area, o.method, op_id, conf),
+        source: op
+            .get("x-azdo-manuals")
+            .and_then(|x| x.get("source"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        scopes_inferred: op
+            .get("x-azdo-manuals")
+            .and_then(|x| x.get("scopes"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| s != "none"),
         name: String::new(),
         tool,
     })
@@ -808,6 +830,79 @@ pub fn assign_names(manual: &str, entries: &mut [Entry], conf: &Config) -> Resul
     Ok(())
 }
 
+/// Name the tools that do not come from the spec (client libraries, OData) after the spec's tools are named, so
+/// adding them never renames a spec tool. A tool is named after its method; when that name is taken by a spec tool or
+/// shared with another such tool, it gets its area as prefix (or, when its area has several of that name, its
+/// resource). `names` in the config overrides any of these.
+pub fn assign_extra_names(
+    manual: &str,
+    entries: &mut [Entry],
+    taken: &HashSet<String>,
+    conf: &Config,
+) -> Result<()> {
+    let overridden = |e: &Entry| {
+        conf.names
+            .get(&e.area)
+            .and_then(|m| m.get(&e.operation_id))
+            .filter(|n| !n.is_empty())
+            .cloned()
+    };
+    let base: Vec<String> = entries
+        .iter()
+        .map(|e| match &e.method_name {
+            Some(m) => snake(m),
+            None => base_name(&e.operation_id),
+        })
+        .collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for b in &base {
+        *counts.entry(b.as_str()).or_default() += 1;
+    }
+    let names: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            if let Some(n) = overridden(e) {
+                return n;
+            }
+            let b = &base[i];
+            if counts[b.as_str()] == 1 && !taken.contains(b) {
+                return b.clone();
+            }
+            let same_area = entries
+                .iter()
+                .enumerate()
+                .filter(|(j, o)| base[*j] == *b && o.area == e.area)
+                .count();
+            let prefix = if same_area > 1 {
+                snake(e.operation_id.split(['.', '_']).next().unwrap_or(""))
+            } else {
+                snake(&e.area)
+            };
+            format!("{prefix}_{b}")
+        })
+        .collect();
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for (e, name) in entries.iter_mut().zip(names) {
+        if taken.contains(&name) {
+            return err(format!(
+                "{manual}: tool name '{name}' of {}/{} is already a spec tool; add it to config names",
+                e.area, e.operation_id
+            ));
+        }
+        if let Some(first) = seen.get(&name) {
+            return err(format!(
+                "{manual}: tool name '{name}' is used by {first} and {}/{}; add one of them to config names",
+                e.area, e.operation_id
+            ));
+        }
+        seen.insert(name.clone(), format!("{}/{}", e.area, e.operation_id));
+        e.tool.insert("name".into(), json!(name));
+        e.name = name;
+    }
+    Ok(())
+}
+
 fn scope_info(specs: &Specs) -> HashMap<String, String> {
     let mut info = HashMap::new();
     for files in specs.values() {
@@ -877,19 +972,30 @@ pub fn minimal_scopes(scopes: &BTreeSet<String>) -> Vec<String> {
 }
 
 /// Every operationId the configuration names must exist in its area, so a typo cannot silently drop a tool.
-/// Areas without a spec are skipped. A body override must name an operation that takes a body.
-fn check_config_names(specs: &Specs, conf: &Config) -> Result<()> {
+/// Areas without a spec are skipped, and so are names of client-library operations (`<Resource>.<Method>`) when the
+/// live routes were not read. A body override must name an operation that takes a body.
+fn check_config_names(specs: &Specs, extra: &Extra, conf: &Config) -> Result<()> {
     for (setting, area, op_id) in conf.named_operations() {
-        let Some(files) = specs.get(area) else {
+        let files: Vec<&Value> = specs
+            .get(area)
+            .into_iter()
+            .flatten()
+            .chain(extra.specs.get(area).into_iter().flatten())
+            .collect();
+        if files.is_empty() {
             continue;
-        };
+        }
         let found = files.iter().find_map(|spec| {
             iter_operations(spec)
                 .into_iter()
                 .find(|o| str_of(o.op, "operationId") == op_id)
-                .map(|o| (spec, o))
+                .map(|o| (*spec, o))
         });
         let Some((spec, o)) = found else {
+            // A client-library operation (`<Resource>.<Method>`) exists only when the live routes were read.
+            if !extra.live && op_id.contains('.') {
+                continue;
+            }
             return err(format!(
                 "config {setting} names {area}/{op_id}, which the specs do not have"
             ));
@@ -937,9 +1043,55 @@ pub fn manual_hints(conf: &Config, org: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Inputs besides the spec: operations built from the client libraries and the live routes (`sdkops`), and tools
+/// built elsewhere (`analytics`). `Extra::default()` is a spec-only run.
+#[derive(Debug, Default)]
+pub struct Extra {
+    /// Area -> one-operation specs built from the client libraries.
+    pub specs: Specs,
+    /// The live routes were read (so every operation the configuration names can be checked).
+    pub live: bool,
+    /// Operations left out before generation, as report `left_out` entries.
+    pub left_out: Vec<Value>,
+    /// Finished tools (named later), with the manual each goes into.
+    pub entries: Vec<(String, Entry)>,
+    /// Descriptions of scopes the specs do not describe.
+    pub scope_descriptions: HashMap<String, String>,
+    /// The report's `extra` section (null in a spec-only run).
+    pub report: Value,
+}
+
 /// Returns ({manual name: manual}, report).
 pub fn generate(
     specs: &Specs,
+    org: &str,
+    api_version: &str,
+    source: &Value,
+    conf: &Config,
+) -> Result<(IndexMap<String, Value>, Value)> {
+    generate_with(specs, &Extra::default(), org, api_version, source, conf)
+}
+
+/// What a manual was generated from, for its description.
+fn made_from(entries: &[Entry]) -> String {
+    let has = |f: &dyn Fn(Option<&str>) -> bool| entries.iter().any(|e| f(e.source.as_deref()));
+    let mut parts = Vec::new();
+    if has(&|s| s.is_none()) {
+        parts.push("Microsoft's REST API specs");
+    }
+    if has(&|s| matches!(s, Some("go" | "node"))) {
+        parts.push("Microsoft's client libraries");
+    }
+    if has(&|s| s == Some("odata")) {
+        parts.push("the Analytics service's OData metadata");
+    }
+    parts.join(" and ")
+}
+
+/// Returns ({manual name: manual}, report).
+pub fn generate_with(
+    specs: &Specs,
+    extra: &Extra,
     org: &str,
     api_version: &str,
     source: &Value,
@@ -950,19 +1102,29 @@ pub fn generate(
             "'{org}' is not a valid Azure DevOps organization name"
         ));
     }
-    check_config_names(specs, conf)?;
+    check_config_names(specs, extra, conf)?;
     let hints = manual_hints(conf, org);
     let mut manuals = IndexMap::new();
     let mut report_manuals = Map::new();
     let mut left_out = Vec::new();
-    let descriptions = scope_info(specs);
+    let mut descriptions = scope_info(specs);
+    for (scope, text) in &extra.scope_descriptions {
+        descriptions
+            .entry(scope.clone())
+            .or_insert_with(|| text.clone());
+    }
     let mut all_scopes: BTreeSet<String> = BTreeSet::new();
     let mut all_scope_sets: Vec<Vec<String>> = Vec::new();
     let mut read_scope_sets: Vec<Vec<String>> = Vec::new();
     for mconf in &conf.manuals {
         let mut entries = Vec::new();
-        for area in &mconf.areas {
-            for spec in specs.get(area).map(Vec::as_slice).unwrap_or(&[]) {
+        for area in &mconf.all_areas() {
+            let files = specs
+                .get(area)
+                .into_iter()
+                .flatten()
+                .chain(extra.specs.get(area).into_iter().flatten());
+            for spec in files {
                 for o in iter_operations(spec) {
                     let leave_out = |reason: String| {
                         json!({"manual": mconf.name, "area": area, "method": o.method.to_uppercase(),
@@ -992,11 +1154,24 @@ pub fn generate(
                 }
             }
         }
+        entries.extend(
+            extra
+                .entries
+                .iter()
+                .filter(|(m, _)| *m == mconf.name)
+                .map(|(_, e)| e.clone()),
+        );
         if entries.is_empty() {
             continue;
         }
         entries.sort_by(|a, b| (&a.area, &a.operation_id).cmp(&(&b.area, &b.operation_id)));
-        assign_names(&mconf.name, &mut entries, conf)?;
+        let (mut spec_entries, mut other): (Vec<Entry>, Vec<Entry>) =
+            entries.into_iter().partition(|e| e.source.is_none());
+        assign_names(&mconf.name, &mut spec_entries, conf)?;
+        let taken: HashSet<String> = spec_entries.iter().map(|e| e.name.clone()).collect();
+        assign_extra_names(&mconf.name, &mut other, &taken, conf)?;
+        let mut entries = spec_entries;
+        entries.extend(other);
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let scope_sets: Vec<Vec<String>> = entries.iter().map(|e| e.scopes.clone()).collect();
         // Per manual, too, only the broadest level of each permission (Code: Read, write, & manage, not also
@@ -1024,8 +1199,9 @@ pub fn generate(
                 "version": api_version,
                 "description": format!(
                     "{} for the '{org}' organization (REST API {api_version}). Generated by azdo-manuals from \
-                     Microsoft's REST API specs. Authenticates with the PAT in {PAT_VAR}.",
-                    mconf.title
+                     {}. Authenticates with the PAT in {PAT_VAR}.",
+                    mconf.title,
+                    made_from(&entries)
                 ),
             },
             "tools": entries.iter().map(|e| Value::Object(e.tool.clone())).collect::<Vec<_>>(),
@@ -1047,13 +1223,26 @@ pub fn generate(
             .map(|e| &e.name)
             .collect();
         without_scope.sort();
+        let mut sources = Map::new();
+        for e in &entries {
+            let key = e.source.clone().unwrap_or_else(|| "spec".into());
+            let n = sources.get(&key).and_then(Value::as_u64).unwrap_or(0);
+            sources.insert(key, json!(n + 1));
+        }
+        let mut inferred: Vec<&String> = entries
+            .iter()
+            .filter(|e| e.scopes_inferred)
+            .map(|e| &e.name)
+            .collect();
+        inferred.sort();
         report_manuals.insert(
             mconf.name.clone(),
             json!({
                 "hint": hints[&mconf.name],
-                "areas": mconf.areas,
+                "areas": mconf.all_areas(),
                 "areas_without_spec": missing,
                 "tools": entries.len(),
+                "sources": sources,
                 "reads": reads,
                 "writes": writes,
                 "untested_writes": untested,
@@ -1061,6 +1250,7 @@ pub fn generate(
                 "approx_tokens": text.len() / 4,
                 "scopes": scopes,
                 "tools_without_scope": without_scope,
+                "tools_with_inferred_scopes": inferred,
             }),
         );
         manuals.insert(mconf.name.clone(), manual);
@@ -1083,9 +1273,11 @@ pub fn generate(
         .iter()
         .map(|(area, reason)| json!({"area": area, "reason": reason}))
         .collect();
+    left_out.extend(extra.left_out.iter().cloned());
     let report = json!({
         "api_version": api_version,
         "source": source,
+        "extra": extra.report,
         "manuals": report_manuals,
         "excluded_areas": excluded,
         "left_out": left_out,

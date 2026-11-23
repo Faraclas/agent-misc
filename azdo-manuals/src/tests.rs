@@ -31,7 +31,7 @@ use crate::utcp::Utcp;
 
 const ORG: &str = "contoso";
 
-fn fixtures() -> PathBuf {
+pub(crate) fn fixtures() -> PathBuf {
     if let Some(dir) = std::env::var_os("AZDO_TEST_FIXTURES") {
         return PathBuf::from(dir);
     }
@@ -40,15 +40,15 @@ fn fixtures() -> PathBuf {
         .join("fixtures")
 }
 
-fn expected_dir() -> PathBuf {
+pub(crate) fn expected_dir() -> PathBuf {
     fixtures().join("expected")
 }
 
-fn source() -> Value {
+pub(crate) fn source() -> Value {
     json!({"revision": "0".repeat(40), "revision_date": "2026-01-01T00:00:00+00:00", "revision_message": "test"})
 }
 
-fn test_config() -> Config {
+pub(crate) fn test_config() -> Config {
     Config {
         manuals: vec![
             manual(
@@ -79,10 +79,12 @@ fn test_config() -> Config {
         )]),
         body_overrides: HashMap::new(),
         host_overrides: HashMap::new(),
+        route_areas: vec![],
+        excluded_route_areas: vec![],
     }
 }
 
-fn load_fixture_specs() -> Specs {
+pub(crate) fn load_fixture_specs() -> Specs {
     let mut specs = Specs::new();
     for name in ["alpha", "beta"] {
         let text = fs::read_to_string(fixtures().join(format!("{name}.json"))).unwrap();
@@ -99,7 +101,7 @@ fn run_generate() -> (IndexMap<String, Value>, Value) {
     run_generate_with(&test_config())
 }
 
-fn tools_by_name(manuals: &IndexMap<String, Value>) -> HashMap<String, Value> {
+pub(crate) fn tools_by_name(manuals: &IndexMap<String, Value>) -> HashMap<String, Value> {
     manuals["t_main"]["tools"]
         .as_array()
         .unwrap()
@@ -566,7 +568,8 @@ fn help_shows_getting_started() {
     assert!(!text.contains("--register"));
     let generate = help(Some("generate")).render().to_string();
     assert!(generate.contains("--stage"));
-    assert!(generate.contains("No PAT is needed"));
+    assert!(generate.contains("With a PAT in AZURE_DEVOPS_EXT_PAT"));
+    assert!(generate.contains("--spec-only"));
     assert!(!generate.contains("Getting started"));
     let read_test = help(Some("read-test")).render().to_string();
     assert!(
@@ -904,6 +907,8 @@ fn name_clash_needs_override() {
         method_name: Some("GetThing".into()),
         scopes: vec![],
         read: true,
+        source: None,
+        scopes_inferred: false,
         name: String::new(),
         tool: Map::new(),
     };
@@ -959,9 +964,9 @@ fn text_helpers_follow_python() {
 
 // Archive
 
-type Calls = Rc<RefCell<Vec<(String, Vec<(String, String)>)>>>;
+pub(crate) type Calls = Rc<RefCell<Vec<(String, Vec<(String, String)>)>>>;
 
-fn fake(calls: Calls, mut answer: impl FnMut(&str) -> Response + 'static) -> Transport {
+pub(crate) fn fake(calls: Calls, mut answer: impl FnMut(&str) -> Response + 'static) -> Transport {
     Box::new(move |req: &Request| {
         calls
             .borrow_mut()
@@ -971,7 +976,7 @@ fn fake(calls: Calls, mut answer: impl FnMut(&str) -> Response + 'static) -> Tra
     })
 }
 
-fn ok(body: &[u8], headers: &[(&str, &str)]) -> Response {
+pub(crate) fn ok(body: &[u8], headers: &[(&str, &str)]) -> Response {
     Response {
         status: 200,
         headers: headers

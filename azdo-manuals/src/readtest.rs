@@ -134,6 +134,20 @@ static SOURCES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
         ("get_form_layout.processId", "@get_list_of_processes:value.[customizationType=inherited].typeId"),
         ("get_system_controls.processId", "@get_list_of_processes:value.[customizationType=inherited].typeId"),
         ("get_iteration_chart_image.iterationId", "@get_team_iterations:value.0.id"),
+        // Analytics snapshot sets time out unless filtered to a few days; the board snapshot answers only aggregations.
+        ("query_work_item_snapshot.$filter", "DateSK ge {@date:-3}"),
+        (
+            "query_work_item_board_snapshot.$apply",
+            "filter(DateSK eq {@date:-1})/aggregate($count as Count)",
+        ),
+        ("query_test_point_history_snapshot.$filter", "DateSK ge {@date:-3}"),
+        ("query_test_results_daily.$filter", "DateSK ge {@date:-3}"),
+        ("query_task_agent_request_snapshots.$filter", "SamplingDateSK ge {@date:-3}"),
+        ("query_pipeline_run_activity_results.$filter", "PipelineRunCompletedDateSK ge {@date:-3}"),
+        ("repositoryType", "TfsGit"),
+        ("get_configurations.branch", "main"),
+        ("get_detected_build_frameworks.branch", "main"),
+        ("get_containers.artifactUris", "vstfs:///Build/Build/{@get_builds:value.0.id}"),
     ];
     strings
         .iter()
@@ -154,6 +168,7 @@ const ID_KEYS: [&str; 6] = ["id", "name", "descriptor", "key", "objectId", "orig
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^}]+)\}").unwrap());
 static REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{@([a-z0-9_]+):([^}]*)\}").unwrap());
 static WHOLE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@([a-z0-9_]+):(.*)$").unwrap());
+static DATE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{@date:(-?[0-9]+)\}").unwrap());
 
 pub fn template_of(tool: &Value) -> String {
     let url = tool["tool_call_template"]["url"].as_str().unwrap_or("");
@@ -265,6 +280,14 @@ pub fn resolve(value: &Value, responses: &HashMap<String, Value>) -> Result<Valu
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Value::String(s) => {
+            // `{@date:-7}`: the local date that many days from today, as Analytics date keys write it (yyyyMMdd).
+            let replaced = DATE_REF.replace_all(s, |c: &regex::Captures| {
+                let days: i64 = c[1].parse().unwrap_or(0);
+                (chrono::Local::now().date_naive() + chrono::TimeDelta::days(days))
+                    .format("%Y%m%d")
+                    .to_string()
+            });
+            let s: &str = &replaced;
             if let Some(m) = WHOLE_REF.captures(s) {
                 let data = responses
                     .get(&m[1])

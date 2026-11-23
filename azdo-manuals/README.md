@@ -3,16 +3,25 @@
 Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so agents call Azure DevOps through utcp
 (`search` -> `schema` -> `call`) instead of loading an MCP server's tool list into every conversation.
 
-- **Source:** Microsoft's own API specs (Swagger 2.0), REST API version 7.1. Their GitHub repository
-  (`MicrosoftDocs/vsts-rest-api-specs`) no longer exists, so the generator downloads the files from the
-  [Software Heritage](https://www.softwareheritage.org/) archive of it (revision of 2026-09-02, "Update REST API specs
-  from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json), which is built
-  into the binary. Nothing from Microsoft is stored in this repository.
-- **Output:** eight manuals for one organization covering every area of the API that has a 7.1 description (945
-  tools: 583 reads, 362 writes), a `scopes.md` listing the personal access token (PAT) permissions the manuals need,
+- **Sources:** Microsoft's own descriptions of the API, REST API version 7.1:
+  - The API specs (Swagger 2.0). Their GitHub repository (`MicrosoftDocs/vsts-rest-api-specs`) no longer exists, so
+    the generator downloads the files from the [Software Heritage](https://www.softwareheritage.org/) archive of it
+    (revision of 2026-09-02, "Update REST API specs from releases/M279").
+  - The specs describe only part of the service. With your PAT, `generate` also reads your organization's live list
+    of endpoints and Microsoft's Go and Node client libraries (from GitHub), which are generated from the service's
+    own route definitions, and adds the endpoints the specs leave out.
+  - With your PAT it also reads the Analytics service's OData description (`$metadata`) for an Analytics manual.
+
+  Every downloaded file is checked against the hash recorded in [`pins.json`](./pins.json), which is built into the
+  binary. Nothing from Microsoft is stored in this repository.
+- **Output:** for one organization, nine manuals: every area of the API that has a 7.1 description, the endpoints
+  only the client libraries describe, and Analytics (on one organization, 2026-11-23: 1,356 tools, 795 reads and 561
+  writes; 945 from the specs, 379 from the client libraries, 32 Analytics queries). Without the PAT, eight manuals
+  with the 945 spec tools. Also a `scopes.md` listing the personal access token (PAT) permissions the manuals need,
   and a `report.json` (tools, sizes, and every operation left out with the reason).
-- **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` for the first run
-  (about a minute, 46 downloads); later runs use the cache and take about a second.
+- **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` and
+  `codeload.github.com` for the first run (about a minute, 48 downloads); later runs use the cache, and with the PAT
+  read your organization's route lists (about 30 requests, a few seconds).
 - **Docs:** this README (installation, first setup), the [operating guide](./docs/operating.md) (the PAT, upgrades,
   test results, troubleshooting, Windows, proxies) and the [specification](./docs/azdo-manuals-spec.md) (how the
   manuals are built and checked).
@@ -35,23 +44,42 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
 
 ## The manuals
 
-| Manual | Spec areas | Hint for `--hint` |
+| Manual | Spec areas (and client-library areas) | Hint for `--hint` |
 | --- | --- | --- |
 | `azdo_git` | git, policy, tfvc, advancedSecurity | Azure DevOps repos and PRs |
 | `azdo_work` | wit, work, dashboard, processes, processadmin, processDefinitions | Azure DevOps work items, boards, dashboards |
-| `azdo_pipelines` | build, pipelines, release, approvalsAndChecks, distributedTask, environments | Azure DevOps builds and pipelines |
+| `azdo_pipelines` | build, pipelines, release, approvalsAndChecks, distributedTask, environments (fileContainer) | Azure DevOps builds and pipelines |
 | `azdo_test` | testResults, testPlan, test | Azure DevOps test plans and results |
 | `azdo_wiki_search` | wiki, search | Azure DevOps wiki and search |
-| `azdo_core` | core, graph, ims, operations, favorite, status, resourceUsage | Azure DevOps projects, teams, users |
-| `azdo_admin` | security, securityRoles, permissionsReport, serviceEndpoint, hooks, notification, extensionManagement, memberEntitlementManagement, audit, delegatedAuth | Azure DevOps permissions, connections, hooks |
+| `azdo_core` | core, graph, ims, operations, favorite, status, resourceUsage, profile (location, projectAnalysis) | Azure DevOps projects, teams, users |
+| `azdo_admin` | security, securityRoles, permissionsReport, serviceEndpoint, hooks, notification, extensionManagement, memberEntitlementManagement, audit, delegatedAuth (featureManagement, settings) | Azure DevOps permissions, connections, hooks |
 | `azdo_artifacts` | artifacts, artifactsPackageTypes, symbol | Azure DevOps feeds, packages, symbols |
+| `azdo_analytics` | (analytics; the OData entity sets) | Azure DevOps Analytics OData queries |
 
 `generate --stage` adds `, org <your-org>` to each hint (`Azure DevOps repos and PRs, org contoso`), so agents know
 which organization the tools reach. utcp allows hints of up to 60 characters, so with an organization name longer
 than 10 characters every manual keeps the plain hint above.
 
-Areas without a 7.1 description (advancedSecurity, delegatedAuth, environments and resourceUsage have only 7.2,
-processDefinitions stops at 4.1) are listed where they belong and come in when the manuals move to that API version.
+Areas without a 7.1 spec (advancedSecurity, delegatedAuth, environments and resourceUsage have only 7.2,
+processDefinitions stops at 4.1) are listed where they belong. The client libraries fill in what the organization
+serves of them at 7.1 (Advanced Security alerts, process definitions); the rest comes in when the manuals move to
+that API version.
+
+**Tools from the client libraries** (with the PAT): every endpoint the organization serves, at a version 7.1 allows,
+that the specs lack and a client library describes, for example `azdo_core.get_connection_data` (who the PAT
+belongs to, with the three forms of identity other tools take), pull request conflicts, release tags and logs, task
+plan timelines and logs, test sessions and flaky tests, wiki page comments, project language metrics. Their names,
+parameters and descriptions come from the libraries, their URLs from your organization's route list. The libraries
+name no PAT permissions, so these tools take the permissions of the spec's tools for the same endpoint or area
+(`report.json` lists them under `tools_with_inferred_scopes`).
+
+**Analytics** (`azdo_analytics`, with the PAT): one tool per Analytics entity set (work items and their history and
+snapshots, test runs and results, pipeline runs and jobs, ...), taking the OData options `$select`, `$filter`,
+`$apply`, `$orderby`, `$expand`, `$top`, `$skip`, `$skiptoken` and a project. For example:
+
+```sh
+utcp call azdo_analytics.query_test_runs '{"project": "MyProject", "$select": "TestRunId,Title,CompletedDate", "$orderby": "CompletedDate desc", "$top": 10}'
+```
 
 What a manual contains: every operation of its areas, reads and writes, except those listed below. What an agent
 may do is decided by the PAT's permissions (see `generate`'s output and `scopes.md`), not by leaving tools out.
@@ -90,13 +118,17 @@ header). Header parameters the specs name differently from the real header are g
 
 Left out (`generate` prints this list, `report.json` has every operation with its reason):
 
-- The other 100 DELETEs: deleting a project, repository, branch policy, pipeline, feed, package, user or permission
-  cannot be undone, and an agent that guesses wrong should not be able to.
+- The other DELETEs (100 from the specs, about 50 from the client libraries): deleting a project, repository,
+  branch policy, pipeline, feed, package, user or permission cannot be undone, and an agent that guesses wrong should
+  not be able to.
 - 3 HEAD operations (the GET of the same thing is included).
 - Areas: `account` (hosted on `app.vssps.visualstudio.com`, outside the organization), `tokens`, `tokenAdmin` and
-  `tokenAdministration` (they create or revoke PATs), and `governance` (its 7.1 folder has examples only).
-- Four operations that do not work: one Microsoft is deprecating (404), and three test-results reads whose spec
-  lists no scope and which only a full-access PAT may call.
+  `tokenAdministration` (they create or revoke PATs), and `governance` (its 7.1 folder has examples only). From the
+  client libraries also web UI extension points, the service's own feature flags and telemetry.
+- Client-library endpoints that start at API 7.2 (12 on one organization).
+- Operations that do not work: one Microsoft is deprecating (404), three test-results reads whose spec lists no
+  scope and which only a full-access PAT may call, and about 40 client-library reads that answered 401 to a PAT with
+  every permission the report lists, or that the service no longer supports.
 - With `--read-only`, also the reads that Azure DevOps allows only with a write-level permission (deployment groups,
   some test reads), since a read-only PAT cannot call them.
 
@@ -106,13 +138,14 @@ Left out (`generate` prints this list, `report.json` has every operation with it
 
 | Step | Run | What you should see |
 | --- | --- | --- |
-| 1. Write and stage the manuals (no PAT needed yet) | `azdo-manuals generate --org <your-org> --stage` | The eight manuals with their tool counts, what was left out and why, `Staged the 8 manuals in utcp.`, the PAT permissions they need, and the next steps. Agents do not see staged manuals yet. |
-| 2. Make a PAT | At `https://dev.azure.com/<your-org>/_usersSettings/tokens`: under Scopes pick "Custom defined", then "Show all scopes", and set the permissions step 1 printed: the "All tools" levels, or the "Reads only" levels for agents that should only read. | The new token, shown once. |
+| 1. Write and stage the manuals | `azdo-manuals generate --org <your-org> --stage` | Without a PAT in your shell: the eight manuals of the specs with their tool counts, what was left out and why, `Staged the 8 manuals in utcp.`, the PAT permissions they need, and the next steps. Agents do not see staged manuals yet. |
+| 2. Make a PAT | At `https://dev.azure.com/<your-org>/_usersSettings/tokens`: under Scopes pick "Custom defined", then "Show all scopes", and set the permissions step 1 printed, plus "Analytics: Read": the "All tools" levels, or the "Reads only" levels for agents that should only read. | The new token, shown once. |
 | 3. Give it to utcp | Add it as the secret `AZURE_DEVOPS_EXT_PAT`: a line `AZURE_DEVOPS_EXT_PAT=<the token>` in utcp's `.env` file (`utcp doctor` shows it as `Secrets File`), or, if `utcp doctor` shows a `Secrets Command`, where that command reads secrets (add the name to its allowlist if it has one), then `utcp daemon reload-env`. See the secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md). | Nothing yet. |
-| 4. Check | `utcp doctor` | `[SET] AZURE_DEVOPS_EXT_PAT`, listing the eight azdo manuals, marked `(staged)`. |
-| 5. Review | `utcp diff` | Each manual as `new manual, N tools`, or for an update the tools added, removed and changed. |
-| 6. Test | `azdo-manuals read-test --org <your-org> --project <a project>` | One line per read tool with its status, then `Results: N ok, ...` (below). |
-| 7. Make them active | `utcp promote` | `Promoted 'azdo_git' (139 tools, new)` and so on; agents now find them, and their skills list them. |
+| 4. Add the rest | Step 1 again with the PAT in the environment of that one command: `AZURE_DEVOPS_EXT_PAT=<the token> azdo-manuals generate --org <your-org> --stage` (the [operating guide](./docs/operating.md#2-the-pat) shows how to keep it out of your shell history) | Nine manuals, and how many tools came from the client libraries and from Analytics. |
+| 5. Check | `utcp doctor` | `[SET] AZURE_DEVOPS_EXT_PAT`, listing the azdo manuals, marked `(staged)`. |
+| 6. Review | `utcp diff` | Each manual as `new manual, N tools`, or for an update the tools added, removed and changed. |
+| 7. Test | `azdo-manuals read-test --org <your-org> --project <a project>` | One line per read tool with its status, then `Results: N ok, ...` (below). |
+| 8. Make them active | `utcp promote` | `Promoted 'azdo_git' (186 tools, new)` and so on; agents now find them, and their skills list them. |
 
 `--org` is the name in `https://dev.azure.com/<your-org>`. Step 1 writes the manuals to a private folder,
 `~/.local/share/azdo-manuals/<your-org>` (`%LOCALAPPDATA%\azdo-manuals\manuals\<your-org>` on Windows; `--out` picks
@@ -120,14 +153,14 @@ another), and stages each one in utcp under its name and hint. Without `--stage`
 manual names do not contain the organization, so one utcp setup holds the manuals of one organization.
 `azdo-manuals <command> help` and `azdo-manuals help <command>` both print the help for one command.
 
-**After upgrading azdo-manuals**, run step 1 again, then steps 5 to 7: `utcp diff` shows what the new version
-changes, and `utcp rollback <manual>` brings back the previous version if something is wrong. The
+**After upgrading azdo-manuals**, run step 4 again (step 1 with the PAT), then steps 6 to 8: `utcp diff` shows what
+the new version changes, and `utcp rollback <manual>` brings back the previous version if something is wrong. The
 [operating guide](./docs/operating.md) has the details, and what to do when a step fails.
 
 The manuals contain the organization name in every URL, so keep them private (never in a public repository). The
-downloaded specs are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache` on Windows); `--cache`
-picks another folder. The permissions are also written to `scopes.md` in the manuals folder, with the scope id and
-what each one allows.
+downloaded specs and client library files are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache`
+on Windows); `--cache` picks another folder. The permissions are also written to `scopes.md` in the manuals folder,
+with the scope id and what each one allows.
 
 Then agents (or you) can use them:
 
@@ -149,13 +182,16 @@ health page (`azdo_core.get_service_status`), is sent no PAT.
   `get_team_days_off`), else from the operation id. When two operations in one manual would get the same name, the
   one from the manual's first area keeps it (`get_branches` in `azdo_git` is git's) and the others get their area as
   a prefix (`tfvc_get_branches`), or, when one area has several (the package types), their group (`npm_...`,
-  `nuget_...`). `names` in `src/config.rs` sets a name by hand.
+  `nuget_...`). Tools from the client libraries and Analytics are named after the spec's tools and yield on a clash,
+  so they never rename one. `names` in `src/config.rs` sets a name by hand.
 - **URLs** use the host each spec names (for example `vsrm.dev.azure.com` for releases, `vssps.dev.azure.com` for
   graph, `vstmr.dev.azure.com` for test results, `feeds.dev.azure.com` for Artifacts) and carry the `api-version`
   each operation needs, including previews such as `7.1-preview.1`. One exception: the spec puts `profile` on
   `app.vssps.visualstudio.com`, which refuses an organization's PAT, so `azdo_core.get_profile` uses the
   organization's `vssps.dev.azure.com/<your-org>`, which serves the same route (`host_overrides` in `src/config.rs`).
-  `get_profile` with `{"id": "me"}` returns the PAT owner's name and email.
+  `get_profile` with `{"id": "me"}` returns the PAT owner's name and email. Client-library tools take their URL,
+  host and version from the organization's route list: `7.1` where the endpoint is released at 7.1, else
+  `7.1-preview.N`.
 - **Path parameters** are required. The optional `team` segment of the WIQL routes is left out, since utcp cannot
   drop a segment per call; board and iteration tools keep `team`.
 - **Spec corrections:** `required_params` in `src/config.rs` marks parameters the spec calls optional but the service
@@ -179,8 +215,8 @@ health page (`azdo_core.get_service_status`), is sent no PAT.
 ## Checking the manuals against a real organization
 
 Both checks are read-only. They print tool names, status codes and sizes, never the token. `check-routes` skips the
-service health tool (`azdo_core.get_service_status`): its host lets nobody read its route list, so it says so and
-leaves that tool to `read-test`.
+service health tool (`azdo_core.get_service_status`), whose host lets nobody read its route list, and the Analytics
+OData tools, which have no route list; it says so and leaves those tools to `read-test`.
 
 ```sh
 # Every tool's URL must match a route the organization lists, at a version it supports. PAT from AZURE_DEVOPS_EXT_PAT.
@@ -231,7 +267,11 @@ azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-dele
   refuses an area of the spec folder that is neither in a manual nor excluded with a reason.
 - `azdo-manuals pins --pins pins.json` (run in this folder) records the file hashes of an archive revision and the
   list of all areas. It costs about 80 of the archive's 120 requests per hour and continues where it stopped if it
-  runs out. The binary embeds `pins.json`, so rebuild after changing it.
+  runs out. `azdo-manuals pins-sdk` records the client library files of the latest commits (or `--go-commit`,
+  `--node-commit`) in the same file. The binary embeds `pins.json`, so rebuild after changing it.
+- `azdo-manuals route-gaps --org <org>` (PAT in the environment) lists the organization's live endpoints that no
+  tool covers: left out by a rule (with the reason), or described neither by the specs nor by a client library. It
+  writes `route-gaps.json` next to the manuals.
 - Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary, 0.2.0 or newer, to also stage the manuals in a
   throwaway utcp).
 - Version: the REST API version plus a counter, so `7.1.x` for API 7.1 (`azdo-manuals --version`).
@@ -240,5 +280,5 @@ azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-dele
 
 ## License
 
-MIT, like the rest of this repository. The specs this generator reads are Microsoft's, published under the MIT
-License, and are downloaded at run time, not stored here; see [`NOTICE`](./NOTICE).
+MIT, like the rest of this repository. The specs and client libraries this generator reads are Microsoft's,
+published under the MIT License, and are downloaded at run time, not stored here; see [`NOTICE`](./NOTICE).

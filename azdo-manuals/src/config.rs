@@ -16,9 +16,24 @@ pub const ARCHIVE_REVISION: &str = "c7e66d986b369dce462d04c02288a6c26c155002";
 #[derive(Clone, Debug)]
 pub struct ManualConf {
     pub name: String,
+    /// Spec areas (folders of the spec repository).
     pub areas: Vec<String>,
+    /// Areas that only the client libraries describe (no spec folder), by the name `route_areas` gives them.
+    pub sdk_areas: Vec<String>,
     pub title: String,
     pub hint: String,
+}
+
+impl ManualConf {
+    pub fn with_sdk_areas(mut self, areas: &[&str]) -> ManualConf {
+        self.sdk_areas = areas.iter().map(|a| a.to_string()).collect();
+        self
+    }
+
+    /// Spec areas, then client-library areas.
+    pub fn all_areas(&self) -> Vec<String> {
+        self.areas.iter().chain(&self.sdk_areas).cloned().collect()
+    }
 }
 
 /// Everything the generator decides by configuration. `Config::default()` is the real one; tests build their own.
@@ -52,12 +67,18 @@ pub struct Config {
     /// Hosts that replace the spec's, per area, for areas the service also serves under the organization. A path
     /// without `{organization}` gets it as its first segment.
     pub host_overrides: HashMap<String, String>,
+    /// Route areas (as the live route list names them, in lower case) and the area their client-library operations
+    /// go into. Route areas that spec operations already map to need no entry; these are for the others, and win.
+    pub route_areas: Vec<(String, String)>,
+    /// Route areas whose client-library operations go into no manual, with the reason.
+    pub excluded_route_areas: Vec<(String, String)>,
 }
 
 pub fn manual(name: &str, areas: &[&str], title: &str, hint: &str) -> ManualConf {
     ManualConf {
         name: name.into(),
         areas: areas.iter().map(|a| a.to_string()).collect(),
+        sdk_areas: Vec::new(),
         title: title.into(),
         hint: hint.into(),
     }
@@ -85,11 +106,19 @@ pub fn nested<T: Clone>(items: &[(&str, &[(&str, T)])]) -> HashMap<String, HashM
 }
 
 impl Config {
+    /// Spec areas of every manual (what `pins` and the archive know).
     pub fn all_areas(&self) -> Vec<String> {
         self.manuals
             .iter()
             .flat_map(|m| m.areas.iter().cloned())
             .collect()
+    }
+
+    /// The manual an area (spec or client-library) belongs to.
+    pub fn manual_of(&self, area: &str) -> Option<&ManualConf> {
+        self.manuals
+            .iter()
+            .find(|m| m.areas.iter().chain(&m.sdk_areas).any(|a| a == area))
     }
 
     /// Leave out every write, for a read-only PAT.
@@ -154,6 +183,10 @@ impl Config {
 
     pub fn real() -> Config {
         let no_scope = "no scope in the spec; 401 without a full-access PAT".to_string();
+        // Client-library GETs that answered 401 to a PAT with every scope the report lists (2026-11-23). The libraries
+        // name no scopes, and the answer names none, so the scope they need is not known.
+        let unknown_scope =
+            "401 with every scope the report lists; the scope it needs is not known".to_string();
         Config {
             manuals: vec![
                 manual(
@@ -173,7 +206,8 @@ impl Config {
                     &["build", "pipelines", "release", "approvalsAndChecks", "distributedTask", "environments"],
                     "Azure DevOps builds, pipelines, releases, approvals, agent pools and environments",
                     "Azure DevOps builds and pipelines",
-                ),
+                )
+                .with_sdk_areas(&["fileContainer"]),
                 manual(
                     "azdo_test",
                     &["testResults", "testPlan", "test"],
@@ -192,7 +226,8 @@ impl Config {
                     "Azure DevOps projects, teams, processes, users, groups, identities, profiles, favorites and \
                      service status",
                     "Azure DevOps projects, teams, users",
-                ),
+                )
+                .with_sdk_areas(&["location", "projectAnalysis"]),
                 manual(
                     "azdo_admin",
                     &[
@@ -210,13 +245,22 @@ impl Config {
                     "Azure DevOps permissions, security roles, service connections, service hooks, notifications, \
                      extensions, user entitlements and the audit log",
                     "Azure DevOps permissions, connections, hooks",
-                ),
+                )
+                .with_sdk_areas(&["featureManagement", "settings"]),
                 manual(
                     "azdo_artifacts",
                     &["artifacts", "artifactsPackageTypes", "symbol"],
                     "Azure DevOps Artifacts feeds, packages (npm, NuGet, Maven, Python, Universal) and symbols",
                     "Azure DevOps feeds, packages, symbols",
                 ),
+                // Built from the Analytics service's OData $metadata (see analytics.rs), plus its REST routes.
+                manual(
+                    "azdo_analytics",
+                    &[],
+                    "Azure DevOps Analytics: OData queries over work item, test and pipeline history",
+                    "Azure DevOps Analytics OData queries",
+                )
+                .with_sdk_areas(&["analytics"]),
             ],
             excluded_areas: [
                 ("account", "hosted outside the organization (app.vssps.visualstudio.com)"),
@@ -359,6 +403,99 @@ impl Config {
                         ("Resultsgroup Details_Test Results Group Details", no_scope),
                     ],
                 ),
+                // Client-library operations (`<Resource>.<Method>`), from read-test on 2026-11-23.
+                (
+                    "advancedSecurity",
+                    &[
+                        ("MeterUsage.GetBillableCommitterDetails", "403 Internal billing APIs cannot be accessed".to_string()),
+                        ("OrgEnablement2.GetOrgEnablementStatus2", unknown_scope.clone()),
+                        ("ProjectEnablement2.GetProjectEnablementStatus2", unknown_scope.clone()),
+                        ("ProjectMeterUsageEstimate2.GetEstimatedBillablePushersDetailsForProject2", unknown_scope.clone()),
+                    ],
+                ),
+                ("analytics", &[("State.GetState", unknown_scope.clone())]),
+                (
+                    "core",
+                    &[
+                        ("projectHistory.GetProjectHistoryEntries", unknown_scope.clone()),
+                        ("projectsproperties.GetProjectsProperties", unknown_scope.clone()),
+                        ("proxies.GetProxies", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "distributedTask",
+                    &[
+                        ("azurermmanagementgroups.GetAzureManagementGroups", unknown_scope.clone()),
+                        ("azurermsubscriptions.GetAzureSubscriptions", unknown_scope.clone()),
+                        ("deploymentPoolsSummary.GetDeploymentPoolsSummary", unknown_scope.clone()),
+                        (
+                            "machines.GetDeploymentMachines",
+                            "400 GetDeploymentMachinesAsync API is no longer supported".to_string(),
+                        ),
+                        (
+                            "poolmetadata.GetAgentPoolMetadata",
+                            "500 Could not find service (an internal service)".to_string(),
+                        ),
+                        ("resourcelimits.GetResourceLimits", unknown_scope.clone()),
+                        ("resourceusage.GetResourceUsage", unknown_scope.clone()),
+                        ("securefiles.GetSecureFiles", unknown_scope.clone()),
+                        ("vstsaadoauth.GetVstsAadTenantId", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "extensionManagement",
+                    &[
+                        ("ExtensionStates.GetStates", unknown_scope.clone()),
+                        ("Token.GetToken", unknown_scope.clone()),
+                    ],
+                ),
+                ("featureManagement", &[("Features.GetFeatures", unknown_scope.clone())]),
+                (
+                    "git",
+                    &[
+                        ("advsecPermissions.GetPermission", unknown_scope.clone()),
+                        ("billableCommitters.GetBillableCommitters", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "ims",
+                    &[
+                        ("SignedInToken.GetSignedInToken", unknown_scope.clone()),
+                        ("SignoutToken.GetSignoutToken", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "notification",
+                    &[
+                        ("NotificationReasons.GetNotificationReasons", unknown_scope.clone()),
+                        ("NotificationReasons.ListNotificationReasons", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "release",
+                    &[
+                        ("flightAssignments.GetFlightAssignments", unknown_scope.clone()),
+                        ("issues.GetIssues", unknown_scope.clone()),
+                        ("metrics.GetMetrics", unknown_scope.clone()),
+                        ("orgPipelineReleaseSettings.GetOrgPipelineReleaseSettings", unknown_scope.clone()),
+                        ("pipelineReleaseSettings.GetPipelineReleaseSettings", unknown_scope.clone()),
+                        ("sendmail.GetSummaryMailSections", unknown_scope.clone()),
+                        ("tags.GetTags", unknown_scope.clone()),
+                        ("types.GetArtifactTypeDefinitions", unknown_scope.clone()),
+                    ],
+                ),
+                (
+                    "serviceEndpoint",
+                    &[
+                        ("azurermmanagementgroups.GetAzureManagementGroups", unknown_scope.clone()),
+                        ("azurermsubscriptions.GetAzureSubscriptions", unknown_scope.clone()),
+                        ("oauthconfiguration.GetOAuthConfigurations", unknown_scope.clone()),
+                        ("vstsaadoauth.GetVstsAadTenantId", unknown_scope.clone()),
+                    ],
+                ),
+                ("testPlan", &[("Count.GetTestEntityCountByPlanId", unknown_scope.clone())]),
+                ("tfvc", &[("stats.GetTfvcStatistics", unknown_scope.clone())]),
+                ("wit", &[("accountRecentMentions.GetRecentMentions", unknown_scope)]),
             ]),
             required_params: nested(&[
                 ("git", &[("Refs Favorites_List", vec!["repositoryId".to_string()])]),
@@ -373,6 +510,23 @@ impl Config {
                     "approvalsAndChecks",
                     &[("Check Configurations_List", vec!["resourceType".into(), "resourceId".into()])],
                 ),
+                // 400 "Value cannot be null. Parameter name: repositoryType", then repositoryId, then branch (2026-11-23).
+                (
+                    "pipelines",
+                    &[
+                        (
+                            "configurations.GetConfigurations",
+                            vec!["repositoryType".into(), "repositoryId".into(), "branch".into()],
+                        ),
+                        (
+                            "detectedbuildframeworks.GetDetectedBuildFrameworks",
+                            vec!["repositoryType".into(), "repositoryId".into(), "branch".into()],
+                        ),
+                    ],
+                ),
+                // Without artifactUris it lists every container (even per project) and does not answer within 60 s; with
+                // a build's URI it answers at once (2026-11-23).
+                ("fileContainer", &[("Containers.GetContainers", vec!["artifactUris".into()])]),
             ]),
             // File answers and uploads whose client method name alone says too little.
             names: HashMap::from([
@@ -408,6 +562,32 @@ impl Config {
             // The spec's host, app.vssps.visualstudio.com, refuses an organization's PAT (401); the organization's
             // identity host serves the same route and accepts it (checked 2026-11-23).
             host_overrides: HashMap::from([("profile".to_string(), "vssps.dev.azure.com".to_string())]),
+            route_areas: [
+                // Advanced Security has no 7.1 spec folder; its routes are on the advsec host.
+                ("alert", "advancedSecurity"),
+                ("management", "advancedSecurity"),
+                ("advsec", "advancedSecurity"),
+                ("processdefinitions", "processDefinitions"),
+                ("location", "location"),
+                ("projectanalysis", "projectAnalysis"),
+                ("featuremanagement", "featureManagement"),
+                ("settings", "settings"),
+                ("container", "fileContainer"),
+                ("analytics", "analytics"),
+                ("tokenadmin", "tokenAdmin"),
+            ]
+            .iter()
+            .map(|(r, a)| (r.to_string(), a.to_string()))
+            .collect(),
+            excluded_route_areas: [
+                ("contribution", "web UI extension points and data providers"),
+                ("featureavailability", "the service's own feature flags"),
+                ("customerintelligence", "usage telemetry"),
+                ("clienttrace", "client telemetry"),
+            ]
+            .iter()
+            .map(|(r, a)| (r.to_string(), a.to_string()))
+            .collect(),
         }
     }
 }

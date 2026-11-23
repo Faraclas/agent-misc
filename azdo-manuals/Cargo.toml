@@ -1,6 +1,6 @@
 [package]
 name = "azdo-manuals"
-version = "7.1.1"
+version = "7.1.2"
 edition = "2021"
 license = "MIT"
 authors = ["Elias Faraclas"]
@@ -12,6 +12,7 @@ publish = false
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.9", features = ["derive"] }
+flate2 = "1.1.11"
 indexmap = "2.14.2"
 regex = "1.13.2"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

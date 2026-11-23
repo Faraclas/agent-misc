@@ -41,12 +41,18 @@ Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/
 
 ### [`azdo-manuals/`](./azdo-manuals/)
 
-A generator that turns Microsoft's Azure DevOps REST API specs (version 7.1) into eight utcp HTTP manuals for one
-organization (repos and pull requests, work items and dashboards, pipelines, tests, wiki and search, projects and
-users, administration, Artifacts), so agents reach Azure DevOps through `utcp` instead of an MCP server.
+A generator that turns Microsoft's description of the Azure DevOps REST API (version 7.1) into nine utcp HTTP manuals
+for one organization (repos and pull requests, work items and dashboards, pipelines, tests, wiki and search, projects
+and users, administration, Artifacts, Analytics), so agents reach Azure DevOps through `utcp` instead of an MCP
+server.
 
-- **Verified source:** the specs' GitHub repository is gone, so they are downloaded on demand from the Software
-  Heritage archive and checked against pinned git hashes. Nothing from Microsoft is stored in this repository.
+- **Verified sources:** the specs' GitHub repository is gone, so they are downloaded on demand from the Software
+  Heritage archive; Microsoft's Go and Node client libraries come from GitHub. Both are checked against pinned git
+  hashes. Nothing from Microsoft is stored in this repository.
+- **More than the specs:** the published specs cover about a quarter of what the service serves. With the PAT,
+  `generate` joins the client libraries to the organization's live route list and adds the endpoints the specs
+  leave out (on one organization 379 more tools), plus an Analytics manual from its OData `$metadata`.
+  `route-gaps` lists what is still missing.
 - **The whole API, the PAT decides:** every area with a 7.1 description, all reads and writes (eleven writes tested
   live in a sandbox organization, the others marked untested), and only the 19 deletes of small things; `--read-only`
   drops the writes. `generate` prints what was left out and why, and the PAT permissions for every tool and for

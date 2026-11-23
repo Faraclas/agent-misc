@@ -5,6 +5,7 @@
     "revision_date": "2026-01-01T00:00:00+00:00",
     "revision_message": "test"
   },
+  "extra": null,
   "manuals": {
     "t_main": {
       "hint": "test main, org contoso",
@@ -17,6 +18,9 @@
         "gamma"
       ],
       "tools": 14,
+      "sources": {
+        "spec": 14
+      },
       "reads": 11,
       "writes": 3,
       "untested_writes": 2,
@@ -26,7 +30,8 @@
         "vso.alpha_write",
         "vso.beta_manage"
       ],
-      "tools_without_scope": []
+      "tools_without_scope": [],
+      "tools_with_inferred_scopes": []
     }
   },
   "excluded_areas": [

@@ -1,6 +1,6 @@
 //! Command line: `azdo-manuals generate --org <org> [--out <dir>] [--stage]`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,6 +16,8 @@ use crate::http::ureq_transport;
 use crate::pat;
 use crate::readtest::{self, ReadTest};
 use crate::routes;
+use crate::sdk;
+use crate::sdkops;
 use crate::text::{write_atomic, write_json};
 use crate::utcp::Utcp;
 use crate::writetest::{self, WriteTest};
@@ -29,12 +31,14 @@ const GETTING_STARTED: &str = "\
 Getting started (once per user and organization):
   1. azdo-manuals generate --org <your-org> --stage
      Writes the manuals, stages them in utcp (agents do not see them yet) and lists the PAT permissions they need.
-  2. Make a PAT with those permissions at https://dev.azure.com/<your-org>/_usersSettings/tokens
+  2. Make a PAT with those permissions, plus Analytics: Read, at https://dev.azure.com/<your-org>/_usersSettings/tokens
   3. Give the PAT to utcp as the secret AZURE_DEVOPS_EXT_PAT (generate says how), then check it with: utcp doctor
-  4. Test the staged manuals (read-only): azdo-manuals read-test --org <your-org> --project <a project>
-  5. Make them active for your agents: utcp promote
-generate prints these steps again when it is done. After upgrading azdo-manuals, run step 1 again, check what
-changes with utcp diff, then steps 4 and 5.";
+  4. Run step 1 again with the PAT in AZURE_DEVOPS_EXT_PAT: it adds the endpoints only Microsoft's client libraries
+     describe, and the Analytics manual
+  5. Test the staged manuals (read-only): azdo-manuals read-test --org <your-org> --project <a project>
+  6. Make them active for your agents: utcp promote
+generate prints these steps again when it is done. After upgrading azdo-manuals, run step 4 again, check what
+changes with utcp diff, then steps 5 and 6.";
 
 const HELP_EXAMPLES: &str = "\
 Examples:
@@ -46,7 +50,12 @@ const GENERATE_LONG: &str = "\
 Write the manuals for an organization and list the PAT permissions they need.
 
 Downloads Microsoft's REST API descriptions on the first run (cached afterwards) and writes one utcp manual per area
-of Azure DevOps, plus scopes.md (the PAT permissions) and report.json. No PAT is needed for this.
+of Azure DevOps, plus scopes.md (the PAT permissions) and report.json.
+
+With a PAT in AZURE_DEVOPS_EXT_PAT, generate also reads the organization's live route list and adds the endpoints
+that only Microsoft's client libraries describe (several hundred more tools, downloaded from GitHub on the first run),
+and writes the Analytics manual from the Analytics service's OData description. Without a PAT the manuals hold what
+the REST API descriptions have; generate then says how to get the rest.
 
 With --stage the manuals go to utcp's staging area, where agents do not see them yet: review them with utcp diff,
 test them with azdo-manuals read-test, then make them active with utcp promote.
@@ -73,6 +82,14 @@ Maintainers, sandbox organization only: call every write tool through utcp in a 
 Runs in its own throwaway utcp setup (a temporary folder; never your manuals, daemon or agent skills) and reads the
 PAT for the sandbox organization from the environment variable AZURE_DEVOPS_EXT_PAT.";
 
+const ROUTE_GAPS_LONG: &str = "\
+Maintainers: list the organization's live endpoints that no tool covers, and why.
+
+Reads the live route list and the client libraries like generate does (needs the PAT in AZURE_DEVOPS_EXT_PAT), then
+sorts every endpoint (route GUID) into: has a tool; left out by a rule (with the reason); or described neither by the
+REST API specs nor by a client library. The last group is the list to look through for endpoints worth adding.
+Writes route-gaps.json next to the manuals (it names the organization's routes; keep it private).";
+
 /// Generate utcp HTTP manuals for the Azure DevOps REST API from Microsoft's archived specs.
 #[derive(Parser)]
 #[command(
@@ -91,7 +108,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write the manuals for an organization and list the PAT permissions they need (no PAT needed)
+    /// Write the manuals for an organization and list the PAT permissions they need
     #[command(long_about = GENERATE_LONG)]
     Generate(GenerateArgs),
     /// Check the manuals against the organization's live route list (read-only; needs the PAT)
@@ -103,6 +120,11 @@ enum Cmd {
     ReadTest(ReadTestArgs),
     /// Maintainers: record the spec file hashes of an archive revision in a pins file
     Pins(PinsArgs),
+    /// Maintainers: record the client library file hashes of a commit in a pins file
+    PinsSdk(PinsSdkArgs),
+    /// Maintainers: list live endpoints no tool covers, and why (read-only; needs the PAT)
+    #[command(long_about = ROUTE_GAPS_LONG)]
+    RouteGaps(RouteGapsArgs),
     /// Maintainers, sandbox organization only: call every write tool in a throwaway project (needs the PAT)
     #[command(long_about = WRITE_TEST_LONG)]
     WriteTest(WriteTestArgs),
@@ -135,8 +157,37 @@ struct GenerateArgs {
     /// Leave out the write tools, for a read-only PAT
     #[arg(long)]
     read_only: bool,
+    /// Only what the REST API specs describe, even when AZURE_DEVOPS_EXT_PAT is set
+    #[arg(long)]
+    spec_only: bool,
     #[arg(long, hide = true)]
     pins: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct PinsSdkArgs {
+    /// Commit of microsoft/azure-devops-go-api [default: the head of its dev branch]
+    #[arg(long)]
+    go_commit: Option<String>,
+    /// Commit of microsoft/azure-devops-node-api [default: the head of its master branch]
+    #[arg(long)]
+    node_commit: Option<String>,
+    /// Pins file to update (rebuild the binary to use it; it embeds azdo-manuals/pins.json)
+    #[arg(long, default_value = "pins.json")]
+    pins: PathBuf,
+}
+
+#[derive(Args)]
+struct RouteGapsArgs {
+    /// Azure DevOps organization name, as in https://dev.azure.com/<org>
+    #[arg(long)]
+    org: String,
+    /// Folder for route-gaps.json [default: generate's default folder for --org]
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Folder for the downloaded API descriptions [default: as for generate]
+    #[arg(long)]
+    cache: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -234,6 +285,8 @@ pub fn main() -> i32 {
         Cmd::CheckRoutes(a) => cmd_check_routes(a),
         Cmd::ReadTest(a) => cmd_read_test(a),
         Cmd::Pins(a) => cmd_pins(a),
+        Cmd::PinsSdk(a) => cmd_pins_sdk(a),
+        Cmd::RouteGaps(a) => cmd_route_gaps(a),
         Cmd::WriteTest(a) => cmd_write_test(a),
         Cmd::Help { command } => help(command.as_deref()).exit(),
     };
@@ -484,25 +537,52 @@ pub(crate) fn left_out_lines(report: &Value, missing: &[(String, String)]) -> Ve
             rows.push((format!("{n} {what}"), why.to_string()));
         }
     }
+    // Client-library operations left out before generation (no manual), by reason.
+    let mut by_reason: BTreeMap<&str, usize> = BTreeMap::new();
+    for x in left_out.iter().filter(|x| x["manual"].is_null()) {
+        *by_reason
+            .entry(x["reason"].as_str().unwrap_or(""))
+            .or_default() += 1;
+    }
+    for (why, n) in by_reason {
+        rows.push((format!("{n} library operations"), why.to_string()));
+    }
     let width = rows.iter().map(|(a, _)| a.len()).max().unwrap_or(0);
     let mut lines: Vec<String> = rows
         .iter()
         .map(|(what, why)| format!("  {what:width$}  {why}"))
         .collect();
-    let broken: Vec<String> = left_out
+    let broken: Vec<(String, String)> = left_out
         .iter()
         .filter_map(|x| {
             let reason = x["reason"].as_str()?.strip_prefix("skipped: ")?;
-            Some(format!(
-                "    {} {}: {reason}",
-                x["area"].as_str().unwrap_or(""),
-                x["operation_id"].as_str().unwrap_or("")
+            Some((
+                reason.to_string(),
+                format!(
+                    "{} {}",
+                    x["area"].as_str().unwrap_or(""),
+                    x["operation_id"].as_str().unwrap_or("")
+                ),
             ))
         })
         .collect();
     if !broken.is_empty() {
         lines.push(format!("  {} operations that do not work:", broken.len()));
-        lines.extend(broken);
+        let mut by_reason: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (reason, op) in &broken {
+            by_reason.entry(reason).or_default().push(op);
+        }
+        for (reason, mut ops) in by_reason {
+            ops.sort();
+            if ops.len() <= 3 {
+                lines.extend(ops.iter().map(|op| format!("    {op}: {reason}")));
+            } else {
+                lines.push(format!(
+                    "    {} operations: {reason} (listed in report.json)",
+                    ops.len()
+                ));
+            }
+        }
     }
     lines
 }
@@ -524,6 +604,118 @@ fn find_utcp(given: Option<PathBuf>) -> Result<PathBuf, Fail> {
     given
         .or_else(|| which("utcp"))
         .ok_or_else(|| Fail(2, "no utcp binary (use --utcp)".into()))
+}
+
+/// Everything besides the spec, for `generate` and `route-gaps`.
+struct Loaded {
+    extra: generate::Extra,
+    live: crate::live::Live,
+    joined: sdkops::Joined,
+    coverage: sdkops::Coverage,
+}
+
+/// Read the live routes, the client libraries and the Analytics metadata, and join them to the specs.
+fn load_extra(
+    conf: &Config,
+    specs: &Specs,
+    pins: &Value,
+    cache: &Path,
+    org: &str,
+    pat: &str,
+    api_version: &str,
+) -> Result<Loaded, Fail> {
+    let mut transport = ureq_transport();
+    let live = crate::live::fetch(&mut transport, org, pat).map_err(|e| {
+        Fail(
+            1,
+            format!("{e}; check {PAT_VAR}, or run with --spec-only (the client-library tools then are left out)"),
+        )
+    })?;
+    let mut parsed = Vec::new();
+    let mut downloaded = Vec::new();
+    for lib in sdk::Sdk::all() {
+        let pin = sdk::pin_of(pins, lib)
+            .ok_or_else(|| Fail(1, format!("pins.json has no sdk.{} entry", lib.key())))?;
+        let (files, fetched) = sdk::load_files(&mut transport, pin, cache)?;
+        if fetched {
+            downloaded.push(pin["repo"].as_str().unwrap_or("").to_string());
+        }
+        parsed.push(match lib {
+            sdk::Sdk::Go => crate::sdk_go::parse(&files),
+            sdk::Sdk::Node => crate::sdk_node::parse(&files),
+        });
+    }
+    if !downloaded.is_empty() {
+        println!(
+            "Downloaded the client libraries from GitHub ({}; cache: {}).",
+            downloaded.join(", "),
+            cache.display()
+        );
+    }
+    let libs: Vec<&sdk::Parsed> = parsed.iter().collect();
+    let (joined, coverage) = sdkops::join(specs, &libs, &live, conf, api_version);
+    let mut extra = generate::Extra {
+        specs: joined.specs.clone(),
+        live: true,
+        left_out: joined.left_out.clone(),
+        ..generate::Extra::default()
+    };
+    let analytics = match crate::analytics::fetch_metadata(&mut transport, org, pat)
+        .and_then(|csdl| crate::analytics::entries(&csdl, org))
+    {
+        Ok(entries) => {
+            let n = entries.len();
+            extra.entries.extend(
+                entries
+                    .into_iter()
+                    .map(|e| (crate::analytics::MANUAL.to_string(), e)),
+            );
+            extra.scope_descriptions.insert(
+                crate::analytics::SCOPE.into(),
+                crate::analytics::SCOPE_DESCRIPTION.into(),
+            );
+            json!({"odata_version": crate::analytics::ODATA_VERSION, "entity_sets": n})
+        }
+        Err(e) => {
+            println!("Analytics left out: {}", e.replace(org, "<org>"));
+            json!({"odata_version": crate::analytics::ODATA_VERSION, "error": e.replace(org, "<org>")})
+        }
+    };
+    let hosts: Map<String, Value> = live
+        .hosts
+        .iter()
+        .map(|(h, r)| {
+            let v = match r {
+                Ok(n) => json!(n),
+                Err(e) => json!(e),
+            };
+            (h.clone(), v)
+        })
+        .collect();
+    let libraries: Map<String, Value> = sdk::Sdk::all()
+        .iter()
+        .filter_map(|lib| {
+            let pin = sdk::pin_of(pins, *lib)?;
+            Some((
+                lib.key().to_string(),
+                json!({"repo": pin["repo"], "commit": pin["commit"]}),
+            ))
+        })
+        .collect();
+    extra.report = json!({
+        "client_libraries": libraries,
+        "route_hosts": hosts,
+        "routes": live.routes.len(),
+        "library_operations": joined.specs.values().map(Vec::len).sum::<usize>(),
+        "library_methods_not_on_organization": joined.not_on_organization,
+        "analytics": analytics,
+    });
+    Ok(Loaded {
+        extra,
+        live,
+        joined,
+        coverage,
+    })
 }
 
 fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
@@ -556,7 +748,15 @@ fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
         "revision_message": pins["revision_message"],
     });
     let api_version = pins["api_version"].as_str().unwrap_or(config::API_VERSION);
-    let (manuals, report) = generate::generate(&specs, &args.org, api_version, &source, &conf)?;
+    let pat = std::env::var(PAT_VAR).ok().filter(|p| !p.is_empty());
+    let extra = match &pat {
+        Some(pat) if !args.spec_only => {
+            load_extra(&conf, &specs, &pins, &cache, &args.org, pat, api_version)?.extra
+        }
+        _ => generate::Extra::default(),
+    };
+    let (manuals, report) =
+        generate::generate_with(&specs, &extra, &args.org, api_version, &source, &conf)?;
     let out_given = args.out.is_some();
     let out = args
         .out
@@ -596,6 +796,28 @@ fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
     println!("Left out (details in report.json in that folder):");
     for line in left_out_lines(&report, &missing) {
         println!("{line}");
+    }
+    if extra.live {
+        let mut by_source: BTreeMap<String, u64> = BTreeMap::new();
+        for m in report["manuals"].as_object().into_iter().flatten() {
+            for (k, n) in m.1["sources"].as_object().into_iter().flatten() {
+                *by_source.entry(k.clone()).or_default() += n.as_u64().unwrap_or(0);
+            }
+        }
+        let libs = by_source.get("go").unwrap_or(&0) + by_source.get("node").unwrap_or(&0);
+        println!(
+            "Of the tools, {libs} come from Microsoft's client libraries (endpoints the REST API descriptions leave \
+             out) and {} from the Analytics OData description.",
+            by_source.get("odata").unwrap_or(&0)
+        );
+    } else if args.spec_only {
+        println!("Only what the REST API descriptions have (--spec-only).");
+    } else {
+        println!(
+            "Only what the REST API descriptions have: with your PAT in {PAT_VAR}, run generate again to add the \
+             endpoints only Microsoft's client libraries describe and the Analytics manual (see azdo-manuals help \
+             generate)."
+        );
     }
     let staged = match utcp {
         None => false,
@@ -694,10 +916,20 @@ fn cmd_pins(args: PinsArgs) -> Result<i32, Fail> {
     } else {
         None
     };
+    // The client-library pins (pins-sdk) are kept whatever happens to the spec pins.
+    let sdk_pins = if args.pins.exists() {
+        archive::load_pins(Some(&args.pins))?.get("sdk").cloned()
+    } else {
+        None
+    };
     let mut archive = Archive::new(archive::API, ureq_transport());
     let path = args.pins.clone();
     let mut save = |result: &Value| {
-        write_json(&path, result)
+        let mut result = result.clone();
+        if let (Some(sdk), Some(obj)) = (&sdk_pins, result.as_object_mut()) {
+            obj.insert("sdk".into(), sdk.clone());
+        }
+        write_json(&path, &result)
             .map_err(|e| ArchiveError(format!("cannot write {}: {e}", path.display())))
     };
     let mut log = |line: &str| println!("{line}");
@@ -793,11 +1025,19 @@ fn cmd_check_routes(args: CheckRoutesArgs) -> Result<i32, Fail> {
             result.no_route_list.join(", ")
         );
     }
-    Ok(if result.matched + result.no_route_list.len() == total {
-        0
-    } else {
-        1
-    })
+    if !result.odata.is_empty() {
+        println!(
+            "Not checked: {} Analytics OData tools (OData has no route list; read-test calls them instead).",
+            result.odata.len()
+        );
+    }
+    Ok(
+        if result.matched + result.no_route_list.len() + result.odata.len() == total {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 fn cmd_read_test(args: ReadTestArgs) -> Result<i32, Fail> {
@@ -940,4 +1180,198 @@ fn cmd_write_test(args: WriteTestArgs) -> Result<i32, Fail> {
     );
     let failed = results.values().any(|r| r["status"] != "ok");
     Ok(if failed { 1 } else { 0 })
+}
+
+fn cmd_pins_sdk(args: PinsSdkArgs) -> Result<i32, Fail> {
+    let mut pins = archive::load_pins(Some(&args.pins))?;
+    let mut transport = ureq_transport();
+    let mut section = Map::new();
+    for (lib, commit) in [
+        (sdk::Sdk::Go, args.go_commit),
+        (sdk::Sdk::Node, args.node_commit),
+    ] {
+        let (repo, branch) = sdk::default_repo(lib);
+        let commit = match commit {
+            Some(c) => c,
+            None => sdk::branch_commit(&mut transport, repo, branch)?,
+        };
+        let pin = sdk::discover(&mut transport, lib, repo, &commit)?;
+        println!(
+            "  {repo} {commit}: {} files",
+            pin["files"].as_array().map_or(0, Vec::len)
+        );
+        section.insert(lib.key().into(), pin);
+    }
+    pins["sdk"] = Value::Object(section);
+    write_json(&args.pins, &pins).map_err(io_fail(&args.pins))?;
+    println!("Wrote {}.", args.pins.display());
+    Ok(0)
+}
+
+fn cmd_route_gaps(args: RouteGapsArgs) -> Result<i32, Fail> {
+    let pat = require_pat()?;
+    if !generate::valid_org(&args.org) {
+        return Err(Fail(
+            1,
+            format!(
+                "'{}' is not a valid Azure DevOps organization name",
+                args.org
+            ),
+        ));
+    }
+    let conf = Config::real();
+    let pins = archive::load_pins(None)?;
+    let cache = args.cache.unwrap_or_else(archive::default_cache_dir);
+    let mut archive = Archive::new(archive::API, ureq_transport());
+    let specs = load_specs(&conf, &pins, &cache, &mut archive)?;
+    let api_version = pins["api_version"].as_str().unwrap_or(config::API_VERSION);
+    let loaded = load_extra(&conf, &specs, &pins, &cache, &args.org, &pat, api_version)?;
+    let source = json!({});
+    let (_, report) = generate::generate_with(
+        &specs,
+        &loaded.extra,
+        &args.org,
+        api_version,
+        &source,
+        &conf,
+    )?;
+    let mut reasons: HashMap<(String, String), String> = HashMap::new();
+    for x in report["left_out"].as_array().into_iter().flatten() {
+        reasons.insert(
+            (
+                x["area"].as_str().unwrap_or("").to_string(),
+                x["operation_id"].as_str().unwrap_or("").to_string(),
+            ),
+            x["reason"].as_str().unwrap_or("").to_string(),
+        );
+    }
+    // GUID -> operations (area, operationId) that could make a tool.
+    let mut ops: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (guid, uses) in &loaded.coverage.ops {
+        for u in uses {
+            ops.entry(guid.clone())
+                .or_default()
+                .push((u.area.clone(), u.operation_id.clone()));
+        }
+    }
+    for (area, files) in &loaded.joined.specs {
+        for spec in files {
+            for item in spec["paths"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(_, i)| i)
+            {
+                for (_, op) in item.as_object().into_iter().flatten() {
+                    let guid = op["x-azdo-manuals"]["guid"].as_str().unwrap_or("");
+                    let id = op["operationId"].as_str().unwrap_or("");
+                    ops.entry(guid.to_string())
+                        .or_default()
+                        .push((area.clone(), id.to_string()));
+                }
+            }
+        }
+    }
+    for x in &loaded.joined.left_out {
+        ops.entry(x["guid"].as_str().unwrap_or("").to_string())
+            .or_default()
+            .push((
+                x["area"].as_str().unwrap_or("").to_string(),
+                x["operation_id"].as_str().unwrap_or("").to_string(),
+            ));
+    }
+    let plumbing: HashSet<&str> = conf
+        .excluded_route_areas
+        .iter()
+        .map(|(a, _)| a.as_str())
+        .collect();
+    let by_guid = loaded.live.by_guid();
+    let mut guids: Vec<&&str> = by_guid.keys().collect();
+    guids.sort();
+    let mut rows = Vec::new();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut undescribed: BTreeMap<String, usize> = BTreeMap::new();
+    let mut rule_reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for guid in guids {
+        let guid: &str = guid;
+        let routes = &by_guid[guid];
+        let r = routes[0];
+        let mine = ops.get(guid).cloned().unwrap_or_default();
+        let left: Vec<&String> = mine.iter().filter_map(|k| reasons.get(k)).collect();
+        let status = if mine.is_empty() {
+            "not described"
+        } else if left.len() < mine.len() {
+            "tool"
+        } else {
+            "left out"
+        };
+        *counts.entry(status).or_default() += 1;
+        let area = r.area.to_lowercase();
+        if status == "not described" {
+            let key = if plumbing.contains(area.as_str()) {
+                format!("{area} (excluded)")
+            } else {
+                area.clone()
+            };
+            *undescribed.entry(key).or_default() += 1;
+        }
+        if status == "left out" {
+            for reason in &left {
+                *rule_reasons.entry(reason.to_string()).or_default() += 1;
+            }
+        }
+        let mut hosts: Vec<&str> = routes.iter().map(|x| x.host.as_str()).collect();
+        hosts.sort();
+        let libraries: Vec<&str> = loaded
+            .joined
+            .libraries
+            .get(guid)
+            .into_iter()
+            .flatten()
+            .map(|l| l.key())
+            .collect();
+        let mut why: Vec<&String> = left.clone();
+        why.sort();
+        why.dedup();
+        rows.push(json!({
+            "guid": guid, "area": r.area, "resource": r.resource, "template": r.template, "hosts": hosts,
+            "released_version": r.released_version, "max_version": r.max_version, "status": status,
+            "libraries": libraries, "reasons": why,
+        }));
+    }
+    let out = args
+        .out
+        .unwrap_or_else(|| archive::default_out_dir(&args.org));
+    fs::create_dir_all(&out).map_err(io_fail(&out))?;
+    let path = out.join("route-gaps.json");
+    write_json(
+        &path,
+        &json!({"summary": counts, "not_described_by_area": undescribed, "routes": rows}),
+    )
+    .map_err(io_fail(&path))?;
+    let total: usize = counts.values().sum();
+    let hosts = loaded.live.hosts.values().filter(|h| h.is_ok()).count();
+    println!("{total} live endpoints (route GUIDs) on {hosts} hosts:");
+    println!("  {:>5}  have a tool", counts.get("tool").unwrap_or(&0));
+    println!(
+        "  {:>5}  left out by a rule:",
+        counts.get("left out").unwrap_or(&0)
+    );
+    for (reason, n) in &rule_reasons {
+        println!("           {n:>4}  {reason}");
+    }
+    println!(
+        "  {:>5}  described neither by the REST API specs nor by a client library, by route area:",
+        counts.get("not described").unwrap_or(&0)
+    );
+    let mut areas: Vec<(&String, &usize)> = undescribed.iter().collect();
+    areas.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (area, n) in areas {
+        println!("           {n:>4}  {area}");
+    }
+    println!(
+        "Details (names the organization's routes, keep private): {}",
+        path.display()
+    );
+    Ok(0)
 }

@@ -381,5 +381,1089 @@
     "resourceUsage": [
       "7.2"
     ]
+  },
+  "sdk": {
+    "go": {
+      "repo": "microsoft/azure-devops-go-api",
+      "commit": "b98fd6cf2ea4f73674e9be9e9de1aac7046d187f",
+      "files": [
+        {
+          "file": "azuredevops/v7/accounts/client.go",
+          "sha1_git": "1593cd101dbdf4e2d0cdc9b9057deac71f04ff5d",
+          "length": 2425
+        },
+        {
+          "file": "azuredevops/v7/accounts/models.go",
+          "sha1_git": "0293d04aa82fe232d9ebeae8811e491174671f29",
+          "length": 4576
+        },
+        {
+          "file": "azuredevops/v7/aexlicensingrule/models.go",
+          "sha1_git": "50a13606f950262ff1a7d67ee6023f5585454839",
+          "length": 4878
+        },
+        {
+          "file": "azuredevops/v7/analytics/client.go",
+          "sha1_git": "f5af12f2a65b9f96c4ac8cbc1ceb749a750bd400",
+          "length": 8468
+        },
+        {
+          "file": "azuredevops/v7/analytics/models.go",
+          "sha1_git": "9eb0418f6e79fb3afdf50637aa5b02c0faf19379",
+          "length": 11602
+        },
+        {
+          "file": "azuredevops/v7/audit/client.go",
+          "sha1_git": "b1badaf38658cfe3f839dd147cabbbe38a116521",
+          "length": 11320
+        },
+        {
+          "file": "azuredevops/v7/audit/models.go",
+          "sha1_git": "54d688408e189d2203b97f4fd561609c632aca62",
+          "length": 6497
+        },
+        {
+          "file": "azuredevops/v7/build/client.go",
+          "sha1_git": "e13b52f71345c8f0e185fe55eb16675f36679b95",
+          "length": 157582
+        },
+        {
+          "file": "azuredevops/v7/build/models.go",
+          "sha1_git": "e4032afc426262a7e7ee39636d07b6cb7d9a8341",
+          "length": 98947
+        },
+        {
+          "file": "azuredevops/v7/cix/client.go",
+          "sha1_git": "eff928b716eab8ba0aad6bbea9b018c0ee7e7fc6",
+          "length": 8376
+        },
+        {
+          "file": "azuredevops/v7/cix/models.go",
+          "sha1_git": "0865effad71c4da3a1bdcfaff1414cbebd1f9219",
+          "length": 4043
+        },
+        {
+          "file": "azuredevops/v7/clienttrace/client.go",
+          "sha1_git": "e95d8ae250e4983d90cab4a0f046142bcfae512c",
+          "length": 1708
+        },
+        {
+          "file": "azuredevops/v7/clienttrace/models.go",
+          "sha1_git": "114ca718b1c536c851d4150ab6f12ecacd0f1228",
+          "length": 1349
+        },
+        {
+          "file": "azuredevops/v7/comments/models.go",
+          "sha1_git": "5016ecd9b9d6f30c24dcb70bc51719ded50a82e8",
+          "length": 9243
+        },
+        {
+          "file": "azuredevops/v7/commerce/models.go",
+          "sha1_git": "ae9cabfeeba311e5146363c3314530018121297b",
+          "length": 39986
+        },
+        {
+          "file": "azuredevops/v7/contributions/client.go",
+          "sha1_git": "2b36cb0be4755a687ebe923090e77a785518dc67",
+          "length": 6468
+        },
+        {
+          "file": "azuredevops/v7/contributions/models.go",
+          "sha1_git": "e8412523f778c1ab102fd0f4da75e90daedfb0f1",
+          "length": 26011
+        },
+        {
+          "file": "azuredevops/v7/core/client.go",
+          "sha1_git": "9a5c85687ffc92f3056286bfbe7f15cb0e4e8ead",
+          "length": 34573
+        },
+        {
+          "file": "azuredevops/v7/core/models.go",
+          "sha1_git": "7977022d7d4312fac91b2f7f69728658ee236ff4",
+          "length": 16893
+        },
+        {
+          "file": "azuredevops/v7/customerintelligence/client.go",
+          "sha1_git": "f981ed30f3190ddf4b2f9ffefc9d941676d9f441",
+          "length": 1726
+        },
+        {
+          "file": "azuredevops/v7/customerintelligence/models.go",
+          "sha1_git": "1fc9119710dc77ad5fb4f917110c625df32281d5",
+          "length": 762
+        },
+        {
+          "file": "azuredevops/v7/dashboard/client.go",
+          "sha1_git": "198a3b41e672a98d9e8ad05ea85f36b7ad2cad7a",
+          "length": 27563
+        },
+        {
+          "file": "azuredevops/v7/dashboard/models.go",
+          "sha1_git": "f324395ca90d7ee5f78ffa81571af803db97ff5f",
+          "length": 21862
+        },
+        {
+          "file": "azuredevops/v7/delegatedauthorization/models.go",
+          "sha1_git": "5bee22b9ff3042fd376459d7874b6d86b8d31781",
+          "length": 16254
+        },
+        {
+          "file": "azuredevops/v7/distributedtaskcommon/models.go",
+          "sha1_git": "bde84d225829cabb9f4045c43a2e729d53d6c828",
+          "length": 3702
+        },
+        {
+          "file": "azuredevops/v7/elastic/client.go",
+          "sha1_git": "0d6380d89688f69b1c16422f62e53a4d81c9c257",
+          "length": 10660
+        },
+        {
+          "file": "azuredevops/v7/elastic/models.go",
+          "sha1_git": "e14c9a6eae9a51e127519ab7326e40772d5ad174",
+          "length": 14940
+        },
+        {
+          "file": "azuredevops/v7/extensionmanagement/client.go",
+          "sha1_git": "6b753c347a3b4ecfb74e2ddcdf15d56986e7a255",
+          "length": 9336
+        },
+        {
+          "file": "azuredevops/v7/extensionmanagement/models.go",
+          "sha1_git": "0f3818eb3cea9a3e5c56ce5608f877f1164dbe71",
+          "length": 39942
+        },
+        {
+          "file": "azuredevops/v7/featureavailability/client.go",
+          "sha1_git": "701b66f5254ab55e60faac224cdeff368f536b3b",
+          "length": 8501
+        },
+        {
+          "file": "azuredevops/v7/featureavailability/models.go",
+          "sha1_git": "147a8e5da769b44214218f921a40c4311bb88cc2",
+          "length": 981
+        },
+        {
+          "file": "azuredevops/v7/featuremanagement/client.go",
+          "sha1_git": "72e247df3b0c916d2ff590adc0a99077cffada7d",
+          "length": 15937
+        },
+        {
+          "file": "azuredevops/v7/featuremanagement/models.go",
+          "sha1_git": "a45bf2c954f00df4794cf310d9fb09f830d88872",
+          "length": 5578
+        },
+        {
+          "file": "azuredevops/v7/feed/client.go",
+          "sha1_git": "7d77640298c7de0f4d642fba74d701ea5480072f",
+          "length": 62442
+        },
+        {
+          "file": "azuredevops/v7/feed/models.go",
+          "sha1_git": "6b8f13f26d31c4e12f15383708d69b67c387cbb6",
+          "length": 31694
+        },
+        {
+          "file": "azuredevops/v7/filecontainer/client.go",
+          "sha1_git": "5998388b6d42144606dfb5d56164b632541c9ce1",
+          "length": 7457
+        },
+        {
+          "file": "azuredevops/v7/filecontainer/models.go",
+          "sha1_git": "f8a8171bcdf0945da824519a7f8545edf15b9a96",
+          "length": 5365
+        },
+        {
+          "file": "azuredevops/v7/forminput/models.go",
+          "sha1_git": "ca53bf4e2dd79b2a08b04df8a7e19bde7da9d319",
+          "length": 7786
+        },
+        {
+          "file": "azuredevops/v7/gallery/client.go",
+          "sha1_git": "e87376e241002141c554f5837a943bceedb2bd82",
+          "length": 123701
+        },
+        {
+          "file": "azuredevops/v7/gallery/models.go",
+          "sha1_git": "b2793a38426b8477cb20d6c53a3a698a840919a0",
+          "length": 74223
+        },
+        {
+          "file": "azuredevops/v7/git/client.go",
+          "sha1_git": "c1ca969c46aa669f607ef89a45c3c6f0b44a3ba0",
+          "length": 240412
+        },
+        {
+          "file": "azuredevops/v7/git/models.go",
+          "sha1_git": "ebc04d8b1c96e0d22c8da7ce0a46a8482dc51a7a",
+          "length": 153230
+        },
+        {
+          "file": "azuredevops/v7/graph/client.go",
+          "sha1_git": "6f094d36c4b426ac490dfd0e643ce87b0c11e8a7",
+          "length": 46371
+        },
+        {
+          "file": "azuredevops/v7/graph/models.go",
+          "sha1_git": "6208a95264ad4657c7df0f2e97cdf5b5a9674b86",
+          "length": 38180
+        },
+        {
+          "file": "azuredevops/v7/identity/client.go",
+          "sha1_git": "a613e83b0a3745bcede310f1128be51ae4a27920",
+          "length": 37308
+        },
+        {
+          "file": "azuredevops/v7/identity/models.go",
+          "sha1_git": "3e597ca47fd699be4df3a9e81c1aa9af01c0d21a",
+          "length": 11650
+        },
+        {
+          "file": "azuredevops/v7/licensing/models.go",
+          "sha1_git": "49f640daeb7105b3cdf040095cdc784688878a19",
+          "length": 10305
+        },
+        {
+          "file": "azuredevops/v7/licensingrule/models.go",
+          "sha1_git": "37af07453930722dd949807343133168d2f45a71",
+          "length": 4875
+        },
+        {
+          "file": "azuredevops/v7/location/client.go",
+          "sha1_git": "9211342caba161c6dceb89001efc826209638288",
+          "length": 11371
+        },
+        {
+          "file": "azuredevops/v7/location/models.go",
+          "sha1_git": "745155558c33686c2a637e24b5c199de26863b42",
+          "length": 6773
+        },
+        {
+          "file": "azuredevops/v7/maven/client.go",
+          "sha1_git": "4b16e9f018441331f1dfb5a545d82b9ad459d8b8",
+          "length": 22499
+        },
+        {
+          "file": "azuredevops/v7/maven/models.go",
+          "sha1_git": "92b7f56a53910139e8ffb337159c2549d5dc87b4",
+          "length": 10719
+        },
+        {
+          "file": "azuredevops/v7/memberentitlementmanagement/client.go",
+          "sha1_git": "da656465dfc98aa3b3aa2f13334a4903ebcb921e",
+          "length": 30847
+        },
+        {
+          "file": "azuredevops/v7/memberentitlementmanagement/models.go",
+          "sha1_git": "162d31a2e68a9fa0b22c9350f193080db7cc3eb0",
+          "length": 26551
+        },
+        {
+          "file": "azuredevops/v7/notification/client.go",
+          "sha1_git": "19f9c1eac4ed5fbed982d022e88109520128fa72",
+          "length": 22403
+        },
+        {
+          "file": "azuredevops/v7/notification/models.go",
+          "sha1_git": "7880323828490fe4604e95cfbc00664e65eb4773",
+          "length": 69029
+        },
+        {
+          "file": "azuredevops/v7/npm/client.go",
+          "sha1_git": "58df5101ca3f5d9d5ecc964a6ef69b2eb5b8654c",
+          "length": 43140
+        },
+        {
+          "file": "azuredevops/v7/npm/models.go",
+          "sha1_git": "2115a5849fa4e1ae68823f59bc3edaeb2168bd07",
+          "length": 4470
+        },
+        {
+          "file": "azuredevops/v7/nuget/client.go",
+          "sha1_git": "b4c492b000294ae77abf6f371384af568f9ed192",
+          "length": 20911
+        },
+        {
+          "file": "azuredevops/v7/nuget/models.go",
+          "sha1_git": "d7cae6a5eb6de54947246a9540a222ba8b4210eb",
+          "length": 4334
+        },
+        {
+          "file": "azuredevops/v7/operations/client.go",
+          "sha1_git": "05f6878963a2bfb962d88c9899141fae02481a81",
+          "length": 2152
+        },
+        {
+          "file": "azuredevops/v7/operations/models.go",
+          "sha1_git": "49abd0b048f635bbdb65e832a51ba4110e27d133",
+          "length": 2625
+        },
+        {
+          "file": "azuredevops/v7/packagingshared/models.go",
+          "sha1_git": "5a43e2e7e2fa0b6b25cf13ab64cd067559916a83",
+          "length": 9292
+        },
+        {
+          "file": "azuredevops/v7/pipelinepermissions/client.go",
+          "sha1_git": "7916109d3f801d5ee54afa2a64ca8a26c865d923",
+          "length": 6525
+        },
+        {
+          "file": "azuredevops/v7/pipelinepermissions/models.go",
+          "sha1_git": "3aa31f3c3123b438c5a78e6624f5dc2ebe981311",
+          "length": 2051
+        },
+        {
+          "file": "azuredevops/v7/pipelines/client.go",
+          "sha1_git": "3e5b7fbecec5dc44a2c797af3d900ecc7155bbd2",
+          "length": 16544
+        },
+        {
+          "file": "azuredevops/v7/pipelines/models.go",
+          "sha1_git": "b8a10e5273c25f15d31429b507cff252caf14a22",
+          "length": 10966
+        },
+        {
+          "file": "azuredevops/v7/pipelinesapproval/client.go",
+          "sha1_git": "b3d27fefba1b8cb91cb77ed4f98389a539453ef4",
+          "length": 5397
+        },
+        {
+          "file": "azuredevops/v7/pipelinesapproval/models.go",
+          "sha1_git": "36f6e6b7cd7daec56ddb5538fe14d3a1d5165881",
+          "length": 8835
+        },
+        {
+          "file": "azuredevops/v7/pipelineschecks/client.go",
+          "sha1_git": "b7ea348058c6ba33fa435fd629533aa3d5a73266",
+          "length": 12856
+        },
+        {
+          "file": "azuredevops/v7/pipelineschecks/models.go",
+          "sha1_git": "2972c60ba45733b09d5991cb671c87a00d6a98e9",
+          "length": 11909
+        },
+        {
+          "file": "azuredevops/v7/pipelinestaskcheck/models.go",
+          "sha1_git": "93e0fd4c797199f8e0d5bc77abe69c7b9b91c41a",
+          "length": 1230
+        },
+        {
+          "file": "azuredevops/v7/policy/client.go",
+          "sha1_git": "33b492450f908ec7bbf64cc52b2318f87a674b4c",
+          "length": 19310
+        },
+        {
+          "file": "azuredevops/v7/policy/models.go",
+          "sha1_git": "de7700ee6bca02102b19fbc5b37b78b270849a86",
+          "length": 5713
+        },
+        {
+          "file": "azuredevops/v7/profile/client.go",
+          "sha1_git": "74c54bfbe6c362f2bf8f0daca49aa4ded834f852",
+          "length": 3285
+        },
+        {
+          "file": "azuredevops/v7/profile/models.go",
+          "sha1_git": "3bd39423f9940d9f2e8909884492500a0b2830f9",
+          "length": 5944
+        },
+        {
+          "file": "azuredevops/v7/profileregions/client.go",
+          "sha1_git": "5c4c96c7d22dd4402cf4648e805068cd8524650b",
+          "length": 2706
+        },
+        {
+          "file": "azuredevops/v7/profileregions/models.go",
+          "sha1_git": "da133450623306e56ba89ebba63a8837e6c59a55",
+          "length": 1373
+        },
+        {
+          "file": "azuredevops/v7/projectanalysis/client.go",
+          "sha1_git": "1ff1f556e1db421b13c9d641c5fd0575ee51db4d",
+          "length": 7686
+        },
+        {
+          "file": "azuredevops/v7/projectanalysis/models.go",
+          "sha1_git": "2124214b92fadc6c200da191336c4bafe56cf33a",
+          "length": 4579
+        },
+        {
+          "file": "azuredevops/v7/provenance/client.go",
+          "sha1_git": "c0ccacda194a2ccc12b52c668bf61eefd39727c6",
+          "length": 2760
+        },
+        {
+          "file": "azuredevops/v7/provenance/models.go",
+          "sha1_git": "e79893de8a6ae49ae7fa9593534c95c8bb6e7d28",
+          "length": 1127
+        },
+        {
+          "file": "azuredevops/v7/pypiapi/client.go",
+          "sha1_git": "8808839a7bc635aeb77f1cfd76e3ebdef6b5e72c",
+          "length": 21127
+        },
+        {
+          "file": "azuredevops/v7/pypiapi/models.go",
+          "sha1_git": "550b866061120e5c7b56af97e4edcc109af48375",
+          "length": 3657
+        },
+        {
+          "file": "azuredevops/v7/release/client.go",
+          "sha1_git": "120ad28e59483f5680aad0d54406b83caf593c62",
+          "length": 61953
+        },
+        {
+          "file": "azuredevops/v7/release/models.go",
+          "sha1_git": "4e2d1ada131f5a67cb1b09b72dd8bd999f51101c",
+          "length": 128133
+        },
+        {
+          "file": "azuredevops/v7/search/client.go",
+          "sha1_git": "236d110e410b3e3a332826e03188dcbb024d9482",
+          "length": 10499
+        },
+        {
+          "file": "azuredevops/v7/search/models.go",
+          "sha1_git": "6f068f385b02fee90d1b8ff539055e294c0e2ebb",
+          "length": 10829
+        },
+        {
+          "file": "azuredevops/v7/searchshared/models.go",
+          "sha1_git": "5d4d2e2070cdd32873c63ab6bddd995593d92a17",
+          "length": 23050
+        },
+        {
+          "file": "azuredevops/v7/security/client.go",
+          "sha1_git": "437e213990cb8fcd419c557035548b8fb4dfacd2",
+          "length": 16897
+        },
+        {
+          "file": "azuredevops/v7/security/models.go",
+          "sha1_git": "7341ebcc169fe6eb88956188ec9391a997a5f919",
+          "length": 7334
+        },
+        {
+          "file": "azuredevops/v7/serviceendpoint/client.go",
+          "sha1_git": "63cd16cfcea55496530b34fcb4517b9b0bcbf521",
+          "length": 21244
+        },
+        {
+          "file": "azuredevops/v7/serviceendpoint/models.go",
+          "sha1_git": "a85fd989a498f9d392d28df938601fe1f7b97b47",
+          "length": 27647
+        },
+        {
+          "file": "azuredevops/v7/servicehooks/client.go",
+          "sha1_git": "bb6bb141aca9c158748a20d7bc4d5f6466f29ad3",
+          "length": 28106
+        },
+        {
+          "file": "azuredevops/v7/servicehooks/models.go",
+          "sha1_git": "2b2d90c3fa08ef9672356686769d225cb488d362",
+          "length": 21809
+        },
+        {
+          "file": "azuredevops/v7/settings/client.go",
+          "sha1_git": "0a295a70f927211d0dd89bb635cae802c9f2ffff",
+          "length": 10264
+        },
+        {
+          "file": "azuredevops/v7/symbol/client.go",
+          "sha1_git": "fbab85fc0dde2fc935a05064abc280fc6ab1305d",
+          "length": 18465
+        },
+        {
+          "file": "azuredevops/v7/symbol/models.go",
+          "sha1_git": "c7794adffb5bb9e57f44d0bd1d5d0398a53aee2c",
+          "length": 8588
+        },
+        {
+          "file": "azuredevops/v7/symbolcommon/models.go",
+          "sha1_git": "4d31c6119aac31a8e544b82752b0ebbf2a8bb0aa",
+          "length": 2004
+        },
+        {
+          "file": "azuredevops/v7/system/models.go",
+          "sha1_git": "245ca996ad43dece7ae1c960c4ec145c2812e9af",
+          "length": 2720
+        },
+        {
+          "file": "azuredevops/v7/task/client.go",
+          "sha1_git": "109b36291a48389409a055627fdafc0389196f70",
+          "length": 36104
+        },
+        {
+          "file": "azuredevops/v7/task/models.go",
+          "sha1_git": "76c790d3e96ebdce08bd38a84d9b35ff44d44b58",
+          "length": 18538
+        },
+        {
+          "file": "azuredevops/v7/taskagent/client.go",
+          "sha1_git": "0b49b05545e2a8863b8ce7412d09b3b8d6a831df",
+          "length": 86195
+        },
+        {
+          "file": "azuredevops/v7/taskagent/models.go",
+          "sha1_git": "636e55939520500d3a0f77c70349f74a069e0d27",
+          "length": 138062
+        },
+        {
+          "file": "azuredevops/v7/test/client.go",
+          "sha1_git": "9f9d9564abc287f4c0b06d20fd2bc47f5603811d",
+          "length": 81075
+        },
+        {
+          "file": "azuredevops/v7/test/models.go",
+          "sha1_git": "17daeda3bfed273dcc986963380740494542cab3",
+          "length": 163582
+        },
+        {
+          "file": "azuredevops/v7/testplan/client.go",
+          "sha1_git": "5e0bf26beaae9f3a5f32ff5e59e595c2b0541e5a",
+          "length": 68636
+        },
+        {
+          "file": "azuredevops/v7/testplan/models.go",
+          "sha1_git": "dfb472a71374922c60cefd4097db3b304ff8278f",
+          "length": 43598
+        },
+        {
+          "file": "azuredevops/v7/testresults/client.go",
+          "sha1_git": "7b1990a4ed0e80283c9a64774014278e5f9d065a",
+          "length": 38159
+        },
+        {
+          "file": "azuredevops/v7/testresults/models.go",
+          "sha1_git": "7bf37918b5a527ceca8ca31c0a710147d518ab15",
+          "length": 725
+        },
+        {
+          "file": "azuredevops/v7/tfvc/client.go",
+          "sha1_git": "43f069113b43ddd37c2c8c6c96288c29a5de0ba7",
+          "length": 47863
+        },
+        {
+          "file": "azuredevops/v7/tokenadmin/client.go",
+          "sha1_git": "d600b14a59339e3f3400438c24bf8c79c36c27f6",
+          "length": 6077
+        },
+        {
+          "file": "azuredevops/v7/tokenadmin/models.go",
+          "sha1_git": "233de84df942a342b7cf6d36b8e54e79b42f408c",
+          "length": 2214
+        },
+        {
+          "file": "azuredevops/v7/universal/client.go",
+          "sha1_git": "b9cdcc5eb3b4c0feac18de66b66f3b2dbb9e70fa",
+          "length": 15601
+        },
+        {
+          "file": "azuredevops/v7/universal/models.go",
+          "sha1_git": "07e433219a25744a2fd925a3e777158ffb1a6a55",
+          "length": 3976
+        },
+        {
+          "file": "azuredevops/v7/upackpackaging/client.go",
+          "sha1_git": "db0458b67662fe96970c998c05e62ec852fa33b7",
+          "length": 5916
+        },
+        {
+          "file": "azuredevops/v7/upackpackaging/models.go",
+          "sha1_git": "d60a433a80a6ac3123599addc6b9df8deb7ed557",
+          "length": 3375
+        },
+        {
+          "file": "azuredevops/v7/webapi/models.go",
+          "sha1_git": "5f7be1f02abcedb37759559de0ee7947afa04e5c",
+          "length": 16421
+        },
+        {
+          "file": "azuredevops/v7/wiki/client.go",
+          "sha1_git": "6d2dd6699c61ef4caa0fc709601264d13482e033",
+          "length": 41597
+        },
+        {
+          "file": "azuredevops/v7/wiki/models.go",
+          "sha1_git": "376f74e022bf244eea60ad21756c4ca8c3305ac4",
+          "length": 9719
+        },
+        {
+          "file": "azuredevops/v7/work/client.go",
+          "sha1_git": "6871e1e1420c4b91404f8f28af536968a663579b",
+          "length": 80369
+        },
+        {
+          "file": "azuredevops/v7/work/models.go",
+          "sha1_git": "d49eb426a31a2bfeb377e53a48ee670e79484006",
+          "length": 39091
+        },
+        {
+          "file": "azuredevops/v7/workitemtracking/client.go",
+          "sha1_git": "6bfd17d197d799deb8798d458026936d9d0c26c4",
+          "length": 144292
+        },
+        {
+          "file": "azuredevops/v7/workitemtracking/models.go",
+          "sha1_git": "5b377943d00c3e7dc274f617de54ea30724766be",
+          "length": 64357
+        },
+        {
+          "file": "azuredevops/v7/workitemtrackingprocess/client.go",
+          "sha1_git": "40072557dd3514ae7af4f18a6436e588d856929a",
+          "length": 89563
+        },
+        {
+          "file": "azuredevops/v7/workitemtrackingprocess/models.go",
+          "sha1_git": "a400e50390e2b2b436ea3b409ca9e24d91dc48c4",
+          "length": 35677
+        },
+        {
+          "file": "azuredevops/v7/workitemtrackingprocesstemplate/client.go",
+          "sha1_git": "071cc96264d12b3ab0600534a859aa1ca5ad8bbf",
+          "length": 7090
+        },
+        {
+          "file": "azuredevops/v7/workitemtrackingprocesstemplate/models.go",
+          "sha1_git": "1e1285eef37b834911ed468d8640bdebb907c8ef",
+          "length": 4266
+        }
+      ]
+    },
+    "node": {
+      "repo": "microsoft/azure-devops-node-api",
+      "commit": "a20f0d5876ce27811bbbc72f40f33fcd3ed61b22",
+      "files": [
+        {
+          "file": "api/AlertApi.ts",
+          "sha1_git": "3b4e1e3fbd21fffdec794b34505c499a0c6ee8fe",
+          "length": 29563
+        },
+        {
+          "file": "api/BuildApi.ts",
+          "sha1_git": "7f22501b36b5cee36f83ed0419adbb2c97377272",
+          "length": 200094
+        },
+        {
+          "file": "api/CIXApi.ts",
+          "sha1_git": "38b2f90272d3b100f19177217a053f16230f5590",
+          "length": 10659
+        },
+        {
+          "file": "api/CoreApi.ts",
+          "sha1_git": "eaf95066895afff36acfe97bcac3a00195c57751",
+          "length": 61086
+        },
+        {
+          "file": "api/DashboardApi.ts",
+          "sha1_git": "6eca22a70bf185d422cc4ec744d681e0818e76e4",
+          "length": 29864
+        },
+        {
+          "file": "api/ExtensionManagementApi.ts",
+          "sha1_git": "e3c492b860b3492c9b2df79144f65a03365111b2",
+          "length": 51975
+        },
+        {
+          "file": "api/FeatureManagementApi.ts",
+          "sha1_git": "f76ea5a9e4e5111e0c7b827ed8b9b01a45a8b3b9",
+          "length": 21088
+        },
+        {
+          "file": "api/FileContainerApi.ts",
+          "sha1_git": "9c534efce85c9aa388f669b350859212acbcb520",
+          "length": 11458
+        },
+        {
+          "file": "api/FileContainerApiBase.ts",
+          "sha1_git": "2aab247ff9b64e0f0faa6861774cd75c6f0ca674",
+          "length": 11742
+        },
+        {
+          "file": "api/GalleryApi.ts",
+          "sha1_git": "5ff39ba4534dcfbca84f8d68bac1f4c524aa4bc9",
+          "length": 161893
+        },
+        {
+          "file": "api/GitApi.ts",
+          "sha1_git": "e21ff89ff68eac01a9b5449e3c466de78082f9d1",
+          "length": 356497
+        },
+        {
+          "file": "api/LocationsApi.ts",
+          "sha1_git": "9dee9d8480ccacf9eba74398cd21230c7a5caff9",
+          "length": 20093
+        },
+        {
+          "file": "api/ManagementApi.ts",
+          "sha1_git": "13447f793207f0500caade32ddf929ab1c0d6ede",
+          "length": 55121
+        },
+        {
+          "file": "api/NotificationApi.ts",
+          "sha1_git": "e85d113ee47b79a7d76d5b3a1848a1ec3243605a",
+          "length": 45404
+        },
+        {
+          "file": "api/PipelinesApi.ts",
+          "sha1_git": "a72ebc0e9eae8c9d24a9d928ffab053898040511",
+          "length": 21579
+        },
+        {
+          "file": "api/PolicyApi.ts",
+          "sha1_git": "2ffdaa4825dc68e1ba4977276ffac05c00c7b93d",
+          "length": 25031
+        },
+        {
+          "file": "api/ProfileApi.ts",
+          "sha1_git": "faa36eba1c2038956818c3dbb48a3622a5e5bd7c",
+          "length": 26526
+        },
+        {
+          "file": "api/ProjectAnalysisApi.ts",
+          "sha1_git": "1575da2ab1a659056e8f02cd1b63e8bcd627e3ad",
+          "length": 10793
+        },
+        {
+          "file": "api/ReleaseApi.ts",
+          "sha1_git": "5d8e660177ee58e0aae703bee0fe74bfb985644a",
+          "length": 185178
+        },
+        {
+          "file": "api/SecurityRolesApi.ts",
+          "sha1_git": "c21f8c227cee17526f259e7ea34888a2fb68e02e",
+          "length": 10569
+        },
+        {
+          "file": "api/ServiceEndpointApi.ts",
+          "sha1_git": "2c92e2f8efd4a2b37baa754b60937fd533a7d5f5",
+          "length": 718
+        },
+        {
+          "file": "api/ServiceEndpointApiBase.ts",
+          "sha1_git": "96f7cc87545d0c3253f722bda76b2871fbb3ad60",
+          "length": 59881
+        },
+        {
+          "file": "api/TaskAgentApi.ts",
+          "sha1_git": "2f318455a97ceb5b43498a672881c7a28167e94c",
+          "length": 10419
+        },
+        {
+          "file": "api/TaskAgentApiBase.ts",
+          "sha1_git": "d7c218504956c14a299616f50a0f013b45ef6c90",
+          "length": 312472
+        },
+        {
+          "file": "api/TaskApi.ts",
+          "sha1_git": "7d99d7879557f2612e1b6e1809f4cb35d620a2f0",
+          "length": 57443
+        },
+        {
+          "file": "api/TestApi.ts",
+          "sha1_git": "c3a5241798436852b7db708600d23de4037415d4",
+          "length": 165942
+        },
+        {
+          "file": "api/TestPlanApi.ts",
+          "sha1_git": "95e05bae4f66aac46c9179a4349fde46b8dbf964",
+          "length": 102914
+        },
+        {
+          "file": "api/TestResultsApi.ts",
+          "sha1_git": "8bc21ce5e3af80f2d9174eb157796aad2b3b64d4",
+          "length": 253370
+        },
+        {
+          "file": "api/TfvcApi.ts",
+          "sha1_git": "11871fb4401dcd16694646560711bbc49ac3da52",
+          "length": 57421
+        },
+        {
+          "file": "api/WebApi.ts",
+          "sha1_git": "5cf883839a9dfa07bb6de3e149417b50ead66a26",
+          "length": 27380
+        },
+        {
+          "file": "api/WikiApi.ts",
+          "sha1_git": "f9fa6c499b4e88d6f9dddc8d951d88cf2d3cd2fa",
+          "length": 49272
+        },
+        {
+          "file": "api/WorkApi.ts",
+          "sha1_git": "4e011667cf1cb67b3ee77801e19e44a67215c651",
+          "length": 124074
+        },
+        {
+          "file": "api/WorkItemTrackingApi.ts",
+          "sha1_git": "d212cdf0debb5d8782d3f415e9f08f20fdf8cd2f",
+          "length": 193342
+        },
+        {
+          "file": "api/WorkItemTrackingProcessApi.ts",
+          "sha1_git": "500d2160fa4e7b22a764d807fcfdadbc5bb84558",
+          "length": 115688
+        },
+        {
+          "file": "api/WorkItemTrackingProcessDefinitionsApi.ts",
+          "sha1_git": "5a3cf32b20f84793e9440119f6e3a991c77578c4",
+          "length": 95970
+        },
+        {
+          "file": "api/interfaces/AccountsInterfaces.ts",
+          "sha1_git": "19569508ef4a5766c1caa2fd850f9e88ca338d24",
+          "length": 4048
+        },
+        {
+          "file": "api/interfaces/AlertInterfaces.ts",
+          "sha1_git": "201cb88358982c77a41f24ebb14e17059740b84b",
+          "length": 40859
+        },
+        {
+          "file": "api/interfaces/BuildInterfaces.ts",
+          "sha1_git": "eca1a801673271305c74d8b1811f8b53f44e0905",
+          "length": 103896
+        },
+        {
+          "file": "api/interfaces/CIXInterfaces.ts",
+          "sha1_git": "43f4893c59c6ead3ba64556905abc85bca8fc43c",
+          "length": 3745
+        },
+        {
+          "file": "api/interfaces/ClientTraceInterfaces.ts",
+          "sha1_git": "a5da2484b4005df3ff8e731c8a9663c6c8be0c85",
+          "length": 1030
+        },
+        {
+          "file": "api/interfaces/CommentsInterfaces.ts",
+          "sha1_git": "b9b99cfe833c2815e5225c732cac52dd9388b21e",
+          "length": 10328
+        },
+        {
+          "file": "api/interfaces/ContributionsInterfaces.ts",
+          "sha1_git": "0049762505e0f4009665ee46eaf2e66bfc146459",
+          "length": 24684
+        },
+        {
+          "file": "api/interfaces/CoreInterfaces.ts",
+          "sha1_git": "3d8105f4001d29075ce775670f8b99b65ffbc9ec",
+          "length": 15545
+        },
+        {
+          "file": "api/interfaces/CustomerIntelligenceInterfaces.ts",
+          "sha1_git": "4c4958e5a3f384231e7489ef029e8d5254f3c669",
+          "length": 497
+        },
+        {
+          "file": "api/interfaces/DashboardInterfaces.ts",
+          "sha1_git": "df3c38f1372a083dc4a8763dd55596153bc1ecde",
+          "length": 16639
+        },
+        {
+          "file": "api/interfaces/DeploymentInterfaces.ts",
+          "sha1_git": "6d758074a7e809815efd9e328becae25ac2a8190",
+          "length": 38218
+        },
+        {
+          "file": "api/interfaces/DistributedTaskCommonInterfaces.ts",
+          "sha1_git": "a6108e419f4bb14a870cddbc6c9a2ee7da29b26a",
+          "length": 2868
+        },
+        {
+          "file": "api/interfaces/ExtensionManagementInterfaces.ts",
+          "sha1_git": "348e8a9160da91d06d97961b62ac24f807dca41c",
+          "length": 41296
+        },
+        {
+          "file": "api/interfaces/FeatureAvailabilityInterfaces.ts",
+          "sha1_git": "cf3843fdeeabb197c7ae2494fb376734bde440ba",
+          "length": 670
+        },
+        {
+          "file": "api/interfaces/FeatureManagementInterfaces.ts",
+          "sha1_git": "745a10e0ca9dc89d7895c581a49cae47848786fb",
+          "length": 5630
+        },
+        {
+          "file": "api/interfaces/FileContainerInterfaces.ts",
+          "sha1_git": "1abe64ba4a158298ba7a88a6d8fa4426038c3740",
+          "length": 5309
+        },
+        {
+          "file": "api/interfaces/GalleryInterfaces.ts",
+          "sha1_git": "441f040f1cdc276b03f26f99223a6ba6594e626e",
+          "length": 73435
+        },
+        {
+          "file": "api/interfaces/GitInterfaces.ts",
+          "sha1_git": "bf8410be30cec50fa849268aed05e7a5943b4d61",
+          "length": 147544
+        },
+        {
+          "file": "api/interfaces/GraphInterfaces.ts",
+          "sha1_git": "9d15a17dad886962bc85e6ed84b6ee6a3aeeac96",
+          "length": 23155
+        },
+        {
+          "file": "api/interfaces/IdentitiesInterfaces.ts",
+          "sha1_git": "bd6bf4b678f734cfab04ed21d51f315efe9e8b0d",
+          "length": 8850
+        },
+        {
+          "file": "api/interfaces/LocationsInterfaces.ts",
+          "sha1_git": "595effc49a5b9f96cd582ca1bc0a24668c199585",
+          "length": 6417
+        },
+        {
+          "file": "api/interfaces/ManagementInterfaces.ts",
+          "sha1_git": "20a3903a8e6fa60710a1b4e2799d63d8212cb067",
+          "length": 15978
+        },
+        {
+          "file": "api/interfaces/NotificationInterfaces.ts",
+          "sha1_git": "33f8f9bf6fa5a41decdf9944765369599c49090e",
+          "length": 58069
+        },
+        {
+          "file": "api/interfaces/PipelinesInterfaces.ts",
+          "sha1_git": "a16ced43371b5cfff0206f236d575ca1e5af9791",
+          "length": 11094
+        },
+        {
+          "file": "api/interfaces/PolicyInterfaces.ts",
+          "sha1_git": "6ad5375ab1d4b95c1451caa0435ca88ec9df008f",
+          "length": 5357
+        },
+        {
+          "file": "api/interfaces/ProfileInterfaces.ts",
+          "sha1_git": "ba1a7628f93fb40d2c3f214f0eb7c528abe8a40e",
+          "length": 4439
+        },
+        {
+          "file": "api/interfaces/ProjectAnalysisInterfaces.ts",
+          "sha1_git": "96c6566112b9b22a79b8a1b40ca8423325196db7",
+          "length": 3222
+        },
+        {
+          "file": "api/interfaces/ProvenanceInterfaces.ts",
+          "sha1_git": "b21d17e32803a874b0a407cf5f85c5830626f824",
+          "length": 977
+        },
+        {
+          "file": "api/interfaces/ReleaseInterfaces.ts",
+          "sha1_git": "d2c10f17d88a1c5295c94aaed229d7ef8a4206ba",
+          "length": 133995
+        },
+        {
+          "file": "api/interfaces/SBOMInterfaces.ts",
+          "sha1_git": "9680e2d9cf2df41a96c3c9d7c95632051776a84b",
+          "length": 8925
+        },
+        {
+          "file": "api/interfaces/SecurityRolesInterfaces.ts",
+          "sha1_git": "17e679d66796f1f8101931d5c1b69d194e2387cc",
+          "length": 2251
+        },
+        {
+          "file": "api/interfaces/ServiceEndpointInterfaces.ts",
+          "sha1_git": "9f75e61109dbd9a97f4bd76612cb8e38ca7fa2af",
+          "length": 26476
+        },
+        {
+          "file": "api/interfaces/ServiceHooksInterfaces.ts",
+          "sha1_git": "4a69efc055c640b4f9183e5b7e589c189872f024",
+          "length": 24523
+        },
+        {
+          "file": "api/interfaces/TaskAgentInterfaces.ts",
+          "sha1_git": "972853cb5a9571e5992212877c7a095b0cd38e19",
+          "length": 128520
+        },
+        {
+          "file": "api/interfaces/TestInterfaces.ts",
+          "sha1_git": "6a0b1ff0b74dc2b51464303f3414dbd942fdf800",
+          "length": 177141
+        },
+        {
+          "file": "api/interfaces/TestPlanInterfaces.ts",
+          "sha1_git": "caa83aa2797c53f6a15392c9dade9be678a3ae22",
+          "length": 46899
+        },
+        {
+          "file": "api/interfaces/TestResultsInterfaces.ts",
+          "sha1_git": "85cd7bc9d7f6c65797da1c23a6eac1adca64b6fa",
+          "length": 469
+        },
+        {
+          "file": "api/interfaces/TfvcInterfaces.ts",
+          "sha1_git": "9f1b59b633ff15c22630f0c5da4de9d8ab72af9d",
+          "length": 21772
+        },
+        {
+          "file": "api/interfaces/WikiInterfaces.ts",
+          "sha1_git": "e26bddbccc402197ec825bf6651a96ca7ebfe45c",
+          "length": 9625
+        },
+        {
+          "file": "api/interfaces/WorkInterfaces.ts",
+          "sha1_git": "a3fea3f2609b4dd1c0773a6203706b5ed639ea48",
+          "length": 41172
+        },
+        {
+          "file": "api/interfaces/WorkItemTrackingInterfaces.ts",
+          "sha1_git": "8a60d3a9b95ddb0c6baa1798cd5b51428bed0341",
+          "length": 60492
+        },
+        {
+          "file": "api/interfaces/WorkItemTrackingProcessDefinitionsInterfaces.ts",
+          "sha1_git": "36c9a87122a59c85fcbb3ef4ce5d5e74dd093636",
+          "length": 13757
+        },
+        {
+          "file": "api/interfaces/WorkItemTrackingProcessInterfaces.ts",
+          "sha1_git": "235f06eb1c37ab2837cd86e7c7fd4f69ccd85856",
+          "length": 36633
+        },
+        {
+          "file": "api/interfaces/common/FormInputInterfaces.ts",
+          "sha1_git": "a82714ffaf177b3042749b91fcb7282f5633d0f8",
+          "length": 8109
+        },
+        {
+          "file": "api/interfaces/common/LicensingRuleInterfaces.ts",
+          "sha1_git": "f2d02e32e326abc61eadc7cfa075beca7d5c006c",
+          "length": 5193
+        },
+        {
+          "file": "api/interfaces/common/OperationsInterfaces.ts",
+          "sha1_git": "af10ba4a836e5c927c638bb7554b9e985afd97c9",
+          "length": 2456
+        },
+        {
+          "file": "api/interfaces/common/System.ts",
+          "sha1_git": "17e71f82f5af7772931327472deeecd2f763d6ce",
+          "length": 706
+        },
+        {
+          "file": "api/interfaces/common/SystemDataInterfaces.ts",
+          "sha1_git": "3f7bb38858653d8cb4791c52a805a4a4930bfe08",
+          "length": 6352
+        },
+        {
+          "file": "api/interfaces/common/TfsInterfaces.ts",
+          "sha1_git": "9697606e7cf6ac3aad19e31d54a32d60ce585903",
+          "length": 1097
+        },
+        {
+          "file": "api/interfaces/common/VSSInterfaces.ts",
+          "sha1_git": "1fde89f670b896545558fb3be83f05a2395ed359",
+          "length": 14161
+        },
+        {
+          "file": "api/interfaces/common/VsoBaseInterfaces.ts",
+          "sha1_git": "e4f6bd9bc7a8533a7f507853a26cbceae569b3b8",
+          "length": 4715
+        }
+      ]
+    }
   }
 }
