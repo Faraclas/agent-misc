@@ -8,11 +8,14 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
   [Software Heritage](https://www.softwareheritage.org/) archive of it (revision of 2026-09-02, "Update REST API specs
   from releases/M279") and checks each one against the hash recorded in [`pins.json`](./pins.json), which is built
   into the binary. Nothing from Microsoft is stored in this repository.
-- **Output:** six manuals for one organization (385 tools: 375 reads, 10 writes), a `scopes.md` listing the personal
-  access token (PAT) scopes the manuals need, and a `report.json` (tools, sizes, and every operation left out with the
-  reason).
+- **Output:** eight manuals for one organization covering every area of the API that has a 7.1 description (944
+  tools: 582 reads, 362 writes), a `scopes.md` listing the personal access token (PAT) permissions the manuals need,
+  and a `report.json` (tools, sizes, and every operation left out with the reason).
 - **Requirements:** one static binary, no runtime. Network access to `archive.softwareheritage.org` for the first run
-  (about 30 seconds, 21 downloads); later runs use the cache and take well under a second.
+  (about a minute, 46 downloads); later runs use the cache and take about a second.
+- **Docs:** this README (installation, first setup), the [operating guide](./docs/operating.md) (the PAT, upgrades,
+  test results, troubleshooting, Windows, proxies) and the [specification](./docs/azdo-manuals-spec.md) (how the
+  manuals are built and checked).
 
 ## Installation
 
@@ -34,20 +37,30 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the Azure DevOps REST API, so age
 
 | Manual | Spec areas | Hint for `--hint` |
 | --- | --- | --- |
-| `azdo_git` | git, policy | Azure DevOps repos and PRs |
-| `azdo_work` | wit, work | Azure DevOps work items and boards |
-| `azdo_pipelines` | build, pipelines, release, approvalsAndChecks, distributedTask | Azure DevOps builds and pipelines |
+| `azdo_git` | git, policy, tfvc, advancedSecurity | Azure DevOps repos and PRs |
+| `azdo_work` | wit, work, dashboard, processes, processadmin, processDefinitions | Azure DevOps work items, boards, dashboards |
+| `azdo_pipelines` | build, pipelines, release, approvalsAndChecks, distributedTask, environments | Azure DevOps builds and pipelines |
 | `azdo_test` | testResults, testPlan, test | Azure DevOps test plans and results |
 | `azdo_wiki_search` | wiki, search | Azure DevOps wiki and search |
-| `azdo_core` | core, graph, ims | Azure DevOps projects, teams, users |
+| `azdo_core` | core, graph, ims, operations, favorite, status, resourceUsage | Azure DevOps projects, teams, users |
+| `azdo_admin` | security, securityRoles, permissionsReport, serviceEndpoint, hooks, notification, extensionManagement, memberEntitlementManagement, audit, delegatedAuth | Azure DevOps permissions, connections, hooks |
+| `azdo_artifacts` | artifacts, artifactsPackageTypes, symbol | Azure DevOps feeds, packages, symbols |
 
-What a manual contains:
+`generate --stage` adds `, org <your-org>` to each hint (`Azure DevOps repos and PRs, org contoso`), so agents know
+which organization the tools reach. utcp allows hints of up to 60 characters, so with an organization name longer
+than 10 characters every manual keeps the plain hint above.
 
-- Every GET of its areas, except the few that return only binary content (zip files, images).
-- POSTs that only read: WIQL queries, batch reads, code, wiki and work item search, graph subject lookups.
-- Ten writes, each tested in a sandbox organization with `write-test` (below):
+Areas without a 7.1 description (advancedSecurity, delegatedAuth, environments and resourceUsage have only 7.2,
+processDefinitions stops at 4.1) are listed where they belong and come in when the manuals move to that API version.
 
-  | Manual | Tool | What it does |
+What a manual contains: every operation of its areas, reads and writes, except those listed below. What an agent
+may do is decided by the PAT's permissions (see `generate`'s output and `scopes.md`), not by leaving tools out.
+
+- Reads: every GET, and the POSTs that only read (queries, batch reads, searches, lookups).
+- Writes (POST, PUT, PATCH): all of them. Eleven are tested in a sandbox organization with `write-test` (below) and
+  have a short hand-written body; the others start their description with `(untested)` and carry the tag `untested`:
+
+  | Manual | Tested tool | What it does |
   | --- | --- | --- |
   | `azdo_git` | `create_pull_request` | Open a pull request (draft, reviewers, labels, linked work items) |
   | `azdo_git` | `update_pull_request` | Edit, publish a draft, abandon, reactivate, auto-complete, complete |
@@ -57,101 +70,142 @@ What a manual contains:
   | `azdo_git` | `update_thread` | Resolve (fixed, closed, ...) or reopen a thread |
   | `azdo_work` | `create_work_item` | New work item (JSON Patch: fields, links) |
   | `azdo_work` | `update_work_item` | Change fields and links, with optional optimistic locking on `rev` |
+  | `azdo_work` | `create_attachment` | Upload a file to attach to a work item (`{"file": "<path>"}`) |
   | `azdo_pipelines` | `queue_build` | Run a pipeline on a branch or commit, with runtime parameters |
   | `azdo_pipelines` | `update_build` | Cancel a build, or rerun its failed jobs |
 
-  Pushing code is left to `git push`. DELETE is never generated. `generate --read-only` leaves the writes out, for
-  a read-only PAT.
+- Deletes: only 19 small ones an agent may need to take back: pull request comments, likes, labels, reviewers,
+  statuses and attachments, ref favorites, build and pipeline tags, work item comments and reactions, work items
+  (they go to the recycle bin), test cases in a suite, wiki pages, dashboard widgets and favorites (`deletes` in
+  `src/config.rs`).
 
-Left out on purpose:
+Pushing code is left to `git push`. `generate --read-only` leaves every write out, for a read-only PAT.
 
-- Security, tokens, audit, service hooks, extensions, process templates, Advanced Security, Artifacts and the other
-  admin areas.
-- `environments`: it exists only as a 7.2 preview, so it is not in the 7.1 manuals.
-- `profile`: its one operation runs on `app.vssps.visualstudio.com`, outside the organization, and refuses a PAT
-  scoped to one organization.
-- Eight reads that Azure DevOps allows only with a write-level scope (deployment groups and targets, environments),
-  so the PAT needs no more than the writes above. `allow_write_scopes` in `src/config.rs` brings them back.
-- Three test-results reads whose spec lists no scope and which a PAT with every read scope cannot call.
+Files: operations whose answer is a file or zip (build artifacts and logs, attachments, packages, process templates)
+are tools whose template has `"response_type": "file"`: utcp saves the file (to the Downloads folder, or `--out`)
+and prints its path. Operations whose body is a file (work item, pull request and wiki attachments, process import)
+take `{"file": "<path>"}` (with `offset` and `length` for one chunk of a chunked upload, plus the `Content-Range`
+header). Header parameters the specs name differently from the real header are generated under the real name:
+`If-Match` (wiki page version), `Content-Range` and `x-ms-continuationtoken`.
 
-`report.json` lists every operation left out, with the reason.
+Left out (`generate` prints this list, `report.json` has every operation with its reason):
+
+- The other 100 DELETEs: deleting a project, repository, branch policy, pipeline, feed, package, user or permission
+  cannot be undone, and an agent that guesses wrong should not be able to.
+- 3 HEAD operations (the GET of the same thing is included).
+- Areas: `profile` and `account` (hosted on `app.vssps.visualstudio.com`, outside the organization; `profile` refused
+  an organization's PAT), `tokens`, `tokenAdmin` and `tokenAdministration` (they create or revoke PATs), and
+  `governance` (its 7.1 folder has examples only).
+- Four operations that do not work: one Microsoft is deprecating (404), and three test-results reads whose spec
+  lists no scope and which only a full-access PAT may call.
+- With `--read-only`, also the reads that Azure DevOps allows only with a write-level permission (deployment groups,
+  some test reads), since a read-only PAT cannot call them.
 
 ## Usage
 
-```sh
-azdo-manuals generate --org <your-org> --register
-```
+`azdo-manuals help` shows the same steps. Once per user and organization (needs utcp 0.2.0 or newer):
 
-`--org` is the name in `https://dev.azure.com/<your-org>`. This writes the manuals to a private folder,
+| Step | Run | What you should see |
+| --- | --- | --- |
+| 1. Write and stage the manuals (no PAT needed yet) | `azdo-manuals generate --org <your-org> --stage` | The eight manuals with their tool counts, what was left out and why, `Staged the 8 manuals in utcp.`, the PAT permissions they need, and the next steps. Agents do not see staged manuals yet. |
+| 2. Make a PAT | At `https://dev.azure.com/<your-org>/_usersSettings/tokens`: under Scopes pick "Custom defined", then "Show all scopes", and set the permissions step 1 printed: the "All tools" levels, or the "Reads only" levels for agents that should only read. | The new token, shown once. |
+| 3. Give it to utcp | Add it as the secret `AZURE_DEVOPS_EXT_PAT`: a line `AZURE_DEVOPS_EXT_PAT=<the token>` in utcp's `.env` file (`utcp doctor` shows it as `Secrets File`), or, if `utcp doctor` shows a `Secrets Command`, where that command reads secrets (add the name to its allowlist if it has one), then `utcp daemon reload-env`. See the secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md). | Nothing yet. |
+| 4. Check | `utcp doctor` | `[SET] AZURE_DEVOPS_EXT_PAT`, listing the eight azdo manuals, marked `(staged)`. |
+| 5. Review | `utcp diff` | Each manual as `new manual, N tools`, or for an update the tools added, removed and changed. |
+| 6. Test | `azdo-manuals read-test --org <your-org> --project <a project>` | One line per read tool with its status, then `Results: N ok, ...` (below). |
+| 7. Make them active | `utcp promote` | `Promoted 'azdo_git' (139 tools, new)` and so on; agents now find them, and their skills list them. |
+
+`--org` is the name in `https://dev.azure.com/<your-org>`. Step 1 writes the manuals to a private folder,
 `~/.local/share/azdo-manuals/<your-org>` (`%LOCALAPPDATA%\azdo-manuals\manuals\<your-org>` on Windows; `--out` picks
-another), and registers each one with utcp under its name and hint. Run the same command again to refresh them, for
-example after upgrading azdo-manuals. Without `--register` it only writes the files.
+another), and stages each one in utcp under its name and hint. Without `--stage` it only writes the files. The
+manual names do not contain the organization, so one utcp setup holds the manuals of one organization.
+`azdo-manuals <command> help` and `azdo-manuals help <command>` both print the help for one command.
+
+**After upgrading azdo-manuals**, run step 1 again, then steps 5 to 7: `utcp diff` shows what the new version
+changes, and `utcp rollback <manual>` brings back the previous version if something is wrong. The
+[operating guide](./docs/operating.md) has the details, and what to do when a step fails.
 
 The manuals contain the organization name in every URL, so keep them private (never in a public repository). The
 downloaded specs are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache` on Windows); `--cache`
-picks another folder.
+picks another folder. The permissions are also written to `scopes.md` in the manuals folder, with the scope id and
+what each one allows.
 
-Then create a PAT with the scopes listed in `scopes.md` and make it available to utcp as `AZURE_DEVOPS_EXT_PAT` (see
-the secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md)):
+Then agents (or you) can use them:
 
 ```sh
 utcp search 'pull request reviewers'
 utcp call azdo_git.get_pull_requests '{"project": "MyProject", "repositoryId": "my-repo"}'
 ```
 
-To register by hand instead: `utcp register azdo_git <folder>/azdo_git.utcp.json --hint 'Azure DevOps repos and PRs'`.
+To stage by hand instead: `utcp stage azdo_git <folder>/azdo_git.utcp.json --hint 'Azure DevOps repos and PRs'`
+(or `utcp register` to make it active at once).
 
 The manuals authenticate with HTTP basic auth: user name `pat` (Azure DevOps ignores it, utcp needs one) and the PAT
-as the password, which is how Azure DevOps expects PATs.
+as the password, which is how Azure DevOps expects PATs. The one tool outside your organization, the public service
+health page (`azdo_core.get_service_status`), is sent no PAT.
 
 ## How the manuals are built
 
 - **Tool names** come from the method name in Microsoft's own client library, in snake case (`GetTeamDaysOff` ->
-  `get_team_days_off`), else from the operation id. When two operations in one manual would get the same name, both
-  get their area as a prefix (`build_get_folders`, `release_get_folders`). `names` in `src/config.rs` sets a name by
-  hand.
+  `get_team_days_off`), else from the operation id. When two operations in one manual would get the same name, the
+  one from the manual's first area keeps it (`get_branches` in `azdo_git` is git's) and the others get their area as
+  a prefix (`tfvc_get_branches`), or, when one area has several (the package types), their group (`npm_...`,
+  `nuget_...`). `names` in `src/config.rs` sets a name by hand.
 - **URLs** use the host each spec names (for example `vsrm.dev.azure.com` for releases, `vssps.dev.azure.com` for
-  graph, `vstmr.dev.azure.com` for test results) and carry the `api-version` each operation needs, including
-  previews such as `7.1-preview.1`.
+  graph, `vstmr.dev.azure.com` for test results, `feeds.dev.azure.com` for Artifacts) and carry the `api-version`
+  each operation needs, including previews such as `7.1-preview.1`.
 - **Path parameters** are required. The optional `team` segment of the WIQL routes is left out, since utcp cannot
   drop a segment per call; board and iteration tools keep `team`.
 - **Spec corrections:** `required_params` in `src/config.rs` marks parameters the spec calls optional but the service
   requires, and `skip_gets` drops operations that no longer work or that a read-only PAT cannot call. Both were found
   by the live checks below.
 - **Request bodies** have their references and inheritance inlined up to three levels, without read-only fields.
-  The writes are the exception: the specs describe their bodies with the full response type (35 properties for a
-  pull request, 45 for a build, mostly set by the service), and the work item body as an object although it is a
-  JSON Patch array. `src/bodies.rs` gives each write a short schema with only the fields the service accepts. Fields
-  the service refuses are left out, such as `keepForever` on a build (deprecated in favor of retention leases).
+  The specs describe many write bodies with the full response type (35 properties for a pull request, 45 for a
+  build, mostly set by the service), so `src/bodies.rs` gives each tested write a short schema with only the fields
+  the service accepts. Fields the service refuses are left out, such as `keepForever` on a build (deprecated in favor
+  of retention leases). Every `application/json-patch+json` body (work items, pull request statuses and properties,
+  entitlements, ...) is a JSON Patch array, although the specs describe it as an object.
 - **Responses** pass through as Azure DevOps sends them; use `utcp call --fields` to keep only what you need. A few
   responses can be large in a big organization (several MB for work item types or all project tags), and utcp
   refuses responses over 10 MB.
 - **PAT scopes:** an operation that lists several scopes accepts any one of them, so the report picks a small set
-  that covers every tool, preferring read scopes. With the writes this is `vso.code_write`, `vso.work_write` and
-  `vso.build_execute` ("Code: Read & write", "Work Items: Read & write", "Build: Read & execute") plus read scopes.
-  Pull request threads and comments need no separate "Pull Request Threads" scope: `vso.code_write` covers them.
+  that covers every tool, preferring read scopes, and a second set for a PAT that only reads. `generate` prints both
+  side by side as the New Token page names them ("Code: Read, write, & manage" for all tools, "Code: Read" for reads).
+  Pull request threads and comments need no separate "Pull Request Threads" scope: `vso.code_write` covers them. A PAT
+  never allows more than the account that made it may do.
 
 ## Checking the manuals against a real organization
 
-Both checks are read-only and take the PAT from `AZURE_DEVOPS_EXT_PAT`. They print tool names, status codes and
-sizes, never the token. `read-test` skips the write tools.
+Both checks are read-only. They print tool names, status codes and sizes, never the token. `check-routes` skips the
+service health tool (`azdo_core.get_service_status`): its host lets nobody read its route list, so it says so and
+leaves that tool to `read-test`.
 
 ```sh
-# Every tool's URL must match a route the organization lists, at a version it supports.
-azdo-manuals check-routes --org <your-org> --manuals <folder>
+# Every tool's URL must match a route the organization lists, at a version it supports. PAT from AZURE_DEVOPS_EXT_PAT.
+azdo-manuals check-routes --org <your-org>
 # Call every read tool through utcp, taking ids from earlier responses (needs utcp on PATH or --utcp).
-azdo-manuals read-test --manuals <folder> --project <project> --seed repositoryId=<repo-with-pull-requests>
+azdo-manuals read-test --org <your-org> --project <project> --seed repositoryId=<repo-with-pull-requests>
 ```
 
-`read-test` uses its own throwaway utcp configuration, so it neither needs nor changes your registered manuals. It
-writes `readtest.json` next to the manuals with every call's status, size and arguments; that file contains
-organization data, so keep it as private as the manuals. Tools it found no ids for are listed as not exercised.
+`read-test` calls the tools through your utcp, exactly as agents do (through the daemon when it runs), with the PAT
+utcp already has, so it needs no PAT in your shell. Manuals that are staged are called with `utcp call --staged`, so
+you can test them before `utcp promote`; the others are called as they are active. The tool definitions come from
+the folder `generate` wrote (`--manuals <folder>` when it is not the default one for `--org`). `--seed name=value`
+fixes a parameter by name: with `repositoryId` it reads that repository's pull requests, commits and threads,
+which gives a fuller test than the first repository it finds. `--team` picks the team for board tools (default: the
+project's default team), `--only <manual>` tests one manual. It writes `readtest.json` next to the manuals with
+every call's status, size and arguments; that file contains organization data, so keep it as private as the
+manuals. Tools it found no ids for are listed as not exercised, and a few reads can fail because of the
+organization's settings or data (an admin-only read, a disabled feature); the
+[operating guide](./docs/operating.md#5-reading-the-read-test-results) lists the known ones.
 
 ### Write test (sandbox organization only)
 
-`write-test` calls every write tool through utcp in a throwaway project. Run it only in a free organization of your
-own, never in a work organization: it creates a project and deletes every project whose name starts with
+`write-test` calls the tested write tools through utcp in a throwaway project. Run it only in a free organization of
+your own, never in a work organization: it creates a project and deletes every project whose name starts with
 `azdo-manuals-test-` (leftovers of earlier runs), so it refuses to start without `--create-and-delete-projects`.
+It uses its own throwaway utcp setup in a temporary folder (never your manuals, daemon or agent skills) and takes
+the sandbox organization's PAT from `AZURE_DEVOPS_EXT_PAT` in the environment.
 
 ```sh
 azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-delete-projects
@@ -163,19 +217,23 @@ azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-dele
   and two feature branches, and a YAML pipeline on the self-hosted `Default` pool. A new organization has no agents
   in that pool, so queued builds wait and can be cancelled without using build minutes.
 - **Checks:** each write's answer must show what was sent (a field the service ignores fails the test), and the
-  effects that happen later (auto-complete, completion, cancellation) are polled for. A write tool the test did not
-  call is reported as not run.
+  effects that happen later (auto-complete, completion, cancellation) are polled for. A tested write the test did not
+  call is reported as not run; writes tagged `untested` are not expected.
 - **Output:** tool names and statuses; `writetest.json` next to the manuals holds the arguments and answers. The
   project is deleted at the end (Azure DevOps keeps deleted projects restorable for 28 days).
 
 ## Maintainers
 
-- `src/config.rs` holds the grouping and every inclusion decision; `src/bodies.rs` the write bodies. `generate`
-  refuses a configuration that names an operation the specs do not have.
-- `azdo-manuals pins --pins pins.json` (run in this folder) records the file hashes of an archive revision. It costs
-  about 40 of the archive's 120 requests per hour and continues where it stopped if it runs out. The binary embeds
-  `pins.json`, so rebuild after changing it.
-- Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary to also load the manuals in utcp).
+- `src/config.rs` holds the grouping and everything left out, each with its reason; `src/bodies.rs` the bodies of
+  the tested writes. `generate` refuses a configuration that names an operation the specs do not have, and a test
+  refuses an area of the spec folder that is neither in a manual nor excluded with a reason.
+- `azdo-manuals pins --pins pins.json` (run in this folder) records the file hashes of an archive revision and the
+  list of all areas. It costs about 80 of the archive's 120 requests per hour and continues where it stopped if it
+  runs out. The binary embeds `pins.json`, so rebuild after changing it.
+- Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary, 0.2.0 or newer, to also stage the manuals in a
+  throwaway utcp).
+- Version: the REST API version plus a counter, so `7.1.x` for API 7.1 (`azdo-manuals --version`).
+- How it works inside, file formats and design decisions: [`docs/azdo-manuals-spec.md`](./docs/azdo-manuals-spec.md).
 - Rules for changes and releases: [`AGENTS.md`](./AGENTS.md).
 
 ## License

@@ -4,56 +4,56 @@
   "revision_message": "Update REST API specs from releases/M279 (#736)",
   "specification_dir": "eb5a1ee87e2a2fe00bd29c737b8f12aa68693ac3",
   "api_version": "7.1",
+  "archive_areas": [
+    "account",
+    "advancedSecurity",
+    "approvalsAndChecks",
+    "artifacts",
+    "artifactsPackageTypes",
+    "audit",
+    "build",
+    "core",
+    "dashboard",
+    "delegatedAuth",
+    "distributedTask",
+    "environments",
+    "extensionManagement",
+    "favorite",
+    "git",
+    "governance",
+    "graph",
+    "hooks",
+    "ims",
+    "memberEntitlementManagement",
+    "notification",
+    "operations",
+    "permissionsReport",
+    "pipelines",
+    "policy",
+    "processDefinitions",
+    "processadmin",
+    "processes",
+    "profile",
+    "release",
+    "resourceUsage",
+    "search",
+    "security",
+    "securityRoles",
+    "serviceEndpoint",
+    "status",
+    "symbol",
+    "test",
+    "testPlan",
+    "testResults",
+    "tfvc",
+    "tokenAdmin",
+    "tokenAdministration",
+    "tokens",
+    "wiki",
+    "wit",
+    "work"
+  ],
   "areas": {
-    "wit": [
-      {
-        "file": "workItemTracking.json",
-        "sha1_git": "5e85b5e62f84785ded34f9f15cb759bc68d9eab4",
-        "length": 311301
-      }
-    ],
-    "release": [
-      {
-        "file": "release.json",
-        "sha1_git": "b2cddf6d2cff225d889dea753b4a080832733bca",
-        "length": 318227
-      }
-    ],
-    "git": [
-      {
-        "file": "git.json",
-        "sha1_git": "2daed662633fc64a0bfd0e7389485f0dab55f305",
-        "length": 530489
-      }
-    ],
-    "policy": [
-      {
-        "file": "policy.json",
-        "sha1_git": "a7889097775296f2cfc948227c0e242877c50f1d",
-        "length": 38415
-      }
-    ],
-    "work": [
-      {
-        "file": "work.json",
-        "sha1_git": "cbe3af39bf8dbdcfa28d19dc1b74d917179ed6e1",
-        "length": 189348
-      }
-    ],
-    "build": [
-      {
-        "file": "build.json",
-        "sha1_git": "535e999e2d9a439ddcf83be15edbf3aa50b6c561",
-        "length": 379378
-      }
-    ],
-    "pipelines": [
-      {
-        "file": "pipelines.json",
-        "sha1_git": "eddcc056b3e5f8886a3bfd313e573bb5de9acbf5",
-        "length": 40024
-      }
-    ],
     "approvalsAndChecks": [
       {
         "file": "pipelinePermissions.json",
@@ -69,6 +69,78 @@
         "file": "pipelinesapproval.json",
         "sha1_git": "7f4c358f6b39c386bd558e7cb625e469fba77994",
         "length": 35008
+      }
+    ],
+    "artifacts": [
+      {
+        "file": "feed.json",
+        "sha1_git": "587fdba5ff1ac37bce807fec9c79d36708d1e300",
+        "length": 129268
+      },
+      {
+        "file": "provenance.json",
+        "sha1_git": "5d3072c4a8ed3eb31ae9a3709e3598be53484e7f",
+        "length": 4896
+      },
+      {
+        "file": "sbom.json",
+        "sha1_git": "87ee1a9b0c3139fcebf53c37a93a82871dbbfcbc",
+        "length": 12251
+      }
+    ],
+    "artifactsPackageTypes": [
+      {
+        "file": "maven.json",
+        "sha1_git": "14f0dd11f1e097c20d53e0e21a2d43d492ed5357",
+        "length": 47217
+      },
+      {
+        "file": "npm.json",
+        "sha1_git": "3a9f6da0c160bd7092ab64bf7f88416332070c1f",
+        "length": 61368
+      },
+      {
+        "file": "nuGet.json",
+        "sha1_git": "7fa50ad68ce4e200b69f09eed476efb059366dd5",
+        "length": 36743
+      },
+      {
+        "file": "pyPiApi.json",
+        "sha1_git": "147dbfb040a36009a7f2df9f36b0a5cb43d40882",
+        "length": 35843
+      },
+      {
+        "file": "universal.json",
+        "sha1_git": "bb83595556a41d943c58c086633afe6c1dbc22cc",
+        "length": 26808
+      }
+    ],
+    "audit": [
+      {
+        "file": "audit.json",
+        "sha1_git": "5905c43f4b9113df501615ec9a6e1c08b4e150fd",
+        "length": 33796
+      }
+    ],
+    "build": [
+      {
+        "file": "build.json",
+        "sha1_git": "535e999e2d9a439ddcf83be15edbf3aa50b6c561",
+        "length": 379378
+      }
+    ],
+    "core": [
+      {
+        "file": "core.json",
+        "sha1_git": "c677f5d4d1a440bd24df994178ab929caf4a9ebd",
+        "length": 77164
+      }
+    ],
+    "dashboard": [
+      {
+        "file": "dashboard.json",
+        "sha1_git": "46841389da782ff2b73be37627678ba49cb10afc",
+        "length": 60241
       }
     ],
     "distributedTask": [
@@ -88,46 +160,25 @@
         "length": 337516
       }
     ],
-    "testResults": [
+    "extensionManagement": [
       {
-        "file": "testResults.json",
-        "sha1_git": "034b6d1e50da83bd3eddfc1e488d33f5b32be915",
-        "length": 336706
+        "file": "extensionManagement.json",
+        "sha1_git": "74124f6e4dfb63680005686e226ca256e803970a",
+        "length": 88208
       }
     ],
-    "testPlan": [
+    "favorite": [
       {
-        "file": "testPlan.json",
-        "sha1_git": "2a0f24bb54f1c9a6e81a556b1fda7dd0c18f111d",
-        "length": 161367
+        "file": "favorite.json",
+        "sha1_git": "3f43925983a352f628698ac5481f444cf17f5e73",
+        "length": 30879
       }
     ],
-    "test": [
+    "git": [
       {
-        "file": "test.json",
-        "sha1_git": "affc95b52f201bc609f8e6004b51001804735400",
-        "length": 382658
-      }
-    ],
-    "wiki": [
-      {
-        "file": "wiki.json",
-        "sha1_git": "7aba6fa47f7fa56cbce69356efe357ecc32c50ca",
-        "length": 86027
-      }
-    ],
-    "search": [
-      {
-        "file": "search.json",
-        "sha1_git": "8d5835ad5218dae1e5b22b3a10486ea0e34bb4bd",
-        "length": 41091
-      }
-    ],
-    "core": [
-      {
-        "file": "core.json",
-        "sha1_git": "c677f5d4d1a440bd24df994178ab929caf4a9ebd",
-        "length": 77164
+        "file": "git.json",
+        "sha1_git": "2daed662633fc64a0bfd0e7389485f0dab55f305",
+        "length": 530489
       }
     ],
     "graph": [
@@ -137,16 +188,190 @@
         "length": 96899
       }
     ],
+    "hooks": [
+      {
+        "file": "serviceHooks.json",
+        "sha1_git": "48433eabfdf8b4dd44b78ac9ece381effc902f90",
+        "length": 91752
+      }
+    ],
     "ims": [
       {
         "file": "identities.json",
         "sha1_git": "d05d6c232ee2fc9aebe4ae5b778e311f5c16259a",
         "length": 34052
       }
+    ],
+    "memberEntitlementManagement": [
+      {
+        "file": "memberEntitlementManagement.json",
+        "sha1_git": "174b2a203cefa53820c2ca769b5e07b2ff8fc6eb",
+        "length": 95142
+      }
+    ],
+    "notification": [
+      {
+        "file": "notification.json",
+        "sha1_git": "803c1a8fe77b0b0954033039a7c9283eec55b6ca",
+        "length": 137047
+      }
+    ],
+    "operations": [
+      {
+        "file": "operations.json",
+        "sha1_git": "e1b95ea9c6db637a093fae2e2047437c964ae10d",
+        "length": 6273
+      }
+    ],
+    "permissionsReport": [
+      {
+        "file": "permissionsReport.json",
+        "sha1_git": "af39e4faa02669d41b13a70e5a0d1be8a657df8e",
+        "length": 12972
+      }
+    ],
+    "pipelines": [
+      {
+        "file": "pipelines.json",
+        "sha1_git": "eddcc056b3e5f8886a3bfd313e573bb5de9acbf5",
+        "length": 40024
+      }
+    ],
+    "policy": [
+      {
+        "file": "policy.json",
+        "sha1_git": "a7889097775296f2cfc948227c0e242877c50f1d",
+        "length": 38415
+      }
+    ],
+    "processadmin": [
+      {
+        "file": "workItemTrackingProcessTemplate.json",
+        "sha1_git": "b11265e2bb8a0d260b3ba80bccfc780b45149070",
+        "length": 17267
+      }
+    ],
+    "processes": [
+      {
+        "file": "workItemTrackingProcess.json",
+        "sha1_git": "91a023d83c18844e1e0b078dbb870b8a8e072f0a",
+        "length": 172977
+      }
+    ],
+    "release": [
+      {
+        "file": "release.json",
+        "sha1_git": "b2cddf6d2cff225d889dea753b4a080832733bca",
+        "length": 318227
+      }
+    ],
+    "search": [
+      {
+        "file": "search.json",
+        "sha1_git": "8d5835ad5218dae1e5b22b3a10486ea0e34bb4bd",
+        "length": 41091
+      }
+    ],
+    "security": [
+      {
+        "file": "security.json",
+        "sha1_git": "87ebe362eee37c496703ce90f8418deb7158339f",
+        "length": 35304
+      }
+    ],
+    "securityRoles": [
+      {
+        "file": "securityRoles.json",
+        "sha1_git": "16f3cec8768e3edd340800c42daef4fc7d9d4023",
+        "length": 21068
+      }
+    ],
+    "serviceEndpoint": [
+      {
+        "file": "serviceEndpoint.json",
+        "sha1_git": "c25115e4c21b18aa7c2720c7d3b30e88d852a75f",
+        "length": 88232
+      }
+    ],
+    "status": [
+      {
+        "file": "status.json",
+        "sha1_git": "52314696720c1ec5a4c3a3c376ec5591f1d09620",
+        "length": 17495
+      }
+    ],
+    "symbol": [
+      {
+        "file": "symbol.json",
+        "sha1_git": "2a1ad3151bad567e3226e0565604f7228e9784ed",
+        "length": 40715
+      }
+    ],
+    "test": [
+      {
+        "file": "test.json",
+        "sha1_git": "affc95b52f201bc609f8e6004b51001804735400",
+        "length": 382658
+      }
+    ],
+    "testPlan": [
+      {
+        "file": "testPlan.json",
+        "sha1_git": "2a0f24bb54f1c9a6e81a556b1fda7dd0c18f111d",
+        "length": 161367
+      }
+    ],
+    "testResults": [
+      {
+        "file": "testResults.json",
+        "sha1_git": "034b6d1e50da83bd3eddfc1e488d33f5b32be915",
+        "length": 336706
+      }
+    ],
+    "tfvc": [
+      {
+        "file": "tfvc.json",
+        "sha1_git": "86cbfb4c6bfebc74204ad26b5918fb872774a276",
+        "length": 110243
+      }
+    ],
+    "wiki": [
+      {
+        "file": "wiki.json",
+        "sha1_git": "7aba6fa47f7fa56cbce69356efe357ecc32c50ca",
+        "length": 86027
+      }
+    ],
+    "wit": [
+      {
+        "file": "workItemTracking.json",
+        "sha1_git": "5e85b5e62f84785ded34f9f15cb759bc68d9eab4",
+        "length": 311301
+      }
+    ],
+    "work": [
+      {
+        "file": "work.json",
+        "sha1_git": "cbe3af39bf8dbdcfa28d19dc1b74d917179ed6e1",
+        "length": 189348
+      }
     ]
   },
   "missing": {
+    "advancedSecurity": [
+      "7.2"
+    ],
+    "delegatedAuth": [
+      "7.2"
+    ],
     "environments": [
+      "7.2"
+    ],
+    "processDefinitions": [
+      "4.1",
+      "tfs-4.1"
+    ],
+    "resourceUsage": [
       "7.2"
     ]
   }

@@ -219,12 +219,21 @@ pub fn version_problem(version: &str, route: &Value) -> String {
     String::new()
 }
 
+/// Hosts whose route list nobody may read (401 even without a PAT). Their tools are reported, not failed;
+/// `read-test` calls them instead.
+const NO_ROUTE_LIST: &[&str] = &[
+    // The public service health page; it belongs to no organization.
+    "https://status.dev.azure.com",
+];
+
 #[derive(Debug, Default)]
 pub struct CheckResult {
     pub matched: usize,
     pub unmatched: Vec<String>,
     pub version: Vec<String>,
     pub unchecked: Vec<String>,
+    /// Tools on a host in `NO_ROUTE_LIST`.
+    pub no_route_list: Vec<String>,
     /// Base (org shown as `<org>`) -> number of routes, in the order first asked.
     pub bases: IndexMap<String, usize>,
     pub base_errors: IndexMap<String, String>,
@@ -245,6 +254,10 @@ pub fn check(
             let url = tool["tool_call_template"]["url"].as_str().unwrap_or("");
             let (base, segs, version) = split_tool_url(url, org);
             let shown_base = base.replace(org, "<org>");
+            if NO_ROUTE_LIST.contains(&base.as_str()) {
+                results.no_route_list.push(name);
+                continue;
+            }
             if !routes_by_base.contains_key(&base) {
                 match fetch(&base) {
                     Ok(routes) => {

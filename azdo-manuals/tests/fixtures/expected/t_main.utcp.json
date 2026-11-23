@@ -8,60 +8,6 @@
   },
   "tools": [
     {
-      "name": "alpha_list_widgets",
-      "description": "Lists widgets in a project.",
-      "tags": [
-        "azure-devops",
-        "alpha",
-        "widgets"
-      ],
-      "inputs": {
-        "type": "object",
-        "properties": {
-          "$top": {
-            "description": "Max results.",
-            "format": "int32",
-            "type": "integer"
-          },
-          "ids": {
-            "description": "Widget ids (comma-separated)",
-            "type": "string"
-          },
-          "kind": {
-            "enum": [
-              "round",
-              "square"
-            ],
-            "type": "string"
-          },
-          "project": {
-            "description": "Project ID or project name",
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "project"
-        ]
-      },
-      "outputs": {
-        "type": "object"
-      },
-      "tool_call_template": {
-        "call_template_type": "http",
-        "http_method": "GET",
-        "url": "https://dev.azure.com/contoso/{project}/_apis/alpha/widgets?api-version=7.1",
-        "headers": {
-          "Accept": "application/json"
-        },
-        "auth": {
-          "auth_type": "basic",
-          "username": "pat",
-          "password": "${AZURE_DEVOPS_EXT_PAT}"
-        }
-      }
-    },
-    {
       "name": "beta_list_widgets",
       "description": "Lists beta widgets.",
       "tags": [
@@ -300,6 +246,66 @@
       }
     },
     {
+      "name": "get_zip",
+      "description": "Archive: Get Zip",
+      "tags": [
+        "azure-devops",
+        "alpha",
+        "archive"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputs": {
+        "type": "object",
+        "description": "A file. utcp saves it (to the Downloads folder, or the path given with --out) and prints {\"type\": \"file\", \"path\", \"mime_type\", \"bytes\", \"filename\"}."
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "GET",
+        "url": "https://dev.azure.com/contoso/_apis/alpha/archive?api-version=7.1",
+        "headers": {
+          "Accept": "application/zip"
+        },
+        "response_type": "file",
+        "auth": {
+          "auth_type": "basic",
+          "username": "pat",
+          "password": "${AZURE_DEVOPS_EXT_PAT}"
+        }
+      }
+    },
+    {
+      "name": "list_pools",
+      "description": "Lists pools; only a manage scope allows it.",
+      "tags": [
+        "azure-devops",
+        "beta",
+        "pools"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputs": {
+        "type": "object"
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "GET",
+        "url": "https://vsbeta.dev.azure.com/contoso/_apis/beta/pools?api-version=7.1",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "auth": {
+          "auth_type": "basic",
+          "username": "pat",
+          "password": "${AZURE_DEVOPS_EXT_PAT}"
+        }
+      }
+    },
+    {
       "name": "list_threads",
       "description": "Lists threads; either scope works.",
       "tags": [
@@ -318,6 +324,60 @@
         "call_template_type": "http",
         "http_method": "GET",
         "url": "https://vsbeta.dev.azure.com/contoso/_apis/beta/threads?api-version=7.1",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "auth": {
+          "auth_type": "basic",
+          "username": "pat",
+          "password": "${AZURE_DEVOPS_EXT_PAT}"
+        }
+      }
+    },
+    {
+      "name": "list_widgets",
+      "description": "Lists widgets in a project.",
+      "tags": [
+        "azure-devops",
+        "alpha",
+        "widgets"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "$top": {
+            "description": "Max results.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "ids": {
+            "description": "Widget ids (comma-separated)",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "round",
+              "square"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "description": "Project ID or project name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "project"
+        ]
+      },
+      "outputs": {
+        "type": "object"
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "GET",
+        "url": "https://dev.azure.com/contoso/{project}/_apis/alpha/widgets?api-version=7.1",
         "headers": {
           "Accept": "application/json"
         },
@@ -439,6 +499,160 @@
           "Content-Type": "application/json"
         },
         "body_field": "body",
+        "auth": {
+          "auth_type": "basic",
+          "username": "pat",
+          "password": "${AZURE_DEVOPS_EXT_PAT}"
+        }
+      }
+    },
+    {
+      "name": "update_widget",
+      "description": "(untested) Updates a widget.",
+      "tags": [
+        "azure-devops",
+        "alpha",
+        "widgets",
+        "untested"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "array",
+            "description": "JSON Patch operations (RFC 6902), for example [{\"op\":\"add\",\"path\":\"/name\",\"value\":\"x\"}].",
+            "items": {
+              "type": "object",
+              "required": [
+                "op",
+                "path"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "add",
+                    "replace",
+                    "remove",
+                    "test",
+                    "copy",
+                    "move"
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string",
+                  "description": "Source path, for copy and move."
+                },
+                "value": {}
+              }
+            }
+          },
+          "project": {
+            "type": "string"
+          },
+          "widgetId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "project",
+          "widgetId"
+        ]
+      },
+      "outputs": {
+        "type": "object"
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "PATCH",
+        "url": "https://dev.azure.com/contoso/{project}/_apis/alpha/widgets/{widgetId}?api-version=7.1",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json-patch+json"
+        },
+        "body_field": "body",
+        "auth": {
+          "auth_type": "basic",
+          "username": "pat",
+          "password": "${AZURE_DEVOPS_EXT_PAT}"
+        }
+      }
+    },
+    {
+      "name": "upload_widget",
+      "description": "(untested) Widgets: Upload",
+      "tags": [
+        "azure-devops",
+        "alpha",
+        "widgets",
+        "untested"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "Content-Range": {
+            "type": "string"
+          },
+          "If-Match": {
+            "type": "string"
+          },
+          "body": {
+            "type": "object",
+            "description": "The file to upload: {\"file\": \"<path>\"}. utcp reads it and sends its bytes. A relative path is relative to your working folder. Add offset and length to send one part.",
+            "required": [
+              "file"
+            ],
+            "properties": {
+              "file": {
+                "type": "string",
+                "description": "Path of the file to upload."
+              },
+              "offset": {
+                "type": "integer",
+                "description": "Byte to start at (default 0)."
+              },
+              "length": {
+                "type": "integer",
+                "description": "Bytes to send (default: to the end)."
+              }
+            }
+          },
+          "project": {
+            "type": "string"
+          },
+          "widgetId": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "Content-Range",
+          "body",
+          "project",
+          "widgetId"
+        ]
+      },
+      "outputs": {
+        "type": "object"
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "PUT",
+        "url": "https://dev.azure.com/contoso/{project}/_apis/alpha/widgets/{widgetId}?api-version=7.1",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/octet-stream"
+        },
+        "body_field": "body",
+        "body_type": "file",
+        "header_fields": [
+          "Content-Range",
+          "If-Match"
+        ],
         "auth": {
           "auth_type": "basic",
           "username": "pat",

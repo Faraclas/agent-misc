@@ -1,4 +1,4 @@
-//! Hand-written request bodies for the writes in `Config::writes`.
+//! Hand-written request bodies for the writes in `Config::tested_writes`.
 //!
 //! The specs describe each write body with the full response type: 35 properties for a pull request, 45 for a build,
 //! most of them set by the service (dates, authors, links). An agent reading that schema cannot tell which fields it
@@ -261,6 +261,41 @@ fn build_update() -> Value {
     })
 }
 
+/// Body of every `application/json-patch+json` write without a body of its own here.
+pub fn json_patch_document() -> Value {
+    json!({
+        "type": "array",
+        "description": "JSON Patch operations (RFC 6902), for example [{\"op\":\"add\",\"path\":\"/name\",\
+                        \"value\":\"x\"}].",
+        "items": {
+            "type": "object",
+            "required": ["op", "path"],
+            "properties": {
+                "op": {"type": "string", "enum": ["add", "replace", "remove", "test", "copy", "move"]},
+                "path": {"type": "string"},
+                "from": {"type": "string", "description": "Source path, for copy and move."},
+                "value": {},
+            },
+        },
+    })
+}
+
+/// Body of every write whose body is a file (`"body_type": "file"` in the template): utcp reads the file the
+/// call names and sends its bytes.
+pub fn file_upload() -> Value {
+    json!({
+        "type": "object",
+        "description": "The file to upload: {\"file\": \"<path>\"}. utcp reads it and sends its bytes. A relative \
+                        path is relative to your working folder. Add offset and length to send one part.",
+        "required": ["file"],
+        "properties": {
+            "file": {"type": "string", "description": "Path of the file to upload."},
+            "offset": {"type": "integer", "description": "Byte to start at (default 0)."},
+            "length": {"type": "integer", "description": "Bytes to send (default: to the end)."},
+        },
+    })
+}
+
 /// area -> operationId -> body schema.
 pub fn real() -> HashMap<String, HashMap<String, Value>> {
     let area = |ops: Vec<(&str, Value)>| {
@@ -285,6 +320,7 @@ pub fn real() -> HashMap<String, HashMap<String, Value>> {
             area(vec![
                 ("Work Items_Create", json_patch(true)),
                 ("Work Items_Update", json_patch(false)),
+                ("Attachments_Create", file_upload()),
             ]),
         ),
         (

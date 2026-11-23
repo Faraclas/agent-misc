@@ -20,6 +20,8 @@ A fast, cross-platform (Linux & Windows), direct **Universal Tool Calling Protoc
   daemon keeps only the env vars registered manuals use), and contention-free opt-in activity logging.
 - **Secrets Stay Where You Keep Them:** manuals store `${VAR}` placeholders only; an optional secrets command prints
   the values from a shell file, `pass` or a keyring, so the daemon has them at login without copying them anywhere.
+- **Staging:** `utcp stage` adds a manual without agents seeing it; `diff`, `call --staged`, then `promote` (or
+  `discard`), and `rollback` to the version a promote replaced.
 - **Cross-Client Agent Skills (`utcp sync-ides`):** Renders platform-native skills across Zed, VS Code, Copilot CLI,
   Antigravity CLI (`agy`), Hermes, and workspace `.agents/skills/`: `utcp-tools` for calling tools (listing
   registered manuals, each with an optional few-word hint such as `context7 (library and framework docs)`) and
@@ -33,25 +35,29 @@ Install: `dev-util/utcp` from [`adaptive-overlay`](https://github.com/Faraclas/a
 Linux and Windows archives on the Releases page (tags `utcp-rs-v*`); see the
 [installation section](./utcp-rs/README.md#installation).
 
-Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.11`),
+Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.13`),
 [issue log](./utcp-rs/issues/README.md) (upstream `rs-utcp` bugs and Windows fixes),
 [contributor rules](./utcp-rs/AGENTS.md).
 
 ### [`azdo-manuals/`](./azdo-manuals/)
 
-A generator that turns Microsoft's Azure DevOps REST API specs (version 7.1) into six utcp HTTP manuals for one
-organization (repos and pull requests, work items, pipelines, tests, wiki and search, projects and users), so agents
-reach Azure DevOps through `utcp` instead of an MCP server.
+A generator that turns Microsoft's Azure DevOps REST API specs (version 7.1) into eight utcp HTTP manuals for one
+organization (repos and pull requests, work items and dashboards, pipelines, tests, wiki and search, projects and
+users, administration, Artifacts), so agents reach Azure DevOps through `utcp` instead of an MCP server.
 
 - **Verified source:** the specs' GitHub repository is gone, so they are downloaded on demand from the Software
   Heritage archive and checked against pinned git hashes. Nothing from Microsoft is stored in this repository.
-- **Least privilege:** all reads (GETs plus read-only queries and searches) and ten writes an agent needs for code
-  review and tracking (pull requests, comment threads, work items, builds), each tested live in a sandbox
-  organization; never DELETE; `--read-only` drops the writes. A scope report lists exactly the PAT scopes the
-  generated tools need.
-- **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
+- **The whole API, the PAT decides:** every area with a 7.1 description, all reads and writes (eleven writes tested
+  live in a sandbox organization, the others marked untested), and only the 19 deletes of small things; `--read-only`
+  drops the writes. `generate` prints what was left out and why, and the PAT permissions for every tool and for
+  reads only.
+- **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
+  what changes, `read-test` calls every read tool through utcp, and `utcp promote` makes them active.
+- **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows. Versions follow the REST
+  API: `7.1.x` for API 7.1.
 
-Docs: [README](./azdo-manuals/README.md), [contributor rules](./azdo-manuals/AGENTS.md).
+Docs: [README](./azdo-manuals/README.md), [operating guide](./azdo-manuals/docs/operating.md),
+[specification](./azdo-manuals/docs/azdo-manuals-spec.md), [contributor rules](./azdo-manuals/AGENTS.md).
 
 ## Contributing
 

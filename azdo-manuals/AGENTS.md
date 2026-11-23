@@ -8,11 +8,14 @@ A generator, written in Rust, that turns Microsoft's Azure DevOps REST API specs
 Heritage archive of the deleted `MicrosoftDocs/vsts-rest-api-specs` repository) into utcp HTTP manuals plus a PAT
 scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not part of the `utcp-rs` workspace.
 
-- `src/config.rs`: manual grouping and every inclusion decision. `src/bodies.rs`: hand-written write bodies.
+- `src/config.rs`: manual grouping and everything left out, with reasons. `src/bodies.rs`: bodies of the tested writes.
 - `src/generate.rs`: specs to manuals and report (no network).
 - `src/archive.rs`: archive client, hash-verified cache, `pins` discovery. `pins.json` is embedded at build time.
-- `src/routes.rs`, `src/readtest.rs`, `src/writetest.rs`: the live checks; `src/utcp.rs` runs utcp for them.
-- `src/cli.rs`: commands. `src/tests.rs`: the offline tests.
+- `src/routes.rs`, `src/readtest.rs`, `src/writetest.rs`: the live checks; `src/utcp.rs` runs utcp for them
+  (`read-test` and `generate --stage` use the user's real utcp; only `write-test` uses an isolated setup).
+- `src/cli.rs`: commands. `src/pat.rs`: scope ids as the New Token page names them. `src/tests.rs`: the offline tests.
+- `docs/operating.md` (for users: PAT, upgrades, test results, troubleshooting) and `docs/azdo-manuals-spec.md` (how
+  it works inside, file formats, decisions).
 
 ## Rules
 
@@ -22,18 +25,29 @@ scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not
 2. **Never vendor Microsoft's spec files.** They are downloaded on demand from the archive and verified by git blob
    hash against `pins.json`. Hand-made fixtures in `tests/fixtures/` are fine; copies of real spec files are not.
 3. **The archive allows 120 requests per hour** and refuses requests without an identifying User-Agent. A normal
-   `generate` costs one request per pinned file not yet cached (21 files). `pins` costs 3 plus 2 per area and
+   `generate` costs one request per pinned file not yet cached (46 files). `pins` costs 3 plus 2 per area and
    continues where it stopped. Do not add code paths that list folders on every run.
 4. **Changing what is generated** (`src/config.rs`, `src/generate.rs`): run the offline tests, rewrite the expected
    files with `UPDATE_EXPECTED=1 cargo test`, and review that diff before committing. Then regenerate the real
-   manuals and check them in utcp (`register`, `schema`, `call --dry-run`) in an isolated config (`UTCP_CONFIG_DIR`,
-   `UTCP_CACHE_DIR`, `UTCP_STATE_DIR` pointing at a scratch folder).
-5. **Writes** (`writes` in `src/config.rs`) are added only after they passed `write-test` in a sandbox organization
-   (a free personal organization, never the user's work organization). Each write gets a hand-written body in
-   `src/bodies.rs` (a test enforces this), and `write-test` gets a step that sends every field of that body and checks
-   the answer shows it; a write tool without a step is reported as not run. DELETE and HEAD are never generated.
-6. **Request-side fixes** borrowed from Microsoft's `vsts-api-patcher` (MIT) are credited in `NOTICE`.
-7. **HTTP behaves like utcp's.** This crate uses `ureq` (blocking, no async runtime) while utcp uses `reqwest` on
+   manuals and check them in utcp: `generate --stage`, `utcp diff` (what changes), `utcp schema --staged` and
+   `utcp call --staged --dry-run`, and `read-test`; `utcp promote` only once they are right (`utcp discard` otherwise).
+   Never point `UTCP_CONFIG_DIR` or `HOME` at a scratch folder to try manuals: stage them instead.
+5. **Coverage: everything, unless there is a stated reason.** Every area of the spec folder goes into a manual or into
+   `excluded_areas` with its reason (a test enforces this), and every operation of an included area becomes a tool
+   unless it cannot work or cannot be undone: HEAD, operations found broken
+   (`skip_gets`, with what the service answered), and DELETEs not listed in `deletes`. File answers and file uploads
+   are included (utcp saves and reads the files). Do not leave tools out to
+   limit what agents may do; the PAT's permissions do that, and `generate` prints them for every tool and for reads
+   only. `generate` prints every exclusion; keep its reasons short and true.
+6. **Writes:** all POST, PUT and PATCH operations are generated; those not in `tested_writes` start their description
+   with `(untested)` and carry the tag `untested`. A write moves to `tested_writes` only after it passed `write-test`
+   in a sandbox organization (a free personal organization, never the user's work organization); it then gets a
+   hand-written body in `src/bodies.rs` (a test enforces this) and a `write-test` step that sends every field of that
+   body and checks the answer shows it. A DELETE is added to `deletes` only when it removes something small an agent
+   added and may need to take back (a comment, a label, a tag), never a project, repository, pipeline, feed, package,
+   user or permission.
+7. **Request-side fixes** borrowed from Microsoft's `vsts-api-patcher` (MIT) are credited in `NOTICE`.
+8. **HTTP behaves like utcp's.** This crate uses `ureq` (blocking, no async runtime) while utcp uses `reqwest` on
    tokio; that is deliberate, a short-lived CLI does not need tokio. The two libraries have different defaults, so
    check network behavior against utcp's whenever `src/http.rs` or the `ureq` features change: trusted CAs come from
    the system store (`platform-verifier`, so a CA installed for TLS inspection works), proxies come from
@@ -43,13 +57,14 @@ scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not
 ## Testing
 
 - Offline (CI, `.github/workflows/azdo-manuals.yml`): `cargo fmt --check`,
-  `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary to
-  include the load test; CI uses the latest `utcp-rs` release on Linux and sets `REQUIRE_UTCP=1` so a missing binary
-  fails instead of skipping.
+  `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary
+  (0.2.0 or newer, for `stage`) to include the load test; CI uses the latest `utcp-rs` release on Linux and sets
+  `REQUIRE_UTCP=1` so a missing binary fails instead of skipping.
 - On a machine without the source tree (for example a Windows test machine), copy the compiled test binary with
   `tests/fixtures/` and set `AZDO_TEST_FIXTURES` to that copy.
 - Live checks against a real organization are run by hand: `check-routes` (every tool's URL against the
-  organization's route list) and `read-test` (every read tool called through utcp) are read-only. `write-test` (every
+  organization's route list) and `read-test` (every read tool called through the user's utcp, `--staged` for staged
+  manuals) are read-only. `write-test` (every tested
   write tool, in a throwaway project it creates and deletes) is for the sandbox organization only. Their output
   names the organization's data: keep it next to the generated manuals, never in the repository. When a live check
   shows the spec is wrong, fix it in `src/config.rs` (`required_params`, `skip_gets`) or `src/bodies.rs` with a
@@ -59,17 +74,23 @@ scope report. A standalone crate with its own `Cargo.toml` and `Cargo.lock`, not
 
 ## Lockstep docs
 
-Keep `README.md` (installation, usage, manual list, scope report), this file, and the repository root `README.md`
-index entry in step with the code in the same commit. Update the expected files in `tests/fixtures/expected/`
-whenever the output format changes. Keep `.github/workflows/azdo-manuals.yml` aligned with the files the release
-archives ship.
+Keep `README.md` (installation, usage, manual list, scope report), `docs/operating.md`, `docs/azdo-manuals-spec.md`,
+this file, and the repository root `README.md` index entry in step with the code in the same commit. Update the
+expected files in `tests/fixtures/expected/` whenever the output format changes. Keep
+`.github/workflows/azdo-manuals.yml` aligned with the files the release archives ship (the binary, `README.md`,
+`docs/operating.md`, `NOTICE`, `LICENSE`).
 
 ## Versioning and releases
 
 - `version` in `Cargo.toml` is the version of an `azdo-manuals` release and the only place it is set. It is also sent
-  in the archive User-Agent and reported by `azdo-manuals --version`. Any change to what a release ships needs a new
-  version before it is released (for example `0.1.0` -> `0.1.1`). Changing `pins.json` or `src/config.rs` changes the
-  generated manuals, so it needs a new version too.
+  in the archive User-Agent and reported by `azdo-manuals --version`.
+- **The version is the REST API version plus a counter:** `7.1.0`, `7.1.1`, ... for manuals of API 7.1
+  (`config::API_VERSION`; a test enforces that the version starts with it). Never let them drift: moving to API 7.2
+  means `7.2.0`. Several series may be maintained side by side later (for example a stable 7.1.x and a newer
+  7.2.x); CI does not support that yet, decide how when it is needed.
+- Any change to what a release ships needs a new version before it is released (for example `7.1.0` -> `7.1.1`).
+  Changing `pins.json` or `src/config.rs` changes the generated manuals, so it needs a new version too.
+- `generate --stage` needs utcp 0.2.0 or newer (`utcp stage`); keep the Gentoo ebuild's dependency in step.
 - **Releasing:** set the new `version`, build so `Cargo.lock` follows, commit and push to `main`. Then run the
   workflow on `main` with `release` ticked (`gh workflow run azdo-manuals.yml --ref main -f release=true`). CI reads
   the version from `Cargo.toml`, creates the tag `azdo-manuals-vX.Y.Z` and the GitHub Release; never tag by hand. It

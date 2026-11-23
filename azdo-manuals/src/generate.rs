@@ -16,7 +16,13 @@ use crate::config::Config;
 use crate::text::{compact_ascii, one_line, one_line_default, shown, snake, sorted_map, truthy};
 
 pub const PAT_VAR: &str = "AZURE_DEVOPS_EXT_PAT";
+/// Starts the description of a write that `write-test` does not cover.
+pub const UNTESTED: &str = "(untested)";
 const BINARY_TYPES: [&str; 3] = ["application/zip", "application/octet-stream", "image/"];
+/// The output of a tool that answers with a file.
+const FILE_ANSWER: &str =
+    "A file. utcp saves it (to the Downloads folder, or the path given with --out) and prints \
+                           {\"type\": \"file\", \"path\", \"mime_type\", \"bytes\", \"filename\"}.";
 const BODY_DEPTH: usize = 3;
 const DROP_BODY_PROPERTIES: [&str; 2] = ["_links", "url"];
 const HTTP_METHODS: [&str; 7] = ["get", "put", "post", "delete", "options", "head", "patch"];
@@ -326,6 +332,23 @@ fn build_url(
         let title = shown(spec.get("info").and_then(|i| i.get("title")));
         return err(format!("{title}: spec has no host"));
     }
+    // A parameterized host such as notification's `{service}dev.azure.com`: its optional parameters are left out,
+    // which gives the organization's own host.
+    let mut host = host.to_string();
+    if let Some(ph) = spec.get("x-ms-parameterized-host") {
+        for p in array_of(ph, "parameters") {
+            let name = str_of(p, "name");
+            if truthy(p.get("required")) {
+                return err(format!(
+                    "host parameter '{name}' is required; not supported"
+                ));
+            }
+            host = host.replace(&format!("{{{name}}}"), "");
+        }
+    }
+    if host.contains('{') {
+        return err(format!("host {host} has an unknown parameter"));
+    }
     let base_path = match str_of(spec, "basePath") {
         "" => "/",
         b => b,
@@ -342,6 +365,14 @@ fn build_url(
     Ok(format!("https://{host}{base}{path}?api-version={version}"))
 }
 
+/// A body sent as `application/json-patch+json`. The specs describe it as an object (`JsonPatchDocument`); the
+/// service takes an array of operations.
+fn is_json_patch(op: &Value) -> bool {
+    strings(op.get("consumes"))
+        .iter()
+        .any(|c| c == "application/json-patch+json")
+}
+
 fn produces(op: &Value) -> Vec<String> {
     let p = strings(op.get("produces"));
     if p.is_empty() {
@@ -351,10 +382,20 @@ fn produces(op: &Value) -> Vec<String> {
     }
 }
 
+/// An answer that is only a file or zip: utcp saves it and prints its path (`"response_type": "file"`).
 fn is_binary(op: &Value) -> bool {
     produces(op)
         .iter()
         .all(|t| BINARY_TYPES.iter().any(|b| t.starts_with(b)))
+}
+
+/// A body that is raw bytes (a file upload): utcp sends the file the call names (`"body_type": "file"`).
+fn uploads_file(op: &Value) -> bool {
+    let consumes = strings(op.get("consumes"));
+    !consumes.is_empty()
+        && consumes
+            .iter()
+            .all(|t| BINARY_TYPES.iter().any(|b| t.starts_with(b)))
 }
 
 fn in_list(map: &HashMap<String, Vec<String>>, area: &str, op_id: &str) -> bool {
@@ -362,25 +403,43 @@ fn in_list(map: &HashMap<String, Vec<String>>, area: &str, op_id: &str) -> bool 
         .is_some_and(|ops| ops.iter().any(|o| o == op_id))
 }
 
+/// GETs and the POSTs that only read.
+fn is_read_op(area: &str, method: &str, op_id: &str, conf: &Config) -> bool {
+    method == "get" || in_list(&conf.post_reads, area, op_id)
+}
+
 /// `None` to include the operation, or the reason it is left out.
 fn select(area: &str, method: &str, op: &Value, conf: &Config) -> Option<String> {
     let op_id = str_of(op, "operationId");
+    if ["head", "options"].contains(&method) {
+        return Some(format!("{} never included", method.to_uppercase()));
+    }
     if method == "get" {
         if let Some(reason) = conf.skip_gets.get(area).and_then(|m| m.get(op_id)) {
             return Some(format!("skipped: {reason}"));
         }
-        if is_binary(op) {
-            return Some("binary response".into());
-        }
+    }
+    if is_read_op(area, method, op_id, conf) {
         return None;
     }
-    if ["delete", "head", "options"].contains(&method) {
-        return Some(format!("{} never included", method.to_uppercase()));
+    if conf.read_only {
+        return Some("write (--read-only)".into());
     }
-    if in_list(&conf.post_reads, area, op_id) || in_list(&conf.writes, area, op_id) {
-        return None;
+    if method == "delete" && !in_list(&conf.deletes, area, op_id) {
+        return Some("DELETE not selected".into());
     }
-    Some("write not selected".into())
+    None
+}
+
+/// The HTTP header a header parameter really is, when the spec names the parameter differently (as Microsoft's
+/// client libraries map them).
+pub fn real_header_name(param: &str) -> Option<&'static str> {
+    match param {
+        "Version" => Some("If-Match"),
+        "contentRangeHeader" => Some("Content-Range"),
+        "continuationToken" => Some("x-ms-continuationtoken"),
+        _ => None,
+    }
 }
 
 /// One generated tool before naming.
@@ -390,6 +449,8 @@ pub struct Entry {
     pub operation_id: String,
     pub method_name: Option<String>,
     pub scopes: Vec<String>,
+    /// A GET or a POST that only reads.
+    pub read: bool,
     pub name: String,
     pub tool: Map<String, Value>,
 }
@@ -453,11 +514,18 @@ fn build_tool(
                             "{area}/{op_id}: body_overrides entry is not an object"
                         ))
                     }
+                    None if uploads_file(op) => match crate::bodies::file_upload() {
+                        Value::Object(s) => s,
+                        _ => unreachable!("a JSON object"),
+                    },
+                    None if is_json_patch(op) => match crate::bodies::json_patch_document() {
+                        Value::Object(s) => s,
+                        _ => unreachable!("a JSON object"),
+                    },
                     None => body_schema(spec, p.get("schema").unwrap_or(&json!({})), 0, &[])?,
                 };
-                if truthy(p.get("description"))
-                    && !(replaced.is_some() && schema.contains_key("description"))
-                {
+                let ours = replaced.is_some() || is_json_patch(op) || uploads_file(op);
+                if truthy(p.get("description")) && !(ours && schema.contains_key("description")) {
                     schema.insert(
                         "description".into(),
                         json!(one_line_default(str_of(p, "description"))),
@@ -469,14 +537,20 @@ fn build_tool(
                 }
             }
             Some(w @ ("path" | "query" | "header")) => {
-                let n = name.unwrap_or("").to_string();
+                let mut n = name.unwrap_or("").to_string();
                 if n == "body" {
                     return err(format!(
                         "{op_id}: a {w} parameter named 'body' clashes with the body field"
                     ));
                 }
+                // utcp sends a header field under its own name, so it has to be the real header's.
+                let real_header = (w == "header").then(|| real_header_name(&n)).flatten();
+                if let Some(real) = real_header {
+                    n = real.to_string();
+                }
                 props.insert(n.clone(), param_schema(p));
-                if w == "path" || truthy(p.get("required")) {
+                // A create has no version to match yet, so If-Match is never required.
+                if w == "path" || (truthy(p.get("required")) && n != "If-Match") {
                     required.push(n.clone());
                 }
                 if w == "header" {
@@ -528,12 +602,22 @@ fn build_tool(
     template.insert("headers".into(), Value::Object(headers));
     if body_field {
         template.insert("body_field".into(), json!("body"));
+        if uploads_file(op) {
+            template.insert("body_type".into(), json!("file"));
+        }
+    }
+    if is_binary(op) {
+        template.insert("response_type".into(), json!("file"));
     }
     if !header_fields.is_empty() {
         header_fields.sort();
         template.insert("header_fields".into(), json!(header_fields));
     }
-    template.insert("auth".into(), auth());
+    // Only the organization's own APIs get the PAT. An operation outside any organization (the public service health
+    // page) answers 401 to a PAT that is limited to one, and must not be sent it anyway.
+    if o.path.contains("{organization}") {
+        template.insert("auth".into(), auth());
+    }
     let mut inputs = Map::new();
     inputs.insert("type".into(), json!("object"));
     inputs.insert("properties".into(), Value::Object(sorted_map(props)));
@@ -558,17 +642,23 @@ fn build_tool(
     if !tag.is_empty() {
         tags.push(json!(snake(tag)));
     }
+    if !is_read_op(area, o.method, op_id, conf) && !in_list(&conf.tested_writes, area, op_id) {
+        description = format!("{UNTESTED} {description}");
+        tags.push(json!("untested"));
+    }
     let mut tool = Map::new();
     tool.insert("name".into(), Value::Null);
     tool.insert("description".into(), json!(description));
     tool.insert("tags".into(), Value::Array(tags));
     tool.insert("inputs".into(), Value::Object(inputs));
-    let output_type = if accept.starts_with("text/") {
-        "string"
+    let outputs = if is_binary(op) {
+        json!({"type": "object", "description": FILE_ANSWER})
+    } else if accept.starts_with("text/") {
+        json!({"type": "string"})
     } else {
-        "object"
+        json!({"type": "object"})
     };
-    tool.insert("outputs".into(), json!({"type": output_type}));
+    tool.insert("outputs".into(), outputs);
     tool.insert("tool_call_template".into(), Value::Object(template));
     let method_name = op
         .get("x-ms-vss-method")
@@ -579,6 +669,7 @@ fn build_tool(
         operation_id: op_id.to_string(),
         method_name: method_name.map(String::from),
         scopes: scopes_of(spec, op),
+        read: is_read_op(area, o.method, op_id, conf),
         name: String::new(),
         tool,
     })
@@ -621,7 +712,10 @@ pub fn base_name(op_id: &str) -> String {
 }
 
 /// Name tools after Microsoft's client method (`x-ms-vss-method`, e.g. GetTeamDaysOff -> get_team_days_off), else
-/// after the operationId. On a clash, prefix the area; `names` in the config overrides either.
+/// after the operationId. On a clash, the tool of the manual's first area keeps the name (when that area has only
+/// one of them), so azdo_git's get_branches is git's, not tfvc's. Of the others, a tool whose area has no other tool
+/// of that name gets the area as prefix, the rest the operation's group, the operationId before `_`
+/// (NuGet_Get... -> nuget_get...). `names` in the config overrides any of these.
 pub fn assign_names(manual: &str, entries: &mut [Entry], conf: &Config) -> Result<()> {
     let overridden = |e: &Entry| {
         conf.names
@@ -630,23 +724,61 @@ pub fn assign_names(manual: &str, entries: &mut [Entry], conf: &Config) -> Resul
             .filter(|n| !n.is_empty())
             .cloned()
     };
+    let has_override = |e: &Entry| {
+        conf.names
+            .get(&e.area)
+            .is_some_and(|m| m.contains_key(&e.operation_id))
+    };
     for e in entries.iter_mut() {
         e.name = overridden(e).unwrap_or_else(|| match &e.method_name {
             Some(m) => snake(m),
             None => base_name(&e.operation_id),
         });
     }
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for e in entries.iter() {
-        *counts.entry(e.name.clone()).or_default() += 1;
+    let base: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+    let area_order: Vec<String> = conf
+        .manuals
+        .iter()
+        .find(|m| m.name == manual)
+        .map(|m| m.areas.clone())
+        .unwrap_or_default();
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, name) in base.iter().enumerate() {
+        groups.entry(name.clone()).or_default().push(i);
     }
-    for e in entries.iter_mut() {
-        let has_override = conf
-            .names
-            .get(&e.area)
-            .is_some_and(|m| m.contains_key(&e.operation_id));
-        if counts[&e.name] > 1 && !has_override {
-            e.name = format!("{}_{}", snake(&e.area), e.name);
+    for members in groups.values().filter(|m| m.len() > 1) {
+        let per_area = |i: usize| {
+            members
+                .iter()
+                .filter(|&&j| entries[j].area == entries[i].area)
+                .count()
+        };
+        let rank = |i: usize| {
+            area_order
+                .iter()
+                .position(|a| *a == entries[i].area)
+                .unwrap_or(usize::MAX)
+        };
+        let first = members.iter().copied().min_by_key(|&i| rank(i));
+        let keeps = first.filter(|&i| per_area(i) == 1);
+        let prefixed: Vec<(usize, String)> = members
+            .iter()
+            .filter(|&&i| !has_override(&entries[i]) && Some(i) != keeps)
+            .map(|&i| {
+                let e = &entries[i];
+                let prefix = if per_area(i) > 1 {
+                    let group = e.operation_id.split('_').next().unwrap_or("");
+                    let words: Vec<String> =
+                        group.split_whitespace().map(str::to_lowercase).collect();
+                    words.join("_")
+                } else {
+                    snake(&e.area)
+                };
+                (i, format!("{prefix}_{}", base[i]))
+            })
+            .collect();
+        for (i, name) in prefixed {
+            entries[i].name = name;
         }
     }
     let mut seen: HashMap<String, String> = HashMap::new();
@@ -705,9 +837,12 @@ pub fn covering_scopes(scope_sets: &[Vec<String>]) -> Vec<String> {
     chosen.into_iter().collect()
 }
 
-/// Drop a scope when a broader one of the same family is also needed (vso.work_write covers vso.work).
+/// Drop a scope when a broader one of the same family is also needed (vso.work_write covers vso.work,
+/// vso.taskgroups_manage covers vso.taskgroups_read, vso.serviceendpoint_manage covers vso.serviceendpoint_query).
 pub fn minimal_scopes(scopes: &BTreeSet<String>) -> Vec<String> {
-    let order = ["", "_write", "_execute", "_manage", "_full"];
+    let order = [
+        "", "_read", "_use", "_query", "_write", "_execute", "_manage", "_full",
+    ];
     let split = |s: &str| -> (String, usize) {
         for (rank, suffix) in order.iter().enumerate().skip(1).rev() {
             if let Some(family) = s.strip_suffix(suffix) {
@@ -765,6 +900,30 @@ fn check_config_names(specs: &Specs, conf: &Config) -> Result<()> {
     Ok(())
 }
 
+/// utcp refuses a manual hint longer than this (`MAX_MANUAL_HINT_CHARS` in utcp-core).
+const UTCP_MAX_HINT_CHARS: usize = 60;
+
+/// The manuals' hints with `, org <org>` added, so an agent reading the skill knows which organization the tools
+/// reach (the org is fixed in every URL; no tool takes it as a parameter). When one of them would pass utcp's limit
+/// (a long organization name), every manual keeps its plain hint, so the manuals of one org always look alike.
+pub fn manual_hints(conf: &Config, org: &str) -> HashMap<String, String> {
+    let with_org: HashMap<String, String> = conf
+        .manuals
+        .iter()
+        .map(|m| (m.name.clone(), format!("{}, org {org}", m.hint)))
+        .collect();
+    if with_org
+        .values()
+        .all(|h| h.chars().count() <= UTCP_MAX_HINT_CHARS)
+    {
+        return with_org;
+    }
+    conf.manuals
+        .iter()
+        .map(|m| (m.name.clone(), m.hint.clone()))
+        .collect()
+}
+
 /// Returns ({manual name: manual}, report).
 pub fn generate(
     specs: &Specs,
@@ -779,12 +938,14 @@ pub fn generate(
         ));
     }
     check_config_names(specs, conf)?;
+    let hints = manual_hints(conf, org);
     let mut manuals = IndexMap::new();
     let mut report_manuals = Map::new();
     let mut left_out = Vec::new();
     let descriptions = scope_info(specs);
     let mut all_scopes: BTreeSet<String> = BTreeSet::new();
     let mut all_scope_sets: Vec<Vec<String>> = Vec::new();
+    let mut read_scope_sets: Vec<Vec<String>> = Vec::new();
     for mconf in &conf.manuals {
         let mut entries = Vec::new();
         for area in &mconf.areas {
@@ -801,13 +962,11 @@ pub fn generate(
                     let entry = build_tool(spec, area, &o, org, api_version, conf)?;
                     let write_only: Vec<&String> =
                         entry.scopes.iter().filter(|s| is_write_scope(s)).collect();
-                    let is_write = in_list(&conf.writes, area, &entry.operation_id);
-                    if !entry.scopes.is_empty()
+                    // Some reads accept only a write-level scope (there is no read scope for deployment groups,
+                    // for example). A read-only PAT cannot use them.
+                    if conf.read_only
+                        && !entry.scopes.is_empty()
                         && write_only.len() == entry.scopes.len()
-                        && !is_write
-                        && !write_only
-                            .iter()
-                            .any(|s| conf.allow_write_scopes.contains(*s))
                     {
                         let names: Vec<&str> = write_only.iter().map(|s| s.as_str()).collect();
                         left_out.push(leave_out(format!(
@@ -827,9 +986,18 @@ pub fn generate(
         assign_names(&mconf.name, &mut entries, conf)?;
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let scope_sets: Vec<Vec<String>> = entries.iter().map(|e| e.scopes.clone()).collect();
-        let scopes = covering_scopes(&scope_sets);
+        // Per manual, too, only the broadest level of each permission (Code: Read, write, & manage, not also
+        // Code: Read and Code: Read & write).
+        let scopes = minimal_scopes(&covering_scopes(&scope_sets).into_iter().collect());
         all_scopes.extend(scope_sets.iter().flatten().cloned());
         all_scope_sets.extend(scope_sets);
+        // The scopes a read-only PAT needs: those of the reads that a read scope allows.
+        read_scope_sets.extend(
+            entries
+                .iter()
+                .filter(|e| e.read && !e.scopes.iter().all(|s| is_write_scope(s)))
+                .map(|e| e.scopes.clone()),
+        );
         let missing: Vec<&String> = mconf
             .areas
             .iter()
@@ -850,16 +1018,15 @@ pub fn generate(
             "tools": entries.iter().map(|e| Value::Object(e.tool.clone())).collect::<Vec<_>>(),
         });
         let text = compact_ascii(&manual);
-        let reads = entries
+        let reads = entries.iter().filter(|e| e.read).count();
+        let writes = entries.len() - reads;
+        let untested = entries
             .iter()
             .filter(|e| {
-                e.tool["tool_call_template"]["http_method"] == "GET"
-                    || in_list(&conf.post_reads, &e.area, &e.operation_id)
+                e.tool["tags"]
+                    .as_array()
+                    .is_some_and(|t| t.contains(&json!("untested")))
             })
-            .count();
-        let writes = entries
-            .iter()
-            .filter(|e| in_list(&conf.writes, &e.area, &e.operation_id))
             .count();
         let mut without_scope: Vec<&String> = entries
             .iter()
@@ -870,12 +1037,13 @@ pub fn generate(
         report_manuals.insert(
             mconf.name.clone(),
             json!({
-                "hint": mconf.hint,
+                "hint": hints[&mconf.name],
                 "areas": mconf.areas,
                 "areas_without_spec": missing,
                 "tools": entries.len(),
                 "reads": reads,
                 "writes": writes,
+                "untested_writes": untested,
                 "bytes": text.len(),
                 "approx_tokens": text.len() / 4,
                 "scopes": scopes,
@@ -884,20 +1052,32 @@ pub fn generate(
         );
         manuals.insert(mconf.name.clone(), manual);
     }
+    let described = |scopes: Vec<String>| -> Vec<Value> {
+        scopes
+            .into_iter()
+            .map(|s| {
+                let description = descriptions.get(&s).cloned().unwrap_or_default();
+                json!({"scope": s, "description": description})
+            })
+            .collect()
+    };
     let needed: BTreeSet<String> = covering_scopes(&all_scope_sets).into_iter().collect();
-    let scopes: Vec<Value> = minimal_scopes(&needed)
-        .into_iter()
-        .map(|s| {
-            let description = descriptions.get(&s).cloned().unwrap_or_default();
-            json!({"scope": s, "description": description})
-        })
+    let scopes = described(minimal_scopes(&needed));
+    let needed: BTreeSet<String> = covering_scopes(&read_scope_sets).into_iter().collect();
+    let read_scopes = described(minimal_scopes(&needed));
+    let excluded: Vec<Value> = conf
+        .excluded_areas
+        .iter()
+        .map(|(area, reason)| json!({"area": area, "reason": reason}))
         .collect();
     let report = json!({
         "api_version": api_version,
         "source": source,
         "manuals": report_manuals,
+        "excluded_areas": excluded,
         "left_out": left_out,
         "scopes": scopes,
+        "read_scopes": read_scopes,
         "scopes_all": all_scopes,
     });
     Ok((manuals, report))

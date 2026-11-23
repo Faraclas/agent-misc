@@ -298,6 +298,8 @@ pub fn discover_pins(
             }
         }
     }
+    // Every area of the spec folder, so a test can require each to be in a manual or excluded with a reason.
+    result["archive_areas"] = json!(area_dirs.keys().collect::<Vec<_>>());
     for area in todo {
         let Some(dir) = area_dirs.get(area) else {
             return Err(ArchiveError(format!(

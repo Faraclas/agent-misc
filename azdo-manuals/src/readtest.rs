@@ -1,17 +1,17 @@
-//! Live read test: call every read tool of the generated manuals through a real utcp, chaining IDs.
+//! Live read test: call every read tool of the generated manuals through the user's utcp, chaining IDs.
 //!
-//! Each call goes through `utcp call` with the manuals registered in a throwaway config, so it tests exactly what
-//! agents use. Path parameters are filled from earlier responses: a tool `.../pullrequests/{pullRequestId}` takes
-//! the id of the first item the list tool `.../pullrequests` returned. `project` (and `team`) come from the command
-//! line, `--seed` sets any other parameter by name. Tools whose parameters cannot be filled are reported as not
-//! exercised.
+//! Each call goes through `utcp call` exactly as agents make it (the daemon when it runs, with the secrets utcp
+//! already has), with `--staged` for manuals that are staged, so the staged manuals can be checked before they are
+//! promoted. The tool definitions come from the generated files: path parameters are filled from earlier responses,
+//! so a tool `.../pullrequests/{pullRequestId}` takes the id of the first item the list tool `.../pullrequests`
+//! returned. `project` (and `team`) come from the command line, `--seed` sets any other parameter by name. Tools whose
+//! parameters cannot be filled are reported as not exercised.
 //!
 //! Only GETs run, plus the read-only POSTs that have a sample body below. Printed output holds tool names, HTTP
 //! status codes and sizes only; the details file (written next to the manuals, which are private anyway) also holds
 //! the values used, since they come from the organization.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -69,8 +69,9 @@ static POST_BODIES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
 });
 
 /// Where values that cannot be chained by URL come from: `tool.param` (one tool) or `param` (any tool). A value is
-/// a literal, `@tool:dotted.path` (from that tool's first successful response), `@seed:name` (a
-/// --project/--team/--seed value), or a string with `{@tool:path}` parts.
+/// a literal, `@tool:dotted.path` (from that tool's first successful response; a `[key=value]` part picks the first
+/// list item whose `key` is `value`), `@seed:name` (a --project/--team/--seed value), or a string with
+/// `{@tool:path}` parts.
 static SOURCES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
     let strings: &[(&str, &str)] = &[
         ("team", "@get_project:defaultTeam.name"),
@@ -100,7 +101,8 @@ static SOURCES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
         ("timelineId", "@get_build:orchestrationPlan.planId"),
         ("definition", "@get_definitions:value.0.id"),
         ("get_definition_tags.definitionId", "@get_definitions:value.0.id"),
-        ("fromBuildId", "@get_builds:value.1.id"),
+        // Both builds must be of the same pipeline; the newest build twice always is.
+        ("fromBuildId", "@get_builds:value.0.id"),
         ("toBuildId", "@get_builds:value.0.id"),
         ("build_get_folders.path", "\\"),
         ("release_get_folders.path", "\\"),
@@ -128,6 +130,9 @@ static SOURCES: LazyLock<IndexMap<&'static str, Value>> = LazyLock::new(|| {
         ("releaseEnvId", "@get_release:environments.0.id"),
         ("planId", "@get_test_plans:value.0.id"),
         ("get_work_item_columns.iterationId", "@get_team_iterations:value.0.id"),
+        // The built-in processes refuse layout reads ("work item types are locked"); inherited ones answer.
+        ("get_form_layout.processId", "@get_list_of_processes:value.[customizationType=inherited].typeId"),
+        ("get_system_controls.processId", "@get_list_of_processes:value.[customizationType=inherited].typeId"),
         ("get_iteration_chart_image.iterationId", "@get_team_iterations:value.0.id"),
     ];
     strings
@@ -190,7 +195,17 @@ pub fn value_for(param: &str, item: Option<&Value>) -> Option<Value> {
     for k in item.keys() {
         lowered.insert(k.to_lowercase(), k);
     }
-    for key in std::iter::once(param).chain(ID_KEYS) {
+    // Some resources are addressed by another key than their id or name: a process by its `typeId`, a work item
+    // type, behavior or field by its `referenceName` (`witRefName`, `behaviorRefName`).
+    let lower = param.to_lowercase();
+    let preferred = if lower.ends_with("refname") {
+        Some("referenceName")
+    } else if lower.starts_with("process") {
+        Some("typeId")
+    } else {
+        None
+    };
+    for key in std::iter::once(param).chain(preferred).chain(ID_KEYS) {
         if let Some(original) = lowered.get(&key.to_lowercase()) {
             let v = &item[original.as_str()];
             if usable_id(v) {
@@ -209,7 +224,16 @@ fn dig(data: &Value, path: &str) -> Result<Value, Unresolved> {
     let mut node = data;
     if !path.is_empty() {
         for part in path.split('.') {
+            let filter = part
+                .strip_prefix('[')
+                .and_then(|p| p.strip_suffix(']'))
+                .and_then(|p| p.split_once('='));
             let next = match node {
+                // `[key=value]`: the first item whose `key` is the string `value`.
+                Value::Array(a) if filter.is_some() => {
+                    let (key, want) = filter.expect("checked");
+                    a.iter().find(|item| item[key].as_str() == Some(want))
+                }
                 Value::Array(a) if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) => {
                     part.parse::<usize>().ok().and_then(|i| a.get(i))
                 }
@@ -279,6 +303,8 @@ pub fn is_read(tool: &Value) -> bool {
 pub struct ReadTest {
     utcp: Utcp,
     manuals: IndexMap<String, Value>,
+    /// The manuals called with `--staged`.
+    staged: BTreeSet<String>,
     /// normalized list-URL template -> first item of its response
     pub items: HashMap<String, Value>,
     /// tool name -> first successful response; "seed" -> the seeds
@@ -290,19 +316,21 @@ pub struct ReadTest {
 
 impl ReadTest {
     pub fn new(
-        utcp: PathBuf,
+        utcp: Utcp,
         manuals: IndexMap<String, Value>,
+        staged: BTreeSet<String>,
         seeds: Map<String, Value>,
-    ) -> std::io::Result<Self> {
-        Ok(ReadTest {
-            utcp: Utcp::new(utcp, "azdo-readtest-")?,
+    ) -> Self {
+        ReadTest {
+            utcp,
             manuals,
+            staged,
             items: HashMap::new(),
             responses: HashMap::from([("seed".to_string(), Value::Object(seeds))]),
             results: Map::new(),
             delay: Duration::from_millis(100),
             log: Box::new(|line| println!("{line}")),
-        })
+        }
     }
 
     fn seeds(&self) -> &Map<String, Value> {
@@ -315,10 +343,6 @@ impl ReadTest {
         if let Some(Value::Object(seeds)) = self.responses.get_mut("seed") {
             seeds.insert(name.to_string(), value);
         }
-    }
-
-    pub fn register(&self, folder: &Path) -> Result<(), String> {
-        self.utcp.register(folder, self.manuals.keys())
     }
 
     /// A value for `param` from the seeds or SOURCES; `Ok(None)` when there is no rule. With `general = false` only
@@ -435,10 +459,21 @@ impl ReadTest {
         tool: &Value,
         args: &Map<String, Value>,
     ) -> (Map<String, Value>, Option<Value>) {
-        let called = self
-            .utcp
-            .call(manual, tool["name"].as_str().unwrap_or(""), args);
-        (called.result, called.data)
+        let name = tool["name"].as_str().unwrap_or("");
+        let staged = self.staged.contains(manual);
+        if tool["tool_call_template"]["response_type"] != "file" {
+            let called = self.utcp.call(manual, name, args, staged);
+            return (called.result, called.data);
+        }
+        // A file answer goes to a temporary file (not the user's Downloads folder) and is deleted once it is
+        // counted; it has no ids for other tools.
+        let out = std::env::temp_dir().join(format!(
+            "azdo-manuals-readtest-{}-{manual}.{name}",
+            std::process::id()
+        ));
+        let called = self.utcp.call_to(manual, name, args, staged, Some(&out));
+        let _ = std::fs::remove_file(&out);
+        (called.result, None)
     }
 
     pub fn run(&mut self) -> Map<String, Value> {

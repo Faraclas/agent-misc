@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod generate;
 pub mod http;
+pub mod pat;
 pub mod readtest;
 pub mod routes;
 pub mod text;

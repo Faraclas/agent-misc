@@ -55,7 +55,7 @@ jobs:
             printf '### Release refused\n\n%s\n\nNothing was built or published.\n' "$1" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           }
-          how="To release your changes, raise version in azdo-manuals/Cargo.toml (for example 0.1.0 -> 0.1.1),"
+          how="To release your changes, raise version in azdo-manuals/Cargo.toml (for example 7.1.0 -> 7.1.1),"
           how="$how push it to main, then run the release again."
           [ "$GITHUB_REF" = "refs/heads/main" ] ||
             refuse "Releases are made from main only, and this run is on ${GITHUB_REF#refs/heads/}. Run it on main."
@@ -114,7 +114,7 @@ jobs:
           workspaces: azdo-manuals
           key: ${{ matrix.target }}
 
-      # The load test registers the expected manuals in a throwaway utcp, using the latest utcp-rs release.
+      # The load test stages the expected manuals in a throwaway utcp, using the latest utcp-rs release (0.2.0+).
       - name: Download the latest utcp release (Linux)
         if: matrix.test && runner.os == 'Linux'
         env:
@@ -160,8 +160,8 @@ jobs:
           file dist/azdo-manuals
           file dist/azdo-manuals | grep -q 'static' || { echo "azdo-manuals is not statically linked"; exit 1; }
           ./dist/azdo-manuals --version
-          cp README.md NOTICE ../LICENSE dist/
-          tar -C dist -czf ${{ matrix.archive }} azdo-manuals README.md NOTICE LICENSE
+          cp README.md docs/operating.md NOTICE ../LICENSE dist/
+          tar -C dist -czf ${{ matrix.archive }} azdo-manuals README.md operating.md NOTICE LICENSE
 
       - name: Package Windows release archive
         if: matrix.archive && runner.os == 'Windows'
@@ -172,9 +172,9 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\azdo-manuals.exe" "dist\azdo-manuals.exe"
           & ".\dist\azdo-manuals.exe" --version
           if ($LASTEXITCODE) { throw 'azdo-manuals.exe --version failed' }
-          Copy-Item "README.md", "NOTICE", "..\LICENSE" "dist\"
-          Compress-Archive -Path "dist\azdo-manuals.exe", "dist\README.md", "dist\NOTICE", "dist\LICENSE" `
-            -DestinationPath "${{ matrix.archive }}"
+          Copy-Item "README.md", "docs\operating.md", "NOTICE", "..\LICENSE" "dist\"
+          Compress-Archive -Path "dist\azdo-manuals.exe", "dist\README.md", "dist\operating.md", "dist\NOTICE", `
+            "dist\LICENSE" -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload build artifact
         if: matrix.archive

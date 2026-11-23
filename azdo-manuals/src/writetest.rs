@@ -1,4 +1,5 @@
-//! Live write test: call every write tool of the generated manuals through a real utcp, in a throwaway project.
+//! Live write test: call every tested write tool of the generated manuals through a real utcp, in a throwaway project.
+//! The writes tagged `untested` are the ones it has no step for.
 //!
 //! For a sandbox organization only. A run deletes any project left over by an earlier run (name starting with
 //! `azdo-manuals-test-`), creates `azdo-manuals-test-<UTC time>` with a repository, two branches and a YAML pipeline
@@ -124,7 +125,7 @@ impl WriteTest {
         pat: &str,
     ) -> std::io::Result<Self> {
         Ok(WriteTest {
-            utcp: Utcp::new(utcp, "azdo-writetest-")?,
+            utcp: Utcp::isolated(utcp, "azdo-writetest-")?,
             manuals,
             transport,
             base: format!("https://dev.azure.com/{org}"),
@@ -233,7 +234,7 @@ impl WriteTest {
             Value::Object(o) => o,
             _ => Map::new(),
         };
-        let called = self.utcp.call(manual, tool, &args);
+        let called = self.utcp.call(manual, tool, &args, false);
         let mut result = called.result.clone();
         result.insert("tool".into(), json!(format!("{manual}.{tool}")));
         result.insert("args".into(), Value::Object(args));
@@ -265,7 +266,7 @@ impl WriteTest {
             Value::Object(o) => o,
             _ => Map::new(),
         };
-        let called = self.utcp.call(manual, tool, &args);
+        let called = self.utcp.call(manual, tool, &args, false);
         let got = called.status().to_string();
         let mut result = called.result;
         result.insert("tool".into(), json!(format!("{manual}.{tool}")));
@@ -511,6 +512,71 @@ impl WriteTest {
             ]}),
         );
         Some(id)
+    }
+
+    /// A file goes up as a work item attachment and comes back byte for byte: the calling utcp reads the file to send
+    /// and writes the file it gets.
+    fn attachments(&mut self, f: &Fixture) {
+        let m = "azdo_work";
+        let fail = |this: &mut Self, label: &str, error: String| {
+            this.record(label.into(), json!({"status": "error", "error": error}));
+        };
+        let dir = match tempfile::Builder::new()
+            .prefix("azdo-writetest-files-")
+            .tempdir()
+        {
+            Ok(dir) => dir,
+            Err(e) => return fail(self, "attachments", format!("no temporary folder: {e}")),
+        };
+        let sent: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let up = dir.path().join("write-test.bin");
+        if let Err(e) = std::fs::write(&up, &sent) {
+            return fail(
+                self,
+                "attachments",
+                format!("cannot write {}: {e}", up.display()),
+            );
+        }
+        let Some(attachment) = self.write(
+            m,
+            "create_attachment",
+            "upload a 300 KB file",
+            json!({"project": f.project, "fileName": "write-test.bin",
+                   "body": {"file": up.to_string_lossy()}}),
+            &[],
+        ) else {
+            return;
+        };
+        let label = "azdo_work.get_attachment [the uploaded file comes back unchanged]";
+        let Some(id) = str_at(&attachment, "id") else {
+            return fail(
+                self,
+                label,
+                "create_attachment answered without an id".into(),
+            );
+        };
+        let back = dir.path().join("back.bin");
+        let args = match json!({"project": f.project, "id": id, "download": true}) {
+            Value::Object(o) => o,
+            _ => unreachable!("a JSON object"),
+        };
+        let called = self
+            .utcp
+            .call_to(m, "get_attachment", &args, false, Some(&back));
+        let mut result = called.result.clone();
+        result.insert("tool".into(), json!("azdo_work.get_attachment"));
+        result.insert("args".into(), Value::Object(args));
+        if called.status() == "ok" {
+            let got = std::fs::read(&back).unwrap_or_default();
+            if got != sent {
+                result.insert("status".into(), json!("mismatch"));
+                result.insert(
+                    "mismatches".into(),
+                    json!({"bytes": got.len(), "same_bytes": false}),
+                );
+            }
+        }
+        self.record(label.into(), Value::Object(result));
     }
 
     fn pull_requests(&mut self, f: &Fixture, work_item: Option<i64>) -> Option<()> {
@@ -823,6 +889,7 @@ impl WriteTest {
         };
         self.builds(&fixture);
         let work_item = self.work_items(&fixture);
+        self.attachments(&fixture);
         self.pull_requests(&fixture, work_item);
         self.cleanup();
         let called: Vec<String> = self
@@ -834,7 +901,10 @@ impl WriteTest {
         for (manual, data) in &self.manuals {
             for t in data["tools"].as_array().into_iter().flatten() {
                 let full = format!("{manual}.{}", t["name"].as_str().unwrap_or(""));
-                if !is_read(t) && !called.contains(&full) {
+                let untested = t["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.contains(&json!("untested")));
+                if !is_read(t) && !untested && !called.contains(&full) {
                     missing.push(full);
                 }
             }

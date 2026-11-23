@@ -17,7 +17,7 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
 use crate::archive::{self, Archive};
-use crate::cli::{scopes_markdown, which};
+use crate::cli::{help, help_alias, next_steps, permission_lines, scopes_markdown, which};
 use crate::config::{list_map, manual, nested, Config};
 use crate::generate::{
     api_version_of, assign_names, base_name, covering_scopes, generate, minimal_scopes, Entry,
@@ -27,6 +27,7 @@ use crate::http::{Request, Response, Transport};
 use crate::readtest::{self, ReadTest};
 use crate::routes;
 use crate::text::{one_line, snake, write_json};
+use crate::utcp::Utcp;
 
 const ORG: &str = "contoso";
 
@@ -58,12 +59,14 @@ fn test_config() -> Config {
             ),
             manual("t_empty", &["gamma"], "Test empty", "test empty"),
         ],
+        excluded_areas: vec![("delta".to_string(), "test exclusion".to_string())],
         post_reads: list_map(&[
             ("alpha", &["Query_Run Query"]),
             ("beta", &["Subject Query_Query"]),
         ]),
-        writes: list_map(&[("alpha", &["Widgets_Create"])]),
-        allow_write_scopes: HashSet::new(),
+        tested_writes: list_map(&[("alpha", &["Widgets_Create"])]),
+        deletes: HashMap::new(),
+        read_only: false,
         skip_gets: nested(&[("beta", &[("Profiles_Get", "test skip".to_string())])]),
         required_params: nested(&[("alpha", &[("Widgets_List", vec!["kind".to_string()])])]),
         names: nested(&[(
@@ -179,9 +182,8 @@ fn selection_and_urls() {
     );
     let reasons = left_out_reasons(&report);
     for (op, reason) in [
-        ("Widgets_Delete", "DELETE never included"),
+        ("Widgets_Delete", "DELETE not selected"),
         ("Widgets_Exists", "HEAD never included"),
-        ("Archive_Get Zip", "binary response"),
         ("Profiles_Get", "skipped: test skip"),
     ] {
         assert!(
@@ -189,13 +191,47 @@ fn selection_and_urls() {
             "{op}: {reason}"
         );
     }
+    // A file answer and a file upload are tools: utcp saves the answer and reads the file to send.
+    let zip = &tools["get_zip"];
+    assert_eq!(zip["tool_call_template"]["response_type"], "file");
+    assert_eq!(
+        zip["tool_call_template"]["headers"]["Accept"],
+        "application/zip"
+    );
+    assert!(zip["outputs"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("\"type\": \"file\""));
+    let upload = &tools["upload_widget"];
+    assert_eq!(upload["tool_call_template"]["body_type"], "file");
+    assert_eq!(upload["tool_call_template"]["body_field"], "body");
+    assert_eq!(
+        upload["tool_call_template"]["headers"]["Content-Type"],
+        "application/octet-stream"
+    );
+    assert_eq!(
+        upload["inputs"]["properties"]["body"]["required"],
+        json!(["file"])
+    );
+    assert!(upload["tool_call_template"].get("response_type").is_none());
+    // Header parameters the spec names differently from the header they are.
+    assert_eq!(
+        upload["tool_call_template"]["header_fields"],
+        json!(["Content-Range", "If-Match"])
+    );
+    let required = upload["inputs"]["required"].as_array().unwrap();
+    assert!(required.contains(&json!("Content-Range")));
+    assert!(
+        !required.contains(&json!("If-Match")),
+        "a create has no version to match"
+    );
     assert!(!tools.contains_key("get_profile"));
     assert_eq!(
-        tools["alpha_list_widgets"]["inputs"]["required"],
+        tools["list_widgets"]["inputs"]["required"],
         json!(["kind", "project"])
     );
-    // Same operationId in two areas of one manual: both get the area prefix.
-    assert!(tools.contains_key("alpha_list_widgets"));
+    // Same operationId in two areas of one manual: the manual's first area keeps the name, the other gets its prefix.
+    assert!(tools.contains_key("list_widgets"));
     assert!(tools.contains_key("beta_list_widgets"));
     let url = |n: &str| {
         tools[n]["tool_call_template"]["url"]
@@ -307,10 +343,16 @@ fn config_must_name_real_operations() {
             .0
     };
     let mut conf = test_config();
-    conf.writes = list_map(&[("alpha", &["Widgets_Craete"])]);
+    conf.tested_writes = list_map(&[("alpha", &["Widgets_Craete"])]);
     assert_eq!(
         generate_err(&conf),
-        "config writes names alpha/Widgets_Craete, which the specs do not have"
+        "config tested_writes names alpha/Widgets_Craete, which the specs do not have"
+    );
+    let mut conf = test_config();
+    conf.deletes = list_map(&[("alpha", &["Widgets_Remove"])]);
+    assert_eq!(
+        generate_err(&conf),
+        "config deletes names alpha/Widgets_Remove, which the specs do not have"
     );
     let mut conf = test_config();
     conf.names = nested(&[("beta", &[("Nope_List", "x".to_string())])]);
@@ -323,7 +365,7 @@ fn config_must_name_real_operations() {
     );
     // An area without a spec (gamma) is not checked: its spec may be missing at the pinned API version.
     let mut conf = test_config();
-    conf.writes = list_map(&[("gamma", &["Anything_Create"])]);
+    conf.tested_writes = list_map(&[("gamma", &["Anything_Create"])]);
     run_generate_with(&conf);
 }
 
@@ -331,13 +373,14 @@ fn config_must_name_real_operations() {
 fn read_only_leaves_out_writes() {
     let (manuals, report) = run_generate();
     assert!(tools_by_name(&manuals).contains_key("create_widget"));
-    assert_eq!(report["manuals"]["t_main"]["writes"], 1);
+    assert_eq!(report["manuals"]["t_main"]["writes"], 3);
+    assert_eq!(report["manuals"]["t_main"]["untested_writes"], 2);
     let (manuals, report) = run_generate_with(&test_config().read_only());
     assert!(!tools_by_name(&manuals).contains_key("create_widget"));
     assert_eq!(report["manuals"]["t_main"]["writes"], 0);
     assert!(left_out_reasons(&report).contains(&(
         "Widgets_Create".to_string(),
-        "write not selected".to_string()
+        "write (--read-only)".to_string()
     )));
     let scopes: Vec<&str> = report["scopes"]
         .as_array()
@@ -352,7 +395,7 @@ fn read_only_leaves_out_writes() {
 fn real_writes_have_short_bodies() {
     let conf = Config::real();
     let writes: BTreeSet<(String, String)> = conf
-        .writes
+        .tested_writes
         .iter()
         .flat_map(|(a, ops)| ops.iter().map(move |o| (a.clone(), o.clone())))
         .collect();
@@ -379,7 +422,8 @@ fn real_writes_have_short_bodies() {
         assert!(schema.to_string().len() < 4000, "{area}/{op} is not short");
     }
     let named = conf.named_operations();
-    assert!(named.contains(&("writes", "git", "Pull Requests_Create")));
+    assert!(named.contains(&("tested_writes", "git", "Pull Requests_Create")));
+    assert!(named.contains(&("deletes", "wit", "Comments_Delete")));
     assert!(named.contains(&("body_overrides", "wit", "Work Items_Update")));
 }
 
@@ -430,41 +474,302 @@ fn scope_report() {
     let (_, report) = run_generate();
     assert_eq!(
         report["scopes_all"],
-        json!(["vso.alpha", "vso.alpha_write", "vso.beta", "vso.beta_full"])
+        json!([
+            "vso.alpha",
+            "vso.alpha_manage",
+            "vso.alpha_write",
+            "vso.beta",
+            "vso.beta_full",
+            "vso.beta_manage"
+        ])
     );
-    // Threads_List accepts vso.beta or vso.beta_full: the read scope covers it, no write scope is asked for.
-    let scopes: Vec<&str> = report["scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["scope"].as_str().unwrap())
-        .collect();
-    assert_eq!(scopes, ["vso.alpha_write", "vso.beta"]);
+    // Threads_List accepts vso.beta or vso.beta_full: the read scope covers it, no write scope is asked for. Pools_List
+    // needs vso.beta_manage, which covers vso.beta.
+    let ids = |key: &str| -> Vec<String> {
+        report[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["scope"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids("scopes"), ["vso.alpha_write", "vso.beta_manage"]);
+    // A read-only PAT: the reads that a read scope allows (not Pools_List).
+    assert_eq!(ids("read_scopes"), ["vso.alpha", "vso.beta"]);
+    // Each manual lists only the broadest level of each permission it needs.
+    for (name, m) in report["manuals"].as_object().unwrap() {
+        let scopes: Vec<String> = serde_json::from_value(m["scopes"].clone()).unwrap();
+        assert!(!scopes.is_empty(), "{name} lists no scopes");
+        assert_eq!(
+            crate::generate::minimal_scopes(&scopes.iter().cloned().collect()),
+            scopes,
+            "{name} lists a level that a broader one already covers"
+        );
+    }
     assert_eq!(
         report["scopes"][0]["description"],
         "Read and write alpha things."
     );
     let md = scopes_markdown(&report, ORG);
-    assert!(md.contains("| `vso.alpha_write` | Read and write alpha things. |"));
+    assert!(md.contains("| (not known) | `vso.alpha_write` | Read and write alpha things. |"));
+    assert!(md.contains("https://dev.azure.com/contoso/_usersSettings/tokens"));
+    assert!(md.contains(
+        "For a PAT that only reads (the write tools then answer 401): vso.alpha, vso.beta."
+    ));
+}
+
+#[test]
+fn pat_names_as_on_the_token_page() {
+    assert_eq!(crate::pat::label("vso.code_write"), "Code: Read & write");
+    assert_eq!(crate::pat::label("vso.alpha"), "vso.alpha");
+    assert_eq!(
+        crate::pat::rows(["vso.work_write", "vso.agentpools", "vso.alpha"]),
+        [
+            ("Agent Pools".to_string(), "Read".to_string()),
+            ("Work Items".to_string(), "Read & write".to_string()),
+            ("vso.alpha".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(
+        permission_lines(["vso.code_write", "vso.agentpools"], None),
+        ["  Agent Pools  Read", "  Code         Read & write"]
+    );
+    // Same permission name: one row. A broader level of a family replaces the narrower one before this.
+    assert_eq!(
+        crate::pat::rows(["vso.code_write", "vso.code_status"]),
+        [("Code".to_string(), "Read & write + Status".to_string())]
+    );
+    assert_eq!(
+        permission_lines(
+            ["vso.code_write", "vso.security_manage"],
+            Some(vec!["vso.code"])
+        ),
+        [
+            "  Permission  All tools     Reads only",
+            "  Code        Read & write  Read",
+            "  Security    Manage        -",
+        ]
+    );
+}
+
+#[test]
+fn help_shows_getting_started() {
+    let main = help(None);
+    assert_eq!(main.kind(), clap::error::ErrorKind::DisplayHelp);
+    let text = main.render().to_string();
+    assert!(text.contains("Getting started"));
+    assert!(text.contains("azdo-manuals generate --org <your-org> --stage"));
+    assert!(text.contains("utcp promote"));
+    assert!(text.contains("azdo-manuals help generate"));
+    assert!(!text.contains("subcommand"));
+    assert!(!text.contains("--register"));
+    let generate = help(Some("generate")).render().to_string();
+    assert!(generate.contains("--stage"));
+    assert!(generate.contains("No PAT is needed"));
+    assert!(!generate.contains("Getting started"));
+    let read_test = help(Some("read-test")).render().to_string();
+    assert!(
+        read_test.contains("no PAT\nis needed in this shell"),
+        "{read_test}"
+    );
+    assert!(read_test.contains("utcp call --staged"));
+    let write_test = help(Some("write-test")).render().to_string();
+    assert!(write_test.contains("throwaway utcp setup"));
+    assert!(write_test.contains("AZURE_DEVOPS_EXT_PAT"));
+    let unknown = help(Some("nonsense"));
+    assert_ne!(unknown.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert!(unknown.to_string().contains("unknown command 'nonsense'"));
+}
+
+#[test]
+fn next_steps_cover_the_pat_review_test_and_promote() {
+    let steps = next_steps("contoso", None);
+    assert_eq!(steps.len(), 6);
+    assert!(steps[0].contains("https://dev.azure.com/contoso/_usersSettings/tokens"));
+    assert!(steps[1].contains("utcp doctor: \"Secrets File\""));
+    assert!(steps[1].contains("add AZURE_DEVOPS_EXT_PAT to it)\n"));
+    assert!(steps[1].ends_with("- either way, then run: utcp daemon reload-env"));
+    assert!(steps[2].contains("[SET] AZURE_DEVOPS_EXT_PAT"));
+    assert_eq!(steps[3], "See what changes for your agents: utcp diff");
+    assert!(steps[4].contains("azdo-manuals read-test --org contoso --project <a project>"));
+    assert_eq!(steps[5], "Make them active for your agents: utcp promote");
+    let custom = next_steps("contoso", Some(Path::new("manuals-here")));
+    assert!(custom[4].contains("read-test --manuals manuals-here --project"));
+    for step in steps {
+        for line in step.lines() {
+            assert!(line.len() + 5 <= 120, "too long: {line}");
+        }
+    }
+}
+
+/// The release version is the REST API version plus a counter: 7.1.x for API 7.1.
+#[test]
+fn version_starts_with_the_api_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        version.starts_with(&format!("{}.", crate::config::API_VERSION)),
+        "version {version} does not start with API version {}",
+        crate::config::API_VERSION
+    );
+    assert_eq!(version.split('.').count(), 3, "{version}");
+}
+
+#[test]
+fn command_help_alias() {
+    let os = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+    assert_eq!(
+        help_alias(os(&["azdo-manuals", "generate", "help"])),
+        os(&["azdo-manuals", "help", "generate"])
+    );
+    assert_eq!(
+        help_alias(os(&["azdo-manuals", "nonsense", "help"])),
+        os(&["azdo-manuals", "nonsense", "help"])
+    );
+    assert_eq!(
+        help_alias(os(&["azdo-manuals", "generate", "--org", "help"])),
+        os(&["azdo-manuals", "generate", "--org", "help"])
+    );
 }
 
 #[test]
 fn read_needing_write_scope() {
     let (manuals, report) = run_generate();
-    assert!(!tools_by_name(&manuals).contains_key("list_pools"));
-    assert!(left_out_reasons(&report).contains(&(
-        "Pools_List".to_string(),
-        "read needs a write scope: vso.beta_manage".to_string()
-    )));
-    let mut conf = test_config();
-    conf.allow_write_scopes = HashSet::from(["vso.beta_manage".to_string()]);
-    let (manuals, report) = run_generate_with(&conf);
     assert!(tools_by_name(&manuals).contains_key("list_pools"));
     assert!(report["scopes"]
         .as_array()
         .unwrap()
         .iter()
         .any(|s| s["scope"] == "vso.beta_manage"));
+    let (manuals, report) = run_generate_with(&test_config().read_only());
+    assert!(!tools_by_name(&manuals).contains_key("list_pools"));
+    assert!(left_out_reasons(&report).contains(&(
+        "Pools_List".to_string(),
+        "read needs a write scope: vso.beta_manage".to_string()
+    )));
+}
+
+#[test]
+fn untested_writes_are_marked() {
+    let (manuals, _) = run_generate();
+    let tools = tools_by_name(&manuals);
+    let update = &tools["update_widget"];
+    assert_eq!(update["description"], "(untested) Updates a widget.");
+    assert_eq!(
+        update["tags"],
+        json!(["azure-devops", "alpha", "widgets", "untested"])
+    );
+    // The tested write and the POST that only reads are not marked.
+    for name in ["create_widget", "run_query"] {
+        assert!(
+            !tools[name]["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("untested")),
+            "{name}"
+        );
+    }
+    // A JSON Patch body is an array of operations, whatever the spec says.
+    let body = &update["inputs"]["properties"]["body"];
+    assert_eq!(body, &crate::bodies::json_patch_document());
+    assert_eq!(
+        update["tool_call_template"]["headers"]["Content-Type"],
+        "application/json-patch+json"
+    );
+}
+
+#[test]
+fn deletes_only_when_listed() {
+    let mut conf = test_config();
+    conf.deletes = list_map(&[("alpha", &["Widgets_Delete"])]);
+    let (manuals, report) = run_generate_with(&conf);
+    let tools = tools_by_name(&manuals);
+    assert_eq!(
+        tools["delete_widget"]["tool_call_template"]["http_method"],
+        "DELETE"
+    );
+    assert!(tools["delete_widget"]["description"]
+        .as_str()
+        .unwrap()
+        .starts_with("(untested) "));
+    assert!(!left_out_reasons(&report)
+        .iter()
+        .any(|(op, _)| op == "Widgets_Delete"));
+    let (manuals, _) = run_generate_with(&conf.read_only());
+    assert!(!tools_by_name(&manuals).contains_key("delete_widget"));
+}
+
+#[test]
+fn no_pat_outside_the_organization() {
+    let mut conf = test_config();
+    conf.skip_gets.clear();
+    let (manuals, _) = run_generate_with(&conf);
+    let tools = tools_by_name(&manuals);
+    let profile = &tools["get_profile"]["tool_call_template"];
+    assert_eq!(
+        profile["url"],
+        "https://vsbeta.dev.azure.com/_apis/beta/profiles/{id}?api-version=7.1"
+    );
+    assert!(profile.get("auth").is_none(), "{profile}");
+    assert!(tools["beta_list_widgets"]["tool_call_template"]
+        .get("auth")
+        .is_some());
+}
+
+#[test]
+fn hints_name_the_organization_when_all_fit() {
+    let (_, report) = run_generate();
+    assert_eq!(
+        report["manuals"]["t_main"]["hint"],
+        "test main, org contoso"
+    );
+
+    let conf = crate::config::Config::real();
+    let hints = crate::generate::manual_hints(&conf, ORG);
+    assert_eq!(hints["azdo_git"], "Azure DevOps repos and PRs, org contoso");
+    assert!(hints.values().all(|h| h.chars().count() <= 60), "{hints:?}");
+
+    // An org name long enough to push one hint past utcp's limit leaves the org out of all of them.
+    let long = "a".repeat(20);
+    let hints = crate::generate::manual_hints(&conf, &long);
+    for m in &conf.manuals {
+        assert_eq!(hints[&m.name], m.hint);
+    }
+}
+
+#[test]
+fn parameterized_host() {
+    let mut specs = load_fixture_specs();
+    let beta = &mut specs["beta"][0];
+    beta["host"] = json!("{service}dev.azure.com");
+    beta["x-ms-parameterized-host"] = json!({"hostTemplate": "{service}dev.azure.com",
+        "parameters": [{"name": "service", "required": false, "type": "string", "in": "path"}]});
+    let (manuals, _) = generate(&specs, ORG, "7.1", &source(), &test_config()).unwrap();
+    let url = tools_by_name(&manuals)["beta_list_widgets"]["tool_call_template"]["url"].clone();
+    assert!(
+        url.as_str()
+            .unwrap()
+            .starts_with("https://dev.azure.com/contoso/"),
+        "{url}"
+    );
+    specs["beta"][0]["x-ms-parameterized-host"]["parameters"][0]["required"] = json!(true);
+    assert!(generate(&specs, ORG, "7.1", &source(), &test_config()).is_err());
+}
+
+#[test]
+fn left_out_summary() {
+    let (_, report) = run_generate();
+    let lines = crate::cli::left_out_lines(&report, &[("gamma".to_string(), "7.2".to_string())]);
+    assert_eq!(
+        lines,
+        [
+            "  area gamma           no 7.1 description (has 7.2)",
+            "  area delta           test exclusion",
+            "  1 DELETE operations  deleting cannot be undone (the small deletes are included)",
+            "  1 HEAD operations    the GET of the same thing is included",
+            "  1 operations that do not work:",
+            "    beta Profiles_Get: test skip",
+        ]
+    );
 }
 
 #[test]
@@ -555,14 +860,21 @@ fn name_clash_needs_override() {
     let entry = |op: &str| Entry {
         area: "a".into(),
         operation_id: op.into(),
-        method_name: None,
+        method_name: Some("GetThing".into()),
         scopes: vec![],
+        read: true,
         name: String::new(),
         tool: Map::new(),
     };
-    let mut entries = vec![entry("X_Get Thing"), entry("Y_Get Thing")];
+    // Same area and group: the group prefix cannot tell them apart.
+    let mut entries = vec![entry("X_Get Thing"), entry("X_Get Thing By Name")];
     let e = assign_names("m", &mut entries, &Config::default()).unwrap_err();
     assert!(e.0.contains("add one of them"), "{e}");
+    // Different groups of one area: each gets its group (NuGet -> nuget).
+    let mut entries = vec![entry("NuGet_Get Thing"), entry("Python Packages_Get Thing")];
+    assign_names("m", &mut entries, &Config::default()).unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["nuget_get_thing", "python_packages_get_thing"]);
 }
 
 #[test]
@@ -773,6 +1085,28 @@ fn shipped_pins_parse() {
     }
 }
 
+/// Every area of Microsoft's spec folder is in a manual or left out with a reason, so none is dropped silently.
+#[test]
+fn every_archive_area_is_accounted_for() {
+    let pins = archive::load_pins(None).unwrap();
+    let conf = Config::real();
+    let mut known: BTreeSet<String> = conf.all_areas().into_iter().collect();
+    for (area, reason) in &conf.excluded_areas {
+        assert!(!reason.is_empty(), "{area}");
+        assert!(
+            known.insert(area.clone()),
+            "{area} is both in a manual and excluded"
+        );
+    }
+    let archive: BTreeSet<String> = pins["archive_areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(known, archive);
+}
+
 // Route check
 
 fn route_lists() -> HashMap<&'static str, Vec<Value>> {
@@ -806,6 +1140,7 @@ fn route_lists() -> HashMap<&'static str, Vec<Value>> {
                     1,
                 ),
                 r("alpha", "logs", "_apis/{area}/{resource}/{logId}", "7.0", 1),
+                r("alpha", "archive", "_apis/{area}/{resource}", "7.1", 1),
             ],
         ),
         (
@@ -821,20 +1156,28 @@ fn route_check() {
     let (manuals, _) = run_generate();
     let lists = route_lists();
     let result = routes::check(&manuals, ORG, &mut |base| Ok(lists[base].clone()));
-    let bases: Vec<(String, usize)> = result.bases.into_iter().collect();
+    let mut bases: Vec<(String, usize)> = result.bases.into_iter().collect();
+    bases.sort();
     assert_eq!(
         bases,
         [
-            ("https://dev.azure.com/<org>".to_string(), 4),
+            ("https://dev.azure.com/<org>".to_string(), 5),
             ("https://vsbeta.dev.azure.com/<org>".to_string(), 1)
         ]
     );
-    // Widgets list/create/get/batch (project is optional), query, things, beta widgets match; logs is asked at
-    // 7.1 but released only to 7.0.
-    assert_eq!(result.matched, 7);
+    // Widgets list/create/get/update/upload/batch (project is optional), query, things, the archive (a file answer),
+    // beta widgets match; logs is asked at 7.1 but released only to 7.0.
+    assert_eq!(result.matched, 10);
     let mut unmatched = result.unmatched;
     unmatched.sort();
-    assert_eq!(unmatched, ["t_main.list_threads", "t_main.query_subjects"]);
+    assert_eq!(
+        unmatched,
+        [
+            "t_main.list_pools",
+            "t_main.list_threads",
+            "t_main.query_subjects"
+        ]
+    );
 }
 
 #[test]
@@ -854,6 +1197,7 @@ fn unreadable_route_list() {
         unchecked,
         [
             "t_main.beta_list_widgets",
+            "t_main.list_pools",
             "t_main.list_threads",
             "t_main.query_subjects"
         ]
@@ -872,6 +1216,35 @@ fn unreadable_route_list() {
         "{:?}",
         result.version
     );
+}
+
+#[test]
+fn host_without_route_list() {
+    let (mut manuals, _) = run_generate();
+    manuals["t_main"]["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "name": "get_service_status",
+            "tool_call_template": {
+                "url": "https://status.dev.azure.com/_apis/status/health?api-version=7.1"
+            }
+        }));
+    let lists = route_lists();
+    let result = routes::check(&manuals, ORG, &mut |base| {
+        assert!(
+            !base.contains("status."),
+            "fetched the route list of {base}"
+        );
+        Ok(lists[base].clone())
+    });
+    assert_eq!(result.no_route_list, ["t_main.get_service_status"]);
+    assert_eq!(result.matched, 10);
+    assert!(result.unchecked.is_empty(), "{:?}", result.unchecked);
+    assert!(!result
+        .unmatched
+        .contains(&"t_main.get_service_status".to_string()));
+    assert!(result.base_errors.is_empty());
 }
 
 #[test]
@@ -922,10 +1295,15 @@ fn resolve_references() {
         readtest::resolve(&json!(true), &responses).unwrap(),
         json!(true)
     );
+    assert_eq!(
+        readtest::resolve(&json!("@list_things:value.[name=a].id"), &responses).unwrap(),
+        json!(7)
+    );
     for missing in [
         "@other:id",
         "@list_things:value.5.id",
         "@list_things:value.1.name",
+        "@list_things:value.[name=b].id",
     ] {
         assert!(
             readtest::resolve(&json!(missing), &responses).is_err(),
@@ -956,6 +1334,20 @@ fn first_item_and_value() {
         readtest::value_for("repositoryId", Some(&json!({"id": "r", "name": "n"}))),
         Some(json!("r"))
     );
+    let process = json!({"typeId": "adcc42ab", "name": "Agile", "referenceName": null});
+    assert_eq!(
+        readtest::value_for("processId", Some(&process)),
+        Some(json!("adcc42ab"))
+    );
+    assert_eq!(
+        readtest::value_for("processTypeId", Some(&process)),
+        Some(json!("adcc42ab"))
+    );
+    let wit = json!({"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug"});
+    assert_eq!(
+        readtest::value_for("witRefName", Some(&wit)),
+        Some(json!("Microsoft.VSTS.WorkItemTypes.Bug"))
+    );
 }
 
 #[test]
@@ -964,12 +1356,17 @@ fn fill_chains_ids() {
     let tools = tools_by_name(&manuals);
     let mut seeds = Map::new();
     seeds.insert("project".into(), json!("P"));
-    let mut test = ReadTest::new(PathBuf::from("utcp"), IndexMap::new(), seeds).unwrap();
+    let mut test = ReadTest::new(
+        Utcp::shared(PathBuf::from("utcp")),
+        IndexMap::new(),
+        BTreeSet::new(),
+        seeds,
+    );
     assert_eq!(
         test.fill(&tools["get_widget_by_id"]),
         Err("no value for {widgetId}".to_string())
     );
-    let list = readtest::normalize(&readtest::template_of(&tools["alpha_list_widgets"]));
+    let list = readtest::normalize(&readtest::template_of(&tools["list_widgets"]));
     test.items.insert(list, json!({"id": "w1"}));
     let args = test.fill(&tools["get_widget_by_id"]).unwrap();
     assert_eq!(
@@ -977,11 +1374,11 @@ fn fill_chains_ids() {
         json!({"project": "P", "widgetId": "w1"})
     );
     assert_eq!(
-        test.fill(&tools["alpha_list_widgets"]),
+        test.fill(&tools["list_widgets"]),
         Err("required parameter kind".to_string())
     );
     test.set_seed("kind", json!("round"));
-    let args = test.fill(&tools["alpha_list_widgets"]).unwrap();
+    let args = test.fill(&tools["list_widgets"]).unwrap();
     assert_eq!(
         Value::Object(args),
         json!({"project": "P", "kind": "round", "$top": 5})
@@ -1005,9 +1402,9 @@ fn find_utcp() -> Option<PathBuf> {
     found
 }
 
-/// The expected manuals register in a throwaway utcp, and dry runs build the right requests.
+/// The expected manuals stage in a throwaway utcp, staged dry runs build the right requests, and they promote.
 #[test]
-fn utcp_register_schema_dry_run() {
+fn utcp_stage_schema_dry_run_promote() {
     let Some(utcp) = find_utcp() else {
         eprintln!("skipped: no utcp binary (set UTCP_BIN)");
         return;
@@ -1045,15 +1442,26 @@ fn utcp_register_schema_dry_run() {
         String::from_utf8(out.stdout).unwrap()
     };
     let file = expected_dir().join("t_main.utcp.json");
-    run(&["register", "t_main", file.to_str().unwrap()], None);
+    run(
+        &["stage", "t_main", file.to_str().unwrap(), "--hint", "test"],
+        None,
+    );
+    assert_eq!(run(&["list", "--json"], None).trim(), "[]");
     let manual: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
     for tool in manual["tools"].as_array().unwrap() {
         let name = format!("t_main.{}", tool["name"].as_str().unwrap());
-        let schema: Value = serde_json::from_str(&run(&["schema", &name], None)).unwrap();
+        let schema: Value =
+            serde_json::from_str(&run(&["schema", "--staged", &name], None)).unwrap();
         assert_eq!(schema["inputs"], tool["inputs"], "{name}");
     }
     let out: Value = serde_json::from_str(&run(
-        &["call", "t_main.run_query", "--dry-run", "--args-stdin"],
+        &[
+            "call",
+            "--staged",
+            "t_main.run_query",
+            "--dry-run",
+            "--args-stdin",
+        ],
         Some(r#"{"project": "My Project", "body": {"text": "x"}, "$top": 2}"#),
     ))
     .unwrap();
@@ -1066,6 +1474,7 @@ fn utcp_register_schema_dry_run() {
     let out: Value = serde_json::from_str(&run(
         &[
             "call",
+            "--staged",
             "t_main.get_thing_template",
             "--dry-run",
             "--args-stdin",
@@ -1077,4 +1486,23 @@ fn utcp_register_schema_dry_run() {
         out["url"],
         "https://dev.azure.com/contoso/P/_apis/alpha/things/%24Bug?api-version=7.1"
     );
+    run(&["promote", "t_main"], None);
+    run(&["schema", "t_main.run_query"], None);
+}
+
+/// write-test's isolated utcp: registered manuals are active, none staged.
+#[test]
+fn isolated_utcp_registers_and_lists() {
+    let Some(bin) = find_utcp() else {
+        eprintln!("skipped: no utcp binary (set UTCP_BIN)");
+        return;
+    };
+    let utcp = Utcp::isolated(bin, "azdo-test-").unwrap();
+    utcp.register(&expected_dir(), [&"t_main".to_string()])
+        .unwrap();
+    assert_eq!(
+        utcp.manual_names(false).unwrap(),
+        BTreeSet::from(["t_main".to_string()])
+    );
+    assert!(utcp.manual_names(true).unwrap().is_empty());
 }

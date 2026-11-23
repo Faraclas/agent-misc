@@ -1,9 +1,10 @@
-//! Which spec areas go into which manual, and which non-GET operations are included.
+//! Which spec areas go into which manual, and what is left out of them.
 //!
-//! Area names are the folder names under `specification/` in Microsoft's spec repository. Every GET of an included
-//! area becomes a tool unless it is listed in `skip_gets` or returns only binary content. Other methods are included
-//! only when listed in `post_reads` (POSTs that only read, such as queries and searches) or `writes`. DELETE and HEAD
-//! are never included.
+//! Area names are the folder names under `specification/` in Microsoft's spec repository. Every area goes into a
+//! manual unless `excluded_areas` gives the reason it does not. Every operation of an included area becomes a tool,
+//! except: GETs listed in `skip_gets`, DELETEs not listed in `deletes`, and HEAD. A file answer or a file upload is
+//! included too: utcp saves the file or reads the file to send. The PAT's permissions, not this list, decide what an
+//! agent can do; leaving a tool out only spares agents an operation that cannot be undone or cannot work.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,13 +25,17 @@ pub struct ManualConf {
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub manuals: Vec<ManualConf>,
+    /// Areas of the spec folder that go into no manual, with the reason.
+    pub excluded_areas: Vec<(String, String)>,
     /// operationId values, per area. POSTs whose only effect is to return data.
     pub post_reads: HashMap<String, Vec<String>>,
-    /// Writes, each tested in a sandbox organization with `write-test` before it is listed here.
-    pub writes: HashMap<String, Vec<String>>,
-    /// Some reads accept only a write-level scope (Azure DevOps has no read scope for deployment groups or
-    /// environments). Those reads are left out so the PAT can stay read-only, unless their scope is listed here.
-    pub allow_write_scopes: HashSet<String>,
+    /// Writes tested in a sandbox organization by `write-test`, each with a hand-written body in `bodies.rs`. The
+    /// other writes are included too, marked "(untested)" in their description and tagged `untested`.
+    pub tested_writes: HashMap<String, Vec<String>>,
+    /// The DELETEs that are included; the others are left out because deleting cannot be undone.
+    pub deletes: HashMap<String, Vec<String>>,
+    /// Leave out every write, and the reads that only a write-level scope allows, for a read-only PAT.
+    pub read_only: bool,
     /// GETs left out on purpose, per area and operationId, with the reason.
     pub skip_gets: HashMap<String, HashMap<String, String>>,
     /// Parameters the spec marks optional but the service requires (it answers 400 without them), per area and
@@ -86,14 +91,18 @@ impl Config {
 
     /// Leave out every write, for a read-only PAT.
     pub fn read_only(mut self) -> Config {
-        self.writes.clear();
+        self.read_only = true;
         self
     }
 
     /// Every operationId the configuration names, as (setting, area, operationId).
     pub fn named_operations(&self) -> Vec<(&'static str, &str, &str)> {
         let mut out = Vec::new();
-        for (setting, map) in [("post_reads", &self.post_reads), ("writes", &self.writes)] {
+        for (setting, map) in [
+            ("post_reads", &self.post_reads),
+            ("tested_writes", &self.tested_writes),
+            ("deletes", &self.deletes),
+        ] {
             for (area, ops) in map {
                 out.extend(ops.iter().map(|op| (setting, area.as_str(), op.as_str())));
             }
@@ -141,21 +150,20 @@ impl Config {
     }
 
     pub fn real() -> Config {
-        let no_scope =
-            "no scope in the spec; refused (401) by a PAT with every read scope".to_string();
+        let no_scope = "no scope in the spec; 401 without a full-access PAT".to_string();
         Config {
             manuals: vec![
                 manual(
                     "azdo_git",
-                    &["git", "policy"],
-                    "Azure DevOps Git repositories, pull requests and branch policies",
+                    &["git", "policy", "tfvc", "advancedSecurity"],
+                    "Azure DevOps Git repositories, pull requests, branch policies and TFVC",
                     "Azure DevOps repos and PRs",
                 ),
                 manual(
                     "azdo_work",
-                    &["wit", "work"],
-                    "Azure DevOps work items, queries, boards, iterations and backlogs",
-                    "Azure DevOps work items and boards",
+                    &["wit", "work", "dashboard", "processes", "processadmin", "processDefinitions"],
+                    "Azure DevOps work items, queries, boards, iterations, backlogs, dashboards and processes",
+                    "Azure DevOps work items, boards, dashboards",
                 ),
                 manual(
                     "azdo_pipelines",
@@ -172,20 +180,109 @@ impl Config {
                 manual(
                     "azdo_wiki_search",
                     &["wiki", "search"],
-                    "Azure DevOps wikis and code, wiki and work item search",
+                    "Azure DevOps wikis and code, wiki, work item and package search",
                     "Azure DevOps wiki and search",
                 ),
-                // No "profile": its only operation lives on app.vssps.visualstudio.com, outside the organization,
-                // and answered 401 to an organization-scoped PAT (2026-11-20), the kind of PAT these manuals are
-                // meant for.
                 manual(
                     "azdo_core",
-                    &["core", "graph", "ims"],
-                    "Azure DevOps projects, teams, processes, users, groups and identities",
+                    &["core", "graph", "ims", "operations", "favorite", "status", "resourceUsage"],
+                    "Azure DevOps projects, teams, processes, users, groups, identities, favorites and service status",
                     "Azure DevOps projects, teams, users",
                 ),
+                manual(
+                    "azdo_admin",
+                    &[
+                        "security",
+                        "securityRoles",
+                        "permissionsReport",
+                        "serviceEndpoint",
+                        "hooks",
+                        "notification",
+                        "extensionManagement",
+                        "memberEntitlementManagement",
+                        "audit",
+                        "delegatedAuth",
+                    ],
+                    "Azure DevOps permissions, security roles, service connections, service hooks, notifications, \
+                     extensions, user entitlements and the audit log",
+                    "Azure DevOps permissions, connections, hooks",
+                ),
+                manual(
+                    "azdo_artifacts",
+                    &["artifacts", "artifactsPackageTypes", "symbol"],
+                    "Azure DevOps Artifacts feeds, packages (npm, NuGet, Maven, Python, Universal) and symbols",
+                    "Azure DevOps feeds, packages, symbols",
+                ),
             ],
+            excluded_areas: [
+                (
+                    "profile",
+                    "hosted outside the organization; refused (401) an organization's PAT (2026-11-20)",
+                ),
+                ("account", "hosted outside the organization (app.vssps.visualstudio.com)"),
+                ("tokens", "creates and revokes PATs"),
+                ("tokenAdmin", "revokes PATs of other users"),
+                ("tokenAdministration", "revokes PATs of other users; replaced by tokenAdmin after 5.2"),
+                ("governance", "its 7.1 folder has examples only, no API description"),
+            ]
+            .iter()
+            .map(|(a, r)| (a.to_string(), r.to_string()))
+            .collect(),
             post_reads: list_map(&[
+                ("approvalsAndChecks", &["Check Configurations_Query"]),
+                (
+                    "artifacts",
+                    &[
+                        "Artifact  Details_Query Package Metrics",
+                        "Artifact  Details_Query Package Version Metrics",
+                    ],
+                ),
+                ("build", &["Builds_Get Build Work Items Refs From Commits"]),
+                (
+                    "git",
+                    &["Commits_Get Commits Batch", "Items_Get Items Batch", "Pull Request Query_Get"],
+                ),
+                ("graph", &["Subject Lookup_Lookup Subjects", "Subject Query_Query"]),
+                (
+                    "hooks",
+                    &[
+                        "Notifications_Query",
+                        "Publishers_Query Input Values",
+                        "Publishers_Query Publishers",
+                        "Subscriptions_Create Subscriptions Query",
+                    ],
+                ),
+                ("notification", &["Subscriptions_Query"]),
+                ("pipelines", &["Preview_Preview"]),
+                (
+                    "search",
+                    &[
+                        "Code Search Results_Fetch Code Search Results",
+                        "Package Search Results_Fetch Package Search Results",
+                        "Wiki Search Results_Fetch Wiki Search Results",
+                        "Work Item Search Results_Fetch Work Item Search Results",
+                    ],
+                ),
+                ("security", &["Permissions_Has Permissions Batch"]),
+                ("test", &["Points_Get Points By Query", "Test History_Query"]),
+                (
+                    "testResults",
+                    &[
+                        "Filecoverage_Get",
+                        "History_Query",
+                        "Result Meta Data_Query",
+                        "Result Trend By Build_Query",
+                        "Result Trend By Release_Query",
+                        "Results_Get Test Results By Query",
+                        "Results_Get Test Results By Query Wiql",
+                        "Resultsummarybyrelease_Query Test Results Summary For Releases",
+                        "Resultsummarybyrequirement_Query",
+                        "Test History_Query",
+                        "Workitems_Query Test Method Linked Work Items",
+                    ],
+                ),
+                ("tfvc", &["Changesets_Get Batched Changesets", "Items_Get Items Batch"]),
+                ("wiki", &["Pages Batch_Get"]),
                 (
                     "wit",
                     &[
@@ -193,22 +290,14 @@ impl Config {
                         "Work Items_Get Work Items Batch",
                         "Queries_Get Queries Batch",
                         "Artifact Uri Query_Query",
+                        "Reporting Work Item Revisions_Read Reporting Revisions Post",
                     ],
                 ),
-                (
-                    "search",
-                    &[
-                        "Code Search Results_Fetch Code Search Results",
-                        "Wiki Search Results_Fetch Wiki Search Results",
-                        "Work Item Search Results_Fetch Work Item Search Results",
-                    ],
-                ),
-                ("graph", &["Subject Lookup_Lookup Subjects", "Subject Query_Query"]),
             ]),
-            // What an agent needs for code review and tracking: open and update PRs, comment on, reply to and
+            // What an agent needs most for code review and tracking: open and update PRs, comment on, reply to and
             // resolve their threads, create and update work items, queue and cancel builds. Pushing code goes
             // through `git push`, not the REST API.
-            writes: list_map(&[
+            tested_writes: list_map(&[
                 (
                     "git",
                     &[
@@ -220,10 +309,39 @@ impl Config {
                         "Pull Request Thread Comments_Update",
                     ],
                 ),
-                ("wit", &["Work Items_Create", "Work Items_Update"]),
+                (
+                    "wit",
+                    &["Work Items_Create", "Work Items_Update", "Attachments_Create"],
+                ),
                 ("build", &["Builds_Queue", "Builds_Update Build"]),
             ]),
-            allow_write_scopes: HashSet::new(),
+            // Deletes of small things an agent adds and may need to take back: comments, reactions, labels,
+            // reviewers, statuses, tags, wiki pages, widgets, favorites, and test cases in a suite. Work items go to
+            // the recycle bin. Projects, repositories, branches, pipelines, feeds, packages, users and permissions are
+            // not deleted by agents.
+            deletes: list_map(&[
+                (
+                    "git",
+                    &[
+                        "Pull Request Attachments_Delete",
+                        "Pull Request Comment Likes_Delete",
+                        "Pull Request Labels_Delete",
+                        "Pull Request Reviewers_Delete",
+                        "Pull Request Statuses_Delete",
+                        "Pull Request Iteration Statuses_Delete",
+                        "Pull Request Thread Comments_Delete",
+                        "Refs Favorites_Delete",
+                    ],
+                ),
+                ("build", &["Tags_Delete Build Tag", "Tags_Delete Definition Tag"]),
+                ("wit", &["Comments Reactions_Delete", "Comments_Delete", "Work Items_Delete"]),
+                ("test", &["Test  Suites_Remove Test Cases From Suite Url"]),
+                ("testPlan", &["Suite Test Case_Remove Test Cases List From Suite"]),
+                ("wiki", &["Pages_Delete Page", "Pages_Delete Page By Id"]),
+                ("dashboard", &["Widgets_Delete"]),
+                ("favorite", &["Favorites_Delete Favorite By Id"]),
+            ]),
+            read_only: false,
             skip_gets: nested(&[
                 (
                     "build",
@@ -256,7 +374,33 @@ impl Config {
                     &[("Check Configurations_List", vec!["resourceType".into(), "resourceId".into()])],
                 ),
             ]),
-            names: HashMap::new(),
+            // File answers and uploads whose client method name alone says too little.
+            names: HashMap::from([
+                (
+                    "permissionsReport".to_string(),
+                    HashMap::from([(
+                        "Permissions Report Download_Download".to_string(),
+                        "download_permissions_report".to_string(),
+                    )]),
+                ),
+                (
+                    "processadmin".to_string(),
+                    HashMap::from([
+                        (
+                            "Processes_Export Process Template".to_string(),
+                            "export_process_template".to_string(),
+                        ),
+                        (
+                            "Processes_Import Process Template".to_string(),
+                            "import_process_template".to_string(),
+                        ),
+                    ]),
+                ),
+                (
+                    "release".to_string(),
+                    HashMap::from([("Releases_Get Logs".to_string(), "get_release_logs".to_string())]),
+                ),
+            ]),
             // In `wit`, `team` only matters for team-relative WIQL macros such as @CurrentIteration; in `work`
             // (boards, iterations, capacity) it selects the team, so it stays.
             drop_optional_path_params: HashMap::from([("wit".to_string(), HashSet::from(["team".to_string()]))]),

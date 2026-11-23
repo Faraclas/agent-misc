@@ -63,6 +63,36 @@
         "operationId": "Widgets_Exists",
         "parameters": [{ "$ref": "#/parameters/api-Version" }],
         "security": [{ "oauth2": ["vso.alpha"] }]
+      },
+      "patch": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Update",
+        "description": "Updates a widget.",
+        "consumes": ["application/json-patch+json"],
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "path", "name": "widgetId", "required": true, "type": "string", "format": "uuid" },
+          { "in": "body", "name": "document", "description": "The changes.", "required": true,
+            "schema": { "$ref": "#/definitions/JsonPatchDocument" } },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha_write", "vso.alpha_manage"] }]
+      },
+      "put": {
+        "tags": ["Widgets"],
+        "operationId": "Widgets_Upload",
+        "consumes": ["application/octet-stream"],
+        "parameters": [
+          { "in": "path", "name": "organization", "required": true, "type": "string" },
+          { "in": "path", "name": "project", "required": true, "type": "string" },
+          { "in": "path", "name": "widgetId", "required": true, "type": "integer" },
+          { "in": "body", "name": "upload", "required": true, "schema": { "type": "string" } },
+          { "in": "header", "name": "contentRangeHeader", "required": true, "type": "string" },
+          { "in": "header", "name": "Version", "required": true, "type": "string" },
+          { "$ref": "#/parameters/api-Version" }
+        ],
+        "security": [{ "oauth2": ["vso.alpha_write"] }]
       }
     },
     "/{organization}/{project}/{team}/_apis/alpha/query": {
@@ -137,6 +167,11 @@
     }
   },
   "definitions": {
+    "JsonPatchDocument": {
+      "description": "The JSON model for a JSON Patch operation",
+      "type": "object",
+      "properties": {}
+    },
     "Widget": {
       "description": "A widget.",
       "type": "object",
