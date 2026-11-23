@@ -66,6 +66,25 @@ server.
 Docs: [README](./azdo-manuals/README.md), [operating guide](./azdo-manuals/docs/operating.md),
 [specification](./azdo-manuals/docs/azdo-manuals-spec.md), [contributor rules](./azdo-manuals/AGENTS.md).
 
+### [`github-manuals/`](./github-manuals/)
+
+A generator that turns GitHub's OpenAPI description of the REST API (version 2026-03-10) into seven utcp HTTP manuals
+(repositories, issues and pull requests, Actions, security, Copilot, search, users), so agents reach GitHub through
+`utcp` instead of an MCP server.
+
+- **Verified source:** GitHub's description is downloaded on demand from a pinned commit of
+  `github/rest-api-description` and checked against its SHA-256. Nothing from GitHub is stored in this repository.
+- **Everything safe to offer, the token decides:** 605 tools with GitHub's own argument names and flat request
+  bodies. Organization and enterprise administration and a reviewed list of dangerous operations (repository
+  settings and deletion, access grants, webhooks, protection, security settings, secrets) are left out; `generate`
+  prints what was left out and why, and the README lists each group.
+- **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
+  what changes, and `utcp promote` makes them active.
+- **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
+
+Docs: [README](./github-manuals/README.md), [operating guide](./github-manuals/docs/operating.md),
+[specification](./github-manuals/docs/github-manuals-spec.md), [contributor rules](./github-manuals/AGENTS.md).
+
 ## Contributing
 
 See [`AGENTS.md`](./AGENTS.md) for the repository layout rules; each project's own `AGENTS.md` has its specific rules.
@@ -75,4 +94,5 @@ See [`AGENTS.md`](./AGENTS.md) for the repository layout rules; each project's o
 This project is licensed under the [MIT License](./LICENSE). `utcp-rs/crates/utcp-core` is derived from
 [rs-utcp](https://github.com/universal-tool-calling-protocol/rs-utcp) 0.3.2 (`MIT OR Apache-2.0`); see
 [`utcp-rs/NOTICE`](./utcp-rs/NOTICE). `azdo-manuals` reads Microsoft's MIT-licensed API specs at run time; see
-[`azdo-manuals/NOTICE`](./azdo-manuals/NOTICE).
+[`azdo-manuals/NOTICE`](./azdo-manuals/NOTICE). `github-manuals` reads GitHub's MIT-licensed API description at run
+time; see [`github-manuals/NOTICE`](./github-manuals/NOTICE).

@@ -1,0 +1,7 @@
+github-manuals is licensed under the MIT License (see the LICENSE file at the root of this repository).
+
+It reads, at run time, GitHub's OpenAPI description of the REST API from github/rest-api-description
+(https://github.com/github/rest-api-description), MIT License, Copyright (c) 2020 GitHub. That file is not included
+in this repository. Manuals generated from it copy operation and parameter descriptions from it.
+
+GitHub is a trademark of GitHub, Inc. This project is not affiliated with or endorsed by GitHub.

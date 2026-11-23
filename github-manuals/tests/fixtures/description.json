@@ -1,0 +1,280 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Hand-made test description", "version": "1.0.0"},
+  "servers": [{"url": "https://api.github.com"}],
+  "paths": {
+    "/repos/{owner}/{repo}": {
+      "get": {
+        "summary": "Get a repository",
+        "description": "Gets a repository. See \"[Repositories](https://docs.github.com/rest/repos)\".\n\n**Fine-grained access tokens for \"Get a repository\"**\n\nThis endpoint works with fine-grained tokens.",
+        "operationId": "repos/get",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/repository"}}}}},
+        "x-github": {"category": "repos", "subcategory": "repos"}
+      },
+      "patch": {
+        "summary": "Update a repository",
+        "operationId": "repos/update",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"visibility": {"type": "string"}}}}}},
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/repository"}}}}},
+        "x-github": {"category": "repos", "subcategory": "repos"}
+      }
+    },
+    "/repos/{owner}/{repo}/contents/{path}": {
+      "get": {
+        "summary": "Get repository content",
+        "description": "Gets the contents of a file.\n\nThis endpoint supports the following custom media types.\n\n- raw",
+        "operationId": "repos/get-content",
+        "parameters": [
+          {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
+          {"name": "path", "in": "path", "required": true, "description": "path parameter", "schema": {"type": "string"}},
+          {"name": "ref", "in": "query", "required": false, "description": "The name of the commit/branch/tag.", "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {}}}},
+        "responses": {
+          "200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}},
+          "302": {"description": "Found"}
+        },
+        "x-github": {"category": "repos", "subcategory": "contents"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues": {
+      "post": {
+        "summary": "Create an issue",
+        "description": "> [!NOTE]\n> Any user with pull access can create an issue.\n\nSee <a href=\"x\">rate limits</a>.",
+        "operationId": "issues/create",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "allOf": [
+              {"type": "object", "properties": {"title": {"type": "string", "description": "The title of the issue."}}, "required": ["title"]},
+              {"type": "object", "properties": {
+                "body": {"type": "string", "description": "The contents of the issue."},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "id": {"type": "integer", "readOnly": true},
+                "parent": {"$ref": "#/components/schemas/issue-node"}
+              }}
+            ]
+          }}}
+        },
+        "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "issues", "subcategory": "issues"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/comments": {
+      "post": {
+        "summary": "Create an issue comment",
+        "operationId": "issues/create-comment",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}}}},
+        "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "issues", "subcategory": "comments"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/labels": {
+      "post": {
+        "summary": "Add labels to an issue",
+        "operationId": "issues/add-labels",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"oneOf": [
+          {"type": "object", "properties": {"labels": {"type": "array", "items": {"type": "string"}}}},
+          {"type": "array", "items": {"type": "string"}}
+        ]}}}},
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}},
+        "x-github": {"category": "issues", "subcategory": "labels"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/assignees": {
+      "get": {
+        "summary": "List assignees of an issue",
+        "operationId": "issues/list-assignees",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
+        "x-github": {"category": "issues", "subcategory": "assignees"}
+      },
+      "delete": {
+        "summary": "Remove assignees from an issue",
+        "operationId": "issues/remove-assignees",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"assignees": {"type": "array", "items": {"type": "string"}}}}}}},
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "issues", "subcategory": "assignees"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments/{comment_id}": {
+      "delete": {
+        "summary": "Delete an issue comment",
+        "operationId": "issues/delete-comment",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "comment_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {"204": {"description": "Response"}},
+        "x-github": {"category": "issues", "subcategory": "comments"}
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/reactions": {
+      "get": {
+        "summary": "List reactions for an issue",
+        "operationId": "reactions/list-for-issue",
+        "parameters": [
+          {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"},
+          {"name": "content", "in": "query", "schema": {"type": "string", "enum": ["+1", "-1", "heart"]}},
+          {"name": "per_page", "in": "query", "schema": {"type": "integer", "default": 30}}
+        ],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
+        "x-github": {"category": "reactions", "subcategory": "reactions"}
+      }
+    },
+    "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs": {
+      "get": {
+        "summary": "Download job logs for a workflow run",
+        "operationId": "actions/download-job-logs-for-workflow-run",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "job_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {"302": {"description": "Response"}},
+        "x-github": {"category": "actions", "subcategory": "workflow-jobs"}
+      }
+    },
+    "/repos/{owner}/{repo}/check-runs": {
+      "post": {
+        "summary": "Create a check run",
+        "operationId": "checks/create",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}, "head_sha": {"type": "string"}}, "required": ["name", "head_sha"]}}}},
+        "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "checks", "subcategory": "runs"}
+      }
+    },
+    "/repos/{owner}/{repo}/releases/{release_id}/assets": {
+      "post": {
+        "summary": "Upload a release asset",
+        "operationId": "repos/upload-release-asset",
+        "servers": [{"url": "https://uploads.github.com"}],
+        "parameters": [
+          {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
+          {"name": "release_id", "in": "path", "required": true, "schema": {"type": "integer"}},
+          {"name": "name", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "label", "in": "query", "schema": {"type": "string"}}
+        ],
+        "requestBody": {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
+        "responses": {"201": {"description": "Response for successful upload", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "releases", "subcategory": "assets"}
+      }
+    },
+    "/repos/{owner}/{repo}/attestations": {
+      "post": {
+        "summary": "Create an attestation",
+        "operationId": "repos/create-attestation",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
+          {"name": "dry", "in": "query", "schema": {"type": "boolean"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"bundle": {"type": "object"}}, "required": ["bundle"]}}}},
+        "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "repos", "subcategory": "attestations"}
+      }
+    },
+    "/repos/{owner}/{repo}/dependabot/alerts/{alert_number}": {
+      "get": {
+        "summary": "Get a Dependabot alert",
+        "operationId": "dependabot/get-alert",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/alert-number"}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "dependabot", "subcategory": "alerts"}
+      }
+    },
+    "/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}": {
+      "get": {
+        "summary": "Get a code scanning alert",
+        "operationId": "code-scanning/get-alert",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/alert-number"}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "code-scanning", "subcategory": "code-scanning"}
+      }
+    },
+    "/agents/repos/{owner}/{repo}/tasks": {
+      "get": {
+        "summary": "List tasks for repository",
+        "operationId": "agent-tasks/list-tasks-for-repo",
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
+          {"name": "creator_id", "in": "query", "description": "Filter by creator.", "schema": {"type": "array", "items": {"type": "integer"}}}],
+        "responses": {"200": {"description": "Tasks retrieved successfully", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "agent-tasks", "subcategory": "agent-tasks"}
+      }
+    },
+    "/search/code": {
+      "get": {
+        "summary": "Search code",
+        "operationId": "search/code",
+        "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "search", "subcategory": "search"}
+      }
+    },
+    "/user": {
+      "get": {
+        "summary": "Get the authenticated user",
+        "operationId": "users/get-authenticated",
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "users", "subcategory": "users"}
+      }
+    },
+    "/zen": {
+      "get": {
+        "summary": "Get the Zen of GitHub",
+        "operationId": "meta/get-zen",
+        "responses": {"200": {"description": "Response", "content": {"text/plain": {"schema": {"type": "string"}}}}},
+        "x-github": {"category": "meta", "subcategory": "meta"}
+      }
+    },
+    "/markdown/raw": {
+      "post": {
+        "summary": "Render a Markdown document in raw mode",
+        "operationId": "markdown/render-raw",
+        "requestBody": {"content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "Response", "content": {"text/html": {"schema": {"type": "string"}}}}},
+        "x-github": {"category": "markdown", "subcategory": "markdown"}
+      }
+    },
+    "/orgs/{org}/members": {
+      "get": {
+        "summary": "List organization members",
+        "operationId": "orgs/list-members",
+        "parameters": [{"name": "org", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
+        "x-github": {"category": "orgs", "subcategory": "members"}
+      }
+    },
+    "/orgs/{org}": {
+      "get": {
+        "summary": "Get an organization",
+        "operationId": "orgs/get",
+        "parameters": [{"name": "org", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "orgs", "subcategory": "orgs"}
+      }
+    },
+    "/teams/{team_id}": {
+      "get": {
+        "summary": "Get a team (Legacy)",
+        "operationId": "teams/get-legacy",
+        "deprecated": true,
+        "parameters": [{"name": "team_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
+        "x-github": {"category": "teams", "subcategory": "teams", "deprecationDate": "2020-01-21"}
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "owner": {"name": "owner", "in": "path", "required": true, "description": "The account owner of the repository.", "schema": {"type": "string"}},
+      "repo": {"name": "repo", "in": "path", "required": true, "description": "The name of the repository.", "schema": {"type": "string"}},
+      "issue-number": {"name": "issue_number", "in": "path", "required": true, "description": "The number that identifies the issue.", "schema": {"type": "integer"}},
+      "alert-number": {"name": "alert_number", "in": "path", "required": true, "schema": {"type": "integer"}}
+    },
+    "schemas": {
+      "repository": {"type": "object", "properties": {"name": {"type": "string"}}},
+      "issue-node": {"title": "Issue node", "type": "object", "description": "A node of an issue tree.", "properties": {
+        "number": {"type": "integer"},
+        "children": {"type": "array", "items": {"$ref": "#/components/schemas/issue-node"}}
+      }}
+    }
+  }
+}
