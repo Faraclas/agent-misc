@@ -461,11 +461,21 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 
 ### OpenAPI-to-UTCP Normalization Rules
 
-- **Tool Naming:** Uses `operationId` (normalized to `snake_case` / safe characters); if `operationId` is absent,
-  synthesizes `<method>_<sanitized_path>` (e.g., `get_users_by_id`).
+- **Tool Naming:** Uses `operationId`, with any character other than letters, digits, `_` and `-` replaced by `_`
+  (GitHub's `actions/create-workflow-dispatch` with tag `actions` arrives as `actions_create-workflow-dispatch`; names
+  are not converted to `snake_case`). If `operationId` is absent, synthesizes `<method>_<sanitized_path>` (e.g.,
+  `get_users_by_id`).
 - **Parameter Mapping:** Distinguishes `path` parameters (interpolated into URL template `/users/{id}`), `query`
   parameters, `header` parameters, and JSON `body` properties so `utcp call` routes each argument to its proper HTTP
   location automatically.
+- **Input Schemas:** Parameter and body schemas are expanded in full (`$ref`s inlined), since agents need them to build
+  calls. A schema met again inside its own expansion (a tree node holding its children) is replaced by a short
+  "Recursive: the same schema as ... above" note instead of recursing. `type: object` is added only when the schema has
+  no `type`, `oneOf`, `anyOf`, `allOf`, `enum`, `const` or `not`.
+- **Output Schemas:** The `200` (or `201`) JSON response is outlined one level deep: its `type`, `description`,
+  `required` and fields, each field with only its `type`, `format` and item type (an `anyOf` / `oneOf` field lists its
+  variants' types). Nested fields are not expanded, so one tool's output schema stays a few KB even on large APIs
+  (GitHub: 482 KB -> 5.5 KB at most, [issue 022](../issues/022-openapi-import-output-schemas-oneof-and-recursive-refs.md)).
 - **Auth & Secret Namespacing:**
   - Follows UTCP's doubled-underscore rule: for manual `my_api` requiring `API_KEY`, the primary `.env` variable is
     `my__api_API_KEY` (plus supporting `<MANUAL_UPPER>_API_KEY` as a convenient fallback).

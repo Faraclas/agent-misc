@@ -37,3 +37,4 @@ Maintaining one document per issue serves two purposes:
 | [019](./019-daemon-secrets-at-startup-and-doctor.md) | Daemon has no secrets after a reboot (new secrets command), `doctor` checks the caller instead of the daemon, no startup warnings | none | Fixed in `utcp-rs` 0.1.1 | Not applicable |
 | [020](./020-windows-bare-command-names-miss-cmd-launchers.md) | Windows: a bare `--command` name (`npx`, `az`) misses `.cmd` launchers on `PATH` | none | Fixed in `utcp-rs` 0.1.3 | Not applicable |
 | [021](./021-http2-many-small-data-frames.md) | Large HTTP/2 responses sent in many small frames fail with "too_many_data_frames" | none (`h2` guard) | Fixed in `utcp-rs` 0.1.3 | Not applicable |
+| [022](./022-openapi-import-output-schemas-oneof-and-recursive-refs.md) | OpenAPI import expands every response schema (27 MB GitHub manual), types `oneOf` as `object`, overflows on recursive schemas | `0.3.2` | Fixed in `utcp-core` (`utcp-rs` 0.2.1) | Not filed yet |

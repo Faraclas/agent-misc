@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use reqwest::Url;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use crate::auth::{ApiKeyAuth, AuthConfig, AuthType, BasicAuth, OAuth2Auth};
@@ -147,28 +147,55 @@ impl OpenApiConverter {
     }
 
     fn resolve_schema(&self, schema: Value) -> Value {
+        self.resolve_schema_within(schema, &mut Vec::new())
+    }
+
+    /// Expands `$ref`s recursively. `active` holds the references being expanded on the current path, so a schema
+    /// that refers to itself (a tree node holding its children) stops there instead of overflowing the stack.
+    fn resolve_schema_within(&self, schema: Value, active: &mut Vec<String>) -> Value {
         match schema {
             Value::Object(map) => {
                 if let Some(Value::String(reference)) = map.get("$ref").cloned() {
+                    if active.contains(&reference) {
+                        return recursive_ref_placeholder(&reference);
+                    }
                     if let Ok(resolved) = self.resolve_ref(&reference) {
-                        return self.resolve_schema(resolved);
+                        active.push(reference);
+                        let out = self.resolve_schema_within(resolved, active);
+                        active.pop();
+                        return out;
                     }
                     return Value::Object(map);
                 }
 
                 let mut out = Map::new();
                 for (k, v) in map {
-                    out.insert(k, self.resolve_schema(v));
+                    out.insert(k, self.resolve_schema_within(v, active));
                 }
                 Value::Object(out)
             }
             Value::Array(arr) => Value::Array(
                 arr.into_iter()
-                    .map(|item| self.resolve_schema(item))
+                    .map(|item| self.resolve_schema_within(item, active))
                     .collect(),
             ),
             other => other,
         }
+    }
+
+    /// Follows a chain of `$ref`s at the top of `value` only, leaving everything below it unexpanded.
+    fn deref_shallow(&self, value: &Value) -> Map<String, Value> {
+        let mut current = value.clone();
+        for _ in 0..MAX_REF_HOPS {
+            let Some(reference) = current.get("$ref").and_then(Value::as_str) else {
+                break;
+            };
+            match self.resolve_ref(reference) {
+                Ok(next) => current = next,
+                Err(_) => break,
+            }
+        }
+        current.as_object().cloned().unwrap_or_default()
     }
 
     fn extract_auth(&self, operation: &Map<String, Value>) -> Option<AuthConfig> {
@@ -472,7 +499,7 @@ impl OpenApiConverter {
                     for (k, v) in schema_map {
                         entry.insert(k, v);
                     }
-                    if !entry.contains_key("type") {
+                    if needs_default_type(&entry) {
                         entry.insert("type".to_string(), Value::String("object".to_string()));
                     }
 
@@ -507,7 +534,7 @@ impl OpenApiConverter {
                             for (k, v) in schema_map {
                                 entry.insert(k, v);
                             }
-                            if !entry.contains_key("type") {
+                            if needs_default_type(&entry) {
                                 entry.insert(
                                     "type".to_string(),
                                     Value::String("object".to_string()),
@@ -565,48 +592,37 @@ impl OpenApiConverter {
             Some(r) => r,
             None => return default_schema,
         };
-        let resp = match responses
-            .get("200")
-            .or_else(|| responses.get("201"))
-            .cloned()
-        {
-            Some(r) => r,
-            None => return default_schema,
+        let Some(resp) = responses.get("200").or_else(|| responses.get("201")) else {
+            return default_schema;
         };
 
-        let resp = self.resolve_schema(resp);
-        if let Some(resp_obj) = resp.as_object() {
-            if let Some(content) = resp_obj.get("content").and_then(|v| v.as_object()) {
-                if let Some(app_json) = content.get("application/json").and_then(|v| v.as_object())
-                {
-                    if let Some(schema) = app_json.get("schema") {
-                        let fallback = resp_obj
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        return self.build_schema_from_value(schema, fallback);
-                    }
-                }
-            }
-            if let Some(schema) = resp_obj.get("schema") {
-                let fallback = resp_obj
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                return self.build_schema_from_value(schema, fallback);
-            }
+        // The response's schema is outlined, not expanded: only `$ref`s on the way to it are followed here.
+        let resp_obj = self.deref_shallow(resp);
+        let fallback = resp_obj
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let schema = resp_obj
+            .get("content")
+            .and_then(|content| content.get("application/json"))
+            .and_then(|app_json| app_json.get("schema"))
+            .or_else(|| resp_obj.get("schema"));
+        match schema {
+            Some(schema) => self.build_schema_from_value(schema, fallback),
+            None => default_schema,
         }
-
-        default_schema
     }
 
+    /// Outlines a response schema one level deep: its own type and description, and the name, type and format of each
+    /// field (of the object, or of each item of a list). Nested fields are not expanded. Nothing reads output schemas
+    /// to make a call; the outline shows agents what a tool answers and which fields `--fields` can pick, while a full
+    /// expansion of a large API's responses runs to hundreds of KB per tool.
     fn build_schema_from_value(
         &self,
         schema: &Value,
         fallback_description: Option<String>,
     ) -> ToolInputOutputSchema {
-        let resolved = self.resolve_schema(schema.clone());
-        let map = resolved.as_object().cloned().unwrap_or_default();
+        let map = self.merge_all_of(self.deref_shallow(schema));
 
         let mut out = ToolInputOutputSchema {
             type_: map
@@ -614,7 +630,7 @@ impl OpenApiConverter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("object")
                 .to_string(),
-            properties: map_from_value(map.get("properties")),
+            properties: self.outline_properties(map.get("properties")),
             required: string_slice(map.get("required")),
             description: match map
                 .get("description")
@@ -639,10 +655,127 @@ impl OpenApiConverter {
         };
 
         if out.type_ == "array" {
-            out.items = map_from_value(map.get("items"));
+            out.items = map.get("items").map(|items| {
+                let item = self.merge_all_of(self.deref_shallow(items));
+                let mut outline = HashMap::new();
+                if let Some(typ) = self.outline_type(&item) {
+                    outline.insert("type".to_string(), typ);
+                }
+                if let Some(props) = self.outline_properties(item.get("properties")) {
+                    outline.insert(
+                        "properties".to_string(),
+                        Value::Object(props.into_iter().collect()),
+                    );
+                }
+                outline
+            });
         }
 
         out
+    }
+
+    /// Folds the `properties` and `required` of `allOf` parts into the schema itself, one level deep.
+    fn merge_all_of(&self, mut map: Map<String, Value>) -> Map<String, Value> {
+        let Some(parts) = map.remove("allOf").and_then(|v| v.as_array().cloned()) else {
+            return map;
+        };
+        for part in &parts {
+            let part = self.deref_shallow(part);
+            if let Some(props) = part.get("properties").and_then(Value::as_object) {
+                let target = map
+                    .entry("properties")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(target) = target.as_object_mut() {
+                    for (k, v) in props {
+                        target.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+            if let Some(req) = part.get("required").and_then(Value::as_array) {
+                let target = map
+                    .entry("required")
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(target) = target.as_array_mut() {
+                    for r in req {
+                        if !target.contains(r) {
+                            target.push(r.clone());
+                        }
+                    }
+                }
+            }
+            for key in ["type", "description", "title"] {
+                if let Some(v) = part.get(key) {
+                    map.entry(key).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        map
+    }
+
+    /// Each field reduced to its `type` (with `format`, and the item type of a list), without its own fields.
+    fn outline_properties(&self, value: Option<&Value>) -> Option<HashMap<String, Value>> {
+        let props = value.and_then(Value::as_object)?;
+        Some(
+            props
+                .iter()
+                .map(|(name, prop)| {
+                    let prop = self.merge_all_of(self.deref_shallow(prop));
+                    let mut outline = Map::new();
+                    if let Some(typ) = self.outline_type(&prop) {
+                        outline.insert("type".to_string(), typ);
+                    }
+                    if let Some(format) = prop.get("format") {
+                        outline.insert("format".to_string(), format.clone());
+                    }
+                    if prop.get("type").and_then(Value::as_str) == Some("array") {
+                        if let Some(item_type) = prop
+                            .get("items")
+                            .map(|items| self.deref_shallow(items))
+                            .and_then(|items| self.outline_type(&items))
+                        {
+                            outline.insert("items".to_string(), json!({ "type": item_type }));
+                        }
+                    }
+                    (name.clone(), Value::Object(outline))
+                })
+                .collect(),
+        )
+    }
+
+    /// The schema's `type`, or for a `oneOf` / `anyOf` the distinct types of its variants (a string for one, a list
+    /// for several), or `object` when it only has fields.
+    fn outline_type(&self, schema: &Map<String, Value>) -> Option<Value> {
+        if let Some(typ) = schema.get("type") {
+            return Some(typ.clone());
+        }
+        let variants = schema
+            .get("oneOf")
+            .or_else(|| schema.get("anyOf"))
+            .and_then(Value::as_array);
+        if let Some(variants) = variants {
+            let mut types: Vec<Value> = Vec::new();
+            for variant in variants {
+                let variant = self.deref_shallow(variant);
+                let typ = variant.get("type").cloned().or_else(|| {
+                    variant
+                        .contains_key("properties")
+                        .then(|| Value::String("object".to_string()))
+                });
+                if let Some(typ) = typ {
+                    if !types.contains(&typ) {
+                        types.push(typ);
+                    }
+                }
+            }
+            return match types.len() {
+                0 => None,
+                1 => types.pop(),
+                _ => Some(Value::Array(types)),
+            };
+        }
+        schema
+            .contains_key("properties")
+            .then(|| Value::String("object".to_string()))
     }
 }
 
@@ -713,6 +846,23 @@ fn optional_string(s: String) -> Option<String> {
     }
 }
 
+/// Longest chain of `$ref`s to `$ref`s followed before giving up (guards against a reference loop).
+const MAX_REF_HOPS: usize = 32;
+
+/// A parameter or body schema gets `type: object` only when nothing else says what it holds. A `oneOf` of an integer
+/// and a string (GitHub's `workflow_id`) is not an object.
+fn needs_default_type(schema: &Map<String, Value>) -> bool {
+    !["type", "oneOf", "anyOf", "allOf", "enum", "const", "not"]
+        .iter()
+        .any(|key| schema.contains_key(*key))
+}
+
+/// Stands in for a `$ref` met again inside its own expansion.
+fn recursive_ref_placeholder(reference: &str) -> Value {
+    let name = reference.rsplit('/').next().unwrap_or(reference);
+    json!({ "description": format!("Recursive: the same schema as `{name}` above, not expanded again.") })
+}
+
 fn join_url(base: &str, path: &str) -> String {
     let trimmed_base = base.trim_end_matches('/');
     let trimmed_path = path.trim_start_matches('/');
@@ -723,14 +873,6 @@ fn join_url(base: &str, path: &str) -> String {
     } else {
         format!("{}/{}", trimmed_base, trimmed_path)
     }
-}
-
-fn map_from_value(value: Option<&Value>) -> Option<HashMap<String, Value>> {
-    value.and_then(|v| v.as_object()).map(|obj| {
-        obj.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<_, _>>()
-    })
 }
 
 fn string_slice(value: Option<&Value>) -> Option<Vec<String>> {
@@ -972,5 +1114,166 @@ mod tests {
         assert_eq!(manual.version, VERSION);
         assert_eq!(manual.tools.len(), 1);
         assert_eq!(manual.tools[0].name, "ping");
+    }
+
+    /// A spec shaped like GitHub's: shared response schemas, nested objects, lists, `allOf`, a `oneOf` parameter, and a
+    /// schema that refers to itself.
+    fn outline_test_converter() -> OpenApiConverter {
+        let spec = json!({
+            "info": {"title": "Outline"},
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {
+                "schemas": {
+                    "owner": {
+                        "type": "object",
+                        "properties": {
+                            "login": {"type": "string", "description": "Login name"},
+                            "plan": {"type": "object", "properties": {"seats": {"type": "integer"}}}
+                        }
+                    },
+                    "repo": {
+                        "type": "object",
+                        "description": "A repository",
+                        "required": ["id"],
+                        "properties": {
+                            "id": {"type": "integer", "format": "int64"},
+                            "owner": {"$ref": "#/components/schemas/owner"},
+                            "topics": {"type": "array", "items": {"type": "string"}},
+                            "license": {"anyOf": [{"type": "null"}, {"$ref": "#/components/schemas/owner"}]}
+                        }
+                    },
+                    "full-repo": {
+                        "allOf": [
+                            {"$ref": "#/components/schemas/repo"},
+                            {"type": "object", "properties": {"forks": {"type": "integer"}}}
+                        ]
+                    },
+                    "node": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "children": {"type": "array", "items": {"$ref": "#/components/schemas/node"}}
+                        }
+                    }
+                },
+                "responses": {
+                    "repo-list": {
+                        "description": "Response",
+                        "content": {"application/json": {"schema": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/repo"}
+                        }}}
+                    }
+                }
+            },
+            "paths": {
+                "/repos": {
+                    "get": {
+                        "operationId": "list-repos",
+                        "responses": {"200": {"$ref": "#/components/responses/repo-list"}}
+                    }
+                },
+                "/repos/{id}": {
+                    "get": {
+                        "operationId": "get-repo",
+                        "parameters": [{
+                            "name": "id", "in": "path", "required": true,
+                            "schema": {"oneOf": [{"type": "integer"}, {"type": "string"}]}
+                        }],
+                        "responses": {"200": {
+                            "description": "Response",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/full-repo"}}}
+                        }}
+                    }
+                },
+                "/trees": {
+                    "post": {
+                        "operationId": "create-tree",
+                        "requestBody": {"content": {"application/json": {"schema": {
+                            "oneOf": [{"$ref": "#/components/schemas/node"}, {"type": "string"}]
+                        }}}},
+                        "responses": {"201": {
+                            "description": "Created",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/node"}}}
+                        }}
+                    }
+                }
+            }
+        });
+        OpenApiConverter::new(spec, None, Some("outline".to_string()))
+    }
+
+    fn tool<'a>(manual: &'a UtcpManual, name: &str) -> &'a Tool {
+        manual.tools.iter().find(|t| t.name == name).unwrap()
+    }
+
+    #[test]
+    fn outputs_are_outlined_one_level_deep() {
+        let manual = outline_test_converter().convert();
+
+        let get = serde_json::to_value(&tool(&manual, "get-repo").outputs).unwrap();
+        assert_eq!(
+            get,
+            json!({
+                "type": "object",
+                "description": "A repository",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "integer", "format": "int64"},
+                    "owner": {"type": "object"},
+                    "topics": {"type": "array", "items": {"type": "string"}},
+                    "license": {"type": ["null", "object"]},
+                    "forks": {"type": "integer"}
+                }
+            })
+        );
+
+        let list = serde_json::to_value(&tool(&manual, "list-repos").outputs).unwrap();
+        assert_eq!(list["type"], "array");
+        assert_eq!(list["description"], "Response");
+        assert_eq!(list["items"]["type"], "object");
+        assert_eq!(
+            list["items"]["properties"]["owner"],
+            json!({"type": "object"})
+        );
+        assert!(list["items"]["properties"]["owner"]
+            .get("properties")
+            .is_none());
+    }
+
+    #[test]
+    fn one_of_parameter_is_not_typed_object() {
+        let manual = outline_test_converter().convert();
+        let inputs = serde_json::to_value(&tool(&manual, "get-repo").inputs).unwrap();
+        assert_eq!(
+            inputs["properties"]["id"],
+            json!({"oneOf": [{"type": "integer"}, {"type": "string"}]})
+        );
+    }
+
+    #[test]
+    fn self_referencing_schema_stops_instead_of_overflowing() {
+        let manual = outline_test_converter().convert();
+        let create = tool(&manual, "create-tree");
+
+        let inputs = serde_json::to_value(&create.inputs).unwrap();
+        let body = &inputs["properties"]["body"];
+        assert!(
+            body.get("type").is_none(),
+            "a oneOf body is not typed object"
+        );
+        let node = &body["oneOf"][0];
+        assert_eq!(node["properties"]["name"]["type"], "string");
+        let again = &node["properties"]["children"]["items"];
+        assert!(again["description"]
+            .as_str()
+            .unwrap()
+            .contains("Recursive: the same schema as `node`"));
+
+        let outputs = serde_json::to_value(&create.outputs).unwrap();
+        assert_eq!(
+            outputs["properties"]["children"],
+            json!({"type": "array", "items": {"type": "object"}})
+        );
     }
 }
