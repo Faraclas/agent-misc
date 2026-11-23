@@ -9,6 +9,7 @@ __pycache__/
 azdo-manuals/out/
 azdo-manuals/**/*.utcp.json
 !azdo-manuals/tests/fixtures/expected/*.utcp.json
+!azdo-manuals/tests/fixtures/expected-extra/*.utcp.json
 
 # Local environment & secret files
 **/.env
