@@ -2110,16 +2110,47 @@ pub fn dry_run_tool_from_manual(
             for k in consumed {
                 rem.remove(&k);
             }
+            let mut headers = http_prov.headers.clone().unwrap_or_default();
+            let mut rest = rem.clone();
+            for field in http_prov.header_fields.iter().flatten() {
+                if let Some(v) = rest.remove(field) {
+                    let v = v
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string());
+                    headers.insert(field.clone(), v);
+                }
+            }
+            let parts = crate::transports::http::plan_request(
+                &format!("{}.{}", manual_name, entry.name),
+                &http_prov,
+                rest,
+            )?;
             let mut preview = json!({
                 "dry_run": true,
                 "tool": format!("{}.{}", manual_name, entry.name),
                 "protocol": "http",
                 "method": http_prov.http_method,
                 "url": url,
-                "headers": http_prov.headers,
+                "headers": (!headers.is_empty()).then_some(headers),
                 "auth": http_prov.base.auth,
                 "args": rem,
+                "query": parts
+                    .query
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect::<serde_json::Map<String, Value>>(),
             });
+            {
+                use crate::transports::http::RequestBody;
+                match parts.body {
+                    RequestBody::None => {}
+                    RequestBody::Json(v) | RequestBody::Upload { spec: v, .. } => {
+                        preview["body"] = v
+                    }
+                    RequestBody::Text(t) => preview["body"] = json!(t),
+                }
+            }
             if let Some(body_type) = &http_prov.body_type {
                 preview["body_type"] = json!(body_type);
             }

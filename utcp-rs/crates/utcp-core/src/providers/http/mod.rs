@@ -19,8 +19,10 @@ pub struct HttpProvider {
     pub body_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_fields: Option<Vec<String>>,
-    /// `"file"`: the `body_field` argument names a file to upload (`{"file": "<path>"}`), sent as the
-    /// raw body with the `Content-Type` from `headers`. Default: the body is JSON.
+    /// What the body is: `"json"` (default), `"text"` (the `body_field` argument, a string, sent as is with
+    /// the `Content-Type` from `headers`, default `text/plain`) or `"file"` (the `body_field` argument names a
+    /// file to upload, `{"file": "<path>"}`, sent with the `Content-Type` from `headers`). Which methods send a
+    /// body: see `transports::http::plan_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_type: Option<String>,
     /// `"file"`: the answer is always saved as a file, even when it is JSON or text. Default: a

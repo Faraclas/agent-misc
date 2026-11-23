@@ -72,7 +72,7 @@ pub fn render_skill_markdown(platform: SkillTargetPlatform, manual_labels: &[Str
   EOF
   ```
 
-- **Preview a call without executing (`--dry-run`):**
+- **Preview a call without executing (`--dry-run`; it shows the URL, query and body it would send):**
 
   ```sh
   utcp call <manual.tool> '{\"param\": \"value\"}' --dry-run
@@ -104,7 +104,7 @@ EOF
   '@ | utcp.exe call <manual.tool> --args-stdin
   ```
 
-- **Preview a call without executing (`--dry-run`):**
+- **Preview a call without executing (`--dry-run`; it shows the URL, query and body it would send):**
 
   ```powershell
   @'

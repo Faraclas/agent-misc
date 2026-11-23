@@ -289,10 +289,18 @@ it never opens your files.
   because of the limit, names the setting and the file, and keeps nothing. JSON answers are never limited.
 - **Slow transfers.** A call fails only when the server sends nothing for 60 s (`did not answer for 60 s`, or `sent
   no data for 60 s in the middle of its answer`). A transfer that keeps moving can take as long as it needs.
-- In a manual, an HTTP tool's `tool_call_template` marks an upload with `"body_type": "file"` (its `body_field`
-  names the argument; the `Content-Type` header sets the type) and forces a file answer with
-  `"response_type": "file"`. An upload needs POST, PUT or PATCH: calling a GET, DELETE or HEAD tool marked as an
-  upload fails with an error that says to fix the manual, instead of sending the request without the file.
+- In a manual, an HTTP tool's `tool_call_template` decides where the arguments go. Path parameters fill the URL,
+  `header_fields` become headers, and the rest are query parameters, except for the body:
+  - POST, PUT and PATCH send a body. With `body_field`, that argument is the body and the others stay query
+    parameters; without it, all arguments form one JSON object.
+  - DELETE sends a body only when the template sets `body_field` and the call passes that argument (as for POST).
+    Otherwise every argument is a query parameter. GET and HEAD never send a body.
+  - `"body_type"` says what the body is: `"json"` (the default), `"text"` (the `body_field` argument, a string,
+    sent as is; the `Content-Type` header sets the type, default `text/plain; charset=utf-8`) or `"file"` (an
+    upload: `body_field` names the argument and the `Content-Type` header sets the type). An upload needs POST, PUT
+    or PATCH, and a text body POST, PUT, PATCH or DELETE. Calling a tool that breaks these rules, or has another
+    `body_type`, fails with an error that says to fix the manual, instead of sending the request without its body.
+  - `"response_type": "file"` forces a file answer.
 
 ## 4. Changing and Removing Manuals
 
@@ -397,8 +405,8 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
    | `Cannot use the utcp daemon at ...: permission denied` (Linux) | Another account started it, for example root through `sudo`. | Stop it as that account, start it as yourself. |
 
 3. **Narrow it down:**
-   - `utcp call <manual.tool> '<json>' --dry-run` shows the request it would send (URL, method, headers, with
-     secrets redacted) without sending it.
+   - `utcp call <manual.tool> '<json>' --dry-run` shows the request it would send (URL, method, headers, query
+     parameters and body, with secrets redacted) without sending it.
    - `utcp --direct call ...` skips the daemon. If that works and the normal call fails, the daemon has stale
      state: `utcp daemon reload-env` for secrets, `utcp daemon restart` for everything else.
    - `utcp doctor` shows `[MISSING]` for every secret a manual needs and cannot find, and where each `[SET]` one comes

@@ -244,55 +244,35 @@ impl ClientTransport for HttpClientTransport {
             request_builder = self.apply_auth(request_builder, auth)?;
         }
 
-        // Determine how to send remaining args
         let activity = Activity::new();
-        let has_body = method_upper == "POST" || method_upper == "PUT" || method_upper == "PATCH";
-        let upload = http_prov.body_type.as_deref() == Some("file");
-        if upload && !has_body {
-            return Err(anyhow!(
-                "tool `{tool_name}` is broken: its template uploads a file (`\"body_type\": \"file\"`) with \
-                 {method_upper}, which sends no body; an upload needs POST, PUT or PATCH. Fix the manual."
-            ));
+        let parts = plan_request(tool_name, http_prov, remaining_args)?;
+        if !parts.query.is_empty() {
+            request_builder = request_builder.query(&parts.query);
         }
-        if upload {
-            let field = http_prov.body_field.as_deref().unwrap_or("body");
-            let spec_val = remaining_args.remove(field).ok_or_else(|| {
-                anyhow!("this tool uploads a file: pass it as `{field}`: {{\"file\": \"<path>\"}}")
-            })?;
-            let spec = UploadSpec::from_value(&spec_val, field)?;
-            for (key, value) in &remaining_args {
-                request_builder = request_builder.query(&[(key, query_value(value))]);
-            }
-            let upload = files.open_upload(&spec).await?;
-            let has_content_type = http_prov.headers.as_ref().is_some_and(|h| {
-                h.keys()
-                    .any(|k| k.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()))
-            });
-            if !has_content_type {
-                request_builder =
-                    request_builder.header(header::CONTENT_TYPE, "application/octet-stream");
-            }
-            request_builder = request_builder
-                .header(header::CONTENT_LENGTH, upload.length)
-                .body(reqwest::Body::wrap_stream(activity.track(upload.stream)));
-        } else if has_body {
-            if let Some(body_field) = &http_prov.body_field {
-                if let Some(body_val) = remaining_args.remove(body_field) {
-                    // Any leftover parameters after extracting body_field are query parameters
-                    for (key, value) in &remaining_args {
-                        request_builder = request_builder.query(&[(key, query_value(value))]);
-                    }
-                    request_builder = request_builder.json(&body_val);
-                } else {
-                    request_builder = request_builder.json(&remaining_args);
+        let sets_content_type = http_prov.headers.as_ref().is_some_and(|h| {
+            h.keys()
+                .any(|k| k.eq_ignore_ascii_case(header::CONTENT_TYPE.as_str()))
+        });
+        match parts.body {
+            RequestBody::None => {}
+            RequestBody::Json(value) => request_builder = request_builder.json(&value),
+            RequestBody::Text(text) => {
+                if !sets_content_type {
+                    request_builder =
+                        request_builder.header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
                 }
-            } else {
-                request_builder = request_builder.json(&remaining_args);
+                request_builder = request_builder.body(text);
             }
-        } else {
-            // Send as query parameters without JSON quotes around strings
-            for (key, value) in &remaining_args {
-                request_builder = request_builder.query(&[(key, query_value(value))]);
+            RequestBody::Upload { field, spec } => {
+                let spec = UploadSpec::from_value(&spec, &field)?;
+                let upload = files.open_upload(&spec).await?;
+                if !sets_content_type {
+                    request_builder =
+                        request_builder.header(header::CONTENT_TYPE, "application/octet-stream");
+                }
+                request_builder = request_builder
+                    .header(header::CONTENT_LENGTH, upload.length)
+                    .body(reqwest::Body::wrap_stream(activity.track(upload.stream)));
             }
         }
 
@@ -428,6 +408,119 @@ fn query_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// What an HTTP call sends besides its URL and headers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestParts {
+    /// Query parameters, sorted by name; strings are sent without JSON quotes.
+    pub query: Vec<(String, String)>,
+    pub body: RequestBody,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestBody {
+    None,
+    Json(Value),
+    /// `"body_type": "text"`: the string is the whole body, sent as is.
+    Text(String),
+    /// `"body_type": "file"`: the `{"file": "<path>", ...}` argument named `field`.
+    Upload {
+        field: String,
+        spec: Value,
+    },
+}
+
+/// Split a call's arguments (path parameters and `header_fields` already taken out) into query
+/// parameters and a body, following the tool's template:
+///
+/// - POST, PUT and PATCH: the `body_field` argument is the body and the other arguments are query
+///   parameters; without `body_field` (or without that argument) all arguments form a JSON object body.
+/// - DELETE: no body, all arguments are query parameters, unless the template sets `body_field` and
+///   the call passes that argument: then it is the body, as for POST.
+/// - GET and HEAD: no body.
+/// - `body_type` `"text"` sends the `body_field` argument (a string) as the raw body; `"file"` uploads
+///   the file it names (POST, PUT or PATCH only). Default and `"json"`: a JSON body.
+pub fn plan_request(
+    tool_name: &str,
+    prov: &HttpProvider,
+    mut args: HashMap<String, Value>,
+) -> Result<RequestParts> {
+    let method = prov.http_method.to_uppercase();
+    let always_body = matches!(method.as_str(), "POST" | "PUT" | "PATCH");
+    let field = prov.body_field.as_deref().unwrap_or("body").to_string();
+    let query = |args: HashMap<String, Value>| {
+        let mut q: Vec<(String, String)> = args
+            .into_iter()
+            .map(|(k, v)| {
+                let v = query_value(&v);
+                (k, v)
+            })
+            .collect();
+        q.sort();
+        q
+    };
+    match prov.body_type.as_deref().unwrap_or("json") {
+        "file" => {
+            if !always_body {
+                return Err(anyhow!(
+                    "tool `{tool_name}` is broken: its template uploads a file (`\"body_type\": \"file\"`) \
+                     with {method}, which sends no body; an upload needs POST, PUT or PATCH. Fix the manual."
+                ));
+            }
+            let spec = args.remove(&field).ok_or_else(|| {
+                anyhow!("this tool uploads a file: pass it as `{field}`: {{\"file\": \"<path>\"}}")
+            })?;
+            Ok(RequestParts {
+                query: query(args),
+                body: RequestBody::Upload { field, spec },
+            })
+        }
+        "text" => {
+            if !always_body && method != "DELETE" {
+                return Err(anyhow!(
+                    "tool `{tool_name}` is broken: its template sends a text body (`\"body_type\": \"text\"`) \
+                     with {method}, which sends no body; a body needs POST, PUT, PATCH or DELETE. Fix the manual."
+                ));
+            }
+            match args.remove(&field) {
+                Some(Value::String(text)) => Ok(RequestParts {
+                    query: query(args),
+                    body: RequestBody::Text(text),
+                }),
+                _ => Err(anyhow!(
+                    "this tool sends `{field}` as the raw request body: pass it as a string"
+                )),
+            }
+        }
+        "json" => {
+            if always_body || method == "DELETE" {
+                if let Some(name) = &prov.body_field {
+                    if let Some(body) = args.remove(name) {
+                        return Ok(RequestParts {
+                            query: query(args),
+                            body: RequestBody::Json(body),
+                        });
+                    }
+                }
+            }
+            if always_body {
+                Ok(RequestParts {
+                    query: Vec::new(),
+                    body: RequestBody::Json(Value::Object(args.into_iter().collect())),
+                })
+            } else {
+                Ok(RequestParts {
+                    query: query(args),
+                    body: RequestBody::None,
+                })
+            }
+        }
+        other => Err(anyhow!(
+            "tool `{tool_name}` is broken: its template has `\"body_type\": \"{other}\"`, which utcp does \
+             not know (use \"json\", \"text\" or \"file\"). Fix the manual."
+        )),
     }
 }
 
@@ -999,5 +1092,169 @@ mod tests {
             assert!(err.contains("POST, PUT or PATCH"), "{method}: {err}");
             assert!(err.contains(method), "{err}");
         }
+    }
+
+    fn args(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn q(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// Where each argument goes, per method, `body_field` and `body_type`.
+    #[test]
+    fn arguments_go_to_the_query_or_the_body_by_method_and_template() {
+        let plan = |method: &str, field: Option<&str>, kind: Option<&str>, a| {
+            let mut p = provider_at("http://h/x".into());
+            p.http_method = method.into();
+            p.body_field = field.map(str::to_string);
+            p.body_type = kind.map(str::to_string);
+            plan_request("t.x", &p, a)
+        };
+        let body = json!({"message": "m", "sha": "s"});
+
+        // POST: the body_field argument is the body, the rest is query; else one JSON object.
+        let p = plan(
+            "POST",
+            Some("body"),
+            None,
+            args(&[("body", body.clone()), ("v", json!(1))]),
+        )
+        .unwrap();
+        assert_eq!(p.query, q(&[("v", "1")]));
+        assert_eq!(p.body, RequestBody::Json(body.clone()));
+        let p = plan("POST", None, None, args(&[("a", json!("x"))])).unwrap();
+        assert_eq!(p.query, q(&[]));
+        assert_eq!(p.body, RequestBody::Json(json!({"a": "x"})));
+
+        // DELETE with body_field and the argument: a JSON body, the rest stays query.
+        let p = plan(
+            "DELETE",
+            Some("body"),
+            None,
+            args(&[("body", body.clone()), ("v", json!("7.1"))]),
+        )
+        .unwrap();
+        assert_eq!(p.query, q(&[("v", "7.1")]));
+        assert_eq!(p.body, RequestBody::Json(body.clone()));
+        // DELETE without body_field, or without the argument: no body, as before.
+        for (field, a) in [
+            (None, args(&[("body", json!("b")), ("v", json!(1))])),
+            (Some("body"), args(&[("v", json!(1))])),
+        ] {
+            let p = plan("DELETE", field, None, a.clone()).unwrap();
+            assert_eq!(p.body, RequestBody::None, "{field:?}");
+            assert_eq!(p.query.len(), a.len());
+        }
+        // GET never has a body, even with body_field.
+        let p = plan("GET", Some("body"), None, args(&[("body", json!("b"))])).unwrap();
+        assert_eq!(p.body, RequestBody::None);
+        assert_eq!(p.query, q(&[("body", "b")]));
+
+        // Text: the string as is, on POST and DELETE; not on GET; not a non-string.
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            let p = plan(
+                method,
+                Some("text"),
+                Some("text"),
+                args(&[("text", json!("# Hi")), ("v", json!(1))]),
+            )
+            .unwrap();
+            assert_eq!(p.body, RequestBody::Text("# Hi".into()), "{method}");
+            assert_eq!(p.query, q(&[("v", "1")]));
+        }
+        let err = plan("GET", None, Some("text"), args(&[("body", json!("x"))]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("POST, PUT, PATCH or DELETE"), "{err}");
+        for a in [args(&[]), args(&[("body", json!({"a": 1}))])] {
+            let err = plan("POST", None, Some("text"), a).unwrap_err().to_string();
+            assert!(err.contains("pass it as a string"), "{err}");
+        }
+
+        // Upload stays POST, PUT or PATCH only; an unknown body_type is a broken manual.
+        let err = plan(
+            "DELETE",
+            None,
+            Some("file"),
+            args(&[("body", json!({"file": "a"}))]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("POST, PUT or PATCH"), "{err}");
+        let p = plan("POST", None, Some("json"), args(&[("a", json!(1))])).unwrap();
+        assert_eq!(p.body, RequestBody::Json(json!({"a": 1})));
+        let err = plan("POST", None, Some("xml"), args(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"body_type\": \"xml\""), "{err}");
+    }
+
+    /// What the server receives: a JSON body on DELETE, and a raw text body with the template's
+    /// `Content-Type` or `text/plain`.
+    #[tokio::test]
+    async fn delete_bodies_and_text_bodies_reach_the_server() {
+        use axum::routing::delete;
+        let echo = |method: axum::http::Method,
+                    uri: axum::http::Uri,
+                    headers: axum::http::HeaderMap,
+                    body: axum::body::Bytes| async move {
+            Json(json!({
+                "method": method.as_str(),
+                "query": uri.query(),
+                "type": headers.get("content-type").and_then(|v| v.to_str().ok()),
+                "body": String::from_utf8_lossy(&body),
+            }))
+        };
+        let addr = serve(
+            Router::new()
+                .route("/contents/:path", delete(echo))
+                .route("/raw", post(echo)),
+        )
+        .await;
+        let transport = HttpClientTransport::new();
+
+        let mut del = provider_at(format!("http://{addr}/contents/{{path}}"));
+        del.http_method = "DELETE".into();
+        del.body_field = Some("body".into());
+        let a = args(&[
+            ("path", json!("README.md")),
+            ("body", json!({"message": "m", "sha": "s"})),
+            ("v", json!(2)),
+        ]);
+        let v = transport.call_tool("t.del", a, &del).await.unwrap();
+        assert_eq!(v["method"], "DELETE");
+        assert_eq!(v["query"], "v=2");
+        assert_eq!(v["type"], "application/json");
+        let sent: Value = serde_json::from_str(v["body"].as_str().unwrap()).unwrap();
+        assert_eq!(sent, json!({"message": "m", "sha": "s"}));
+
+        let mut raw = provider_at(format!("http://{addr}/raw"));
+        raw.http_method = "POST".into();
+        raw.body_field = Some("text".into());
+        raw.body_type = Some("text".into());
+        let v = transport
+            .call_tool("t.raw", args(&[("text", json!("# \"Hi\""))]), &raw)
+            .await
+            .unwrap();
+        assert_eq!(v["body"], "# \"Hi\"", "sent as is, not as a JSON string");
+        assert_eq!(v["type"], "text/plain; charset=utf-8");
+        assert_eq!(v["query"], Value::Null);
+        raw.headers = Some(HashMap::from([(
+            "Content-Type".to_string(),
+            "text/x-markdown".to_string(),
+        )]));
+        let v = transport
+            .call_tool("t.raw", args(&[("text", json!("x"))]), &raw)
+            .await
+            .unwrap();
+        assert_eq!(v["type"], "text/x-markdown");
     }
 }

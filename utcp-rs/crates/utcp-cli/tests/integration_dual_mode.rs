@@ -2968,3 +2968,73 @@ async fn files_are_uploaded_and_downloaded_by_the_calling_process() {
         }
     }
 }
+
+/// `--dry-run` shows where each argument goes: path, header, query or body, including a JSON body
+/// on DELETE and a raw text body. Nothing is sent (the URL has no server).
+#[test]
+fn dry_run_shows_the_query_and_the_body_it_would_send() {
+    let env = IsolatedEnv::new();
+    let base = "http://127.0.0.1:9";
+    let tool = |name: &str, method: &str, path: &str, extra: Value| {
+        let mut template = json!({
+            "call_template_type": "http",
+            "http_method": method,
+            "url": format!("{base}{path}"),
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            template[k] = v.clone();
+        }
+        json!({"name": name, "description": name, "inputs": {"type": "object"},
+               "outputs": {"type": "object"}, "tool_call_template": template})
+    };
+    let manual = json!({
+        "manual_version": "1.0.0",
+        "utcp_version": "1.0.0",
+        "info": {"title": "bodies", "version": "1"},
+        "tools": [
+            tool("delete_file", "DELETE", "/contents/{path}", json!({
+                "body_field": "body", "header_fields": ["X-Trace"],
+            })),
+            tool("delete_plain", "DELETE", "/items/{id}", json!({})),
+            tool("render_raw", "POST", "/markdown/raw", json!({
+                "body_field": "text", "body_type": "text",
+                "headers": {"Content-Type": "text/x-markdown"},
+            })),
+        ],
+    });
+    let path = env.tmp.path().join("bodies.utcp.json");
+    std::fs::write(&path, manual.to_string()).unwrap();
+    run_ok(&env, &["register", "bodies", &path.display().to_string()]);
+
+    for (label, mode) in [("direct", &["--direct"][..]), ("daemon", &[][..])] {
+        if label == "daemon" {
+            run_ok(&env, &["daemon", "start"]);
+        }
+        let dry = |tool: &str, args: Value| -> Value {
+            let mut all: Vec<&str> = mode.to_vec();
+            let args = args.to_string();
+            all.extend_from_slice(&["call", tool, &args, "--dry-run"]);
+            serde_json::from_str(&run_ok(&env, &all)).unwrap()
+        };
+        let v = dry(
+            "bodies.delete_file",
+            json!({"path": "a b.md", "X-Trace": "t1", "branch": "main",
+                   "body": {"message": "m", "sha": "s"}}),
+        );
+        assert_eq!(v["method"], "DELETE", "{label}");
+        assert_eq!(v["url"], format!("{base}/contents/a%20b.md"));
+        assert_eq!(v["headers"]["X-Trace"], "t1");
+        assert_eq!(v["query"], json!({"branch": "main"}));
+        assert_eq!(v["body"], json!({"message": "m", "sha": "s"}));
+
+        let v = dry("bodies.delete_plain", json!({"id": 3, "force": true}));
+        assert_eq!(v["query"], json!({"force": "true"}), "{label}");
+        assert!(v.get("body").is_none(), "{v}");
+
+        let v = dry("bodies.render_raw", json!({"text": "# Hi"}));
+        assert_eq!(v["body"], "# Hi", "{label}");
+        assert_eq!(v["body_type"], "text");
+        assert_eq!(v["headers"]["Content-Type"], "text/x-markdown");
+    }
+    run_ok(&env, &["daemon", "stop"]);
+}
