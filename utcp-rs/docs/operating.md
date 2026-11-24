@@ -302,6 +302,21 @@ it never opens your files.
     `body_type`, fails with an error that says to fix the manual, instead of sending the request without its body.
   - `"response_type": "file"` forces a file answer.
 
+### Long Lists (Paging)
+
+APIs return long lists one page at a time and say in a response header that there is more. utcp prints such a page
+as `{"result": <answer>, "next_page": {...}}`; calling the same tool again with the same arguments plus the ones in
+`next_page` gets the next page. The last page prints the answer alone, as before. `--fields` and `--out` apply to
+`result`, and a batch item has `next_page` next to its `result`.
+
+| Header | `next_page` |
+| --- | --- |
+| `x-ms-continuationtoken` (Azure DevOps) | `{"continuationToken": "<token>"}`, or `{"x-ms-continuationtoken": "<token>"}` when the tool's `header_fields` declares that header |
+| `Link` with `rel="next"` (GitHub and other RFC 8288 APIs) | the query parameters of the next URL that differ from the ones this call sent, such as `{"page": "2"}` or a cursor `{"after": "..."}` |
+
+An API that pages another way (a token in the body, such as `nextLink`) is printed unchanged; its own answer says
+how to ask for more. File answers ignore paging headers.
+
 ## 4. Changing and Removing Manuals
 
 ```sh

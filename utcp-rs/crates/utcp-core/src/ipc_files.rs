@@ -494,11 +494,19 @@ impl ClientFiles {
     }
 
     /// A result as the caller prints it: a streamed file's reference, or a JSON answer saved to `out`.
+    /// A page of a longer list is placed by its answer; its next-page arguments stay beside it.
     fn place(
         &mut self,
         value: Value,
         out: Option<OutTarget>,
     ) -> std::result::Result<Value, String> {
+        let value = match crate::transfer::split_page(value) {
+            Ok((result, next_page)) => {
+                let result = self.place(result, out)?;
+                return Ok(crate::transfer::page_value(result, next_page));
+            }
+            Err(value) => value,
+        };
         if let Some(id) = stream_id(&value) {
             return self.finish_stream(id);
         }

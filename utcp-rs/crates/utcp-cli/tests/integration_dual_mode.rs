@@ -3038,3 +3038,216 @@ fn dry_run_shows_the_query_and_the_body_it_would_send() {
     }
     run_ok(&env, &["daemon", "stop"]);
 }
+
+/// Lists that page the way GitHub (`Link`) and Azure DevOps (`x-ms-continuationtoken`, as a query
+/// argument or a header) do. The last page carries no paging header.
+async fn spawn_paged_api() -> String {
+    use axum::response::IntoResponse;
+    let items = |headers: HeaderMap, Query(q): Query<HashMap<String, String>>| async move {
+        let host = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+        match q.get("page").map(String::as_str) {
+            None | Some("1") => {
+                let per_page = q.get("per_page").cloned().unwrap_or_default();
+                let link = format!(
+                    "<http://{host}/items?per_page={per_page}&page=2>; rel=\"next\", \
+                     <http://{host}/items?per_page={per_page}&page=2>; rel=\"last\""
+                );
+                (
+                    [("link", link)],
+                    Json(json!([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}])),
+                )
+                    .into_response()
+            }
+            _ => Json(json!([{"id": 3, "name": "c"}])).into_response(),
+        }
+    };
+    let projects = |Query(q): Query<HashMap<String, String>>| async move {
+        match q.get("continuationToken").map(String::as_str) {
+            None => (
+                [("x-ms-continuationtoken", "tok2")],
+                Json(json!({"count": 1, "value": [{"name": "p1"}]})),
+            )
+                .into_response(),
+            Some(_) => Json(json!({"count": 1, "value": [{"name": "p2"}]})).into_response(),
+        }
+    };
+    let builds = |headers: HeaderMap| async move {
+        match headers.get("x-ms-continuationtoken") {
+            None => (
+                [("x-ms-continuationtoken", "b2")],
+                Json(json!({"value": [1]})),
+            )
+                .into_response(),
+            Some(_) => Json(json!({"value": [2]})).into_response(),
+        }
+    };
+    let app = Router::new()
+        .route("/items", get(items))
+        .route("/projects", get(projects))
+        .route("/builds", get(builds));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{}", addr)
+}
+
+/// A page of a longer list prints as `{result, next_page}`; calling again with `next_page` added
+/// gets the next page, and the last page is plain JSON. `--fields` and `--out` apply to `result`;
+/// batch items carry `next_page` beside `result`. Through the daemon and in direct mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paged_answers_name_the_arguments_for_the_next_page() {
+    let env = IsolatedEnv::new();
+    let base = spawn_paged_api().await;
+    let root = env.tmp.path().to_path_buf();
+    let tool = |name: &str, path: &str, extra: Value| {
+        let mut template = json!({
+            "call_template_type": "http",
+            "http_method": "GET",
+            "url": format!("{base}{path}"),
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            template[k] = v.clone();
+        }
+        json!({"name": name, "description": name, "inputs": {"type": "object"},
+               "outputs": {"type": "object"}, "tool_call_template": template})
+    };
+    let manual = json!({
+        "manual_version": "1.0.0",
+        "utcp_version": "1.0.0",
+        "info": {"title": "paged", "version": "1"},
+        "tools": [
+            tool("list_items", "/items", json!({})),
+            tool("list_projects", "/projects", json!({})),
+            tool("list_builds", "/builds", json!({"header_fields": ["x-ms-continuationtoken"]})),
+        ],
+    });
+    let path = root.join("paged.utcp.json");
+    std::fs::write(&path, manual.to_string()).unwrap();
+    run_ok(&env, &["register", "paged", &path.display().to_string()]);
+
+    for (label, mode) in [("daemon", &[][..]), ("direct", &["--direct"][..])] {
+        if label == "daemon" {
+            run_ok(&env, &["daemon", "start"]);
+        } else {
+            run_ok(&env, &["daemon", "stop"]);
+        }
+        let call = |args: &[&str]| -> Value {
+            let mut all: Vec<&str> = mode.to_vec();
+            all.push("call");
+            all.extend_from_slice(args);
+            let out = env.cmd().current_dir(&root).args(&all).output().unwrap();
+            assert!(
+                out.status.success(),
+                "utcp {all:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            serde_json::from_slice(&out.stdout).unwrap()
+        };
+        let with_next = |args: Value, next_page: &Value| -> String {
+            let mut args = args;
+            for (k, v) in next_page.as_object().unwrap() {
+                args[k] = v.clone();
+            }
+            args.to_string()
+        };
+
+        // Link: only the arguments that change (`page`), as strings.
+        let first_args = json!({"per_page": 2});
+        let r = call(&["paged.list_items", &first_args.to_string()]);
+        assert_eq!(r["next_page"], json!({"page": "2"}), "{label}: {r}");
+        assert_eq!(r["result"].as_array().unwrap().len(), 2, "{label}: {r}");
+        let r = call(&[
+            "paged.list_items",
+            &with_next(first_args.clone(), &r["next_page"]),
+        ]);
+        assert_eq!(
+            r,
+            json!([{"id": 3, "name": "c"}]),
+            "{label}: the last page is plain"
+        );
+
+        // Azure DevOps: a query argument, or the header field the template declares.
+        let r = call(&["paged.list_projects"]);
+        assert_eq!(
+            r["next_page"],
+            json!({"continuationToken": "tok2"}),
+            "{label}: {r}"
+        );
+        assert_eq!(r["result"]["value"][0]["name"], "p1");
+        let r = call(&[
+            "paged.list_projects",
+            &with_next(json!({}), &r["next_page"]),
+        ]);
+        assert_eq!(r["value"][0]["name"], "p2", "{label}: {r}");
+        assert!(r.get("next_page").is_none());
+        let r = call(&["paged.list_builds"]);
+        assert_eq!(
+            r["next_page"],
+            json!({"x-ms-continuationtoken": "b2"}),
+            "{label}: {r}"
+        );
+        let r = call(&["paged.list_builds", &with_next(json!({}), &r["next_page"])]);
+        assert_eq!(r, json!({"value": [2]}), "{label}");
+
+        // --fields projects the answer, not the page around it.
+        let r = call(&["paged.list_projects", "--fields", "count"]);
+        assert_eq!(
+            r,
+            json!({"result": {"count": 1}, "next_page": {"continuationToken": "tok2"}}),
+            "{label}"
+        );
+
+        // --out saves the answer; the next page's arguments are still printed.
+        let _ = std::fs::remove_file(root.join("page.json"));
+        let r = call(&["paged.list_projects", "--out", "page.json"]);
+        assert_eq!(
+            r["next_page"],
+            json!({"continuationToken": "tok2"}),
+            "{label}: {r}"
+        );
+        assert_eq!(r["result"]["type"], "file", "{label}: {r}");
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(root.join("page.json")).unwrap()).unwrap();
+        assert_eq!(saved["value"][0]["name"], "p1", "{label}");
+
+        // Batch: `next_page` beside the item's `result`, only on items that have one.
+        let batch = json!([
+            {"id": "a", "tool": "paged.list_items", "args": {"per_page": 2}},
+            {"id": "b", "tool": "paged.list_items", "args": {"per_page": 2, "page": "2"}},
+            {"id": "c", "tool": "paged.list_projects", "fields": ["count"]},
+        ]);
+        std::fs::write(root.join("batch.json"), batch.to_string()).unwrap();
+        let mut args: Vec<&str> = mode.to_vec();
+        args.extend(["batch", "--file", "batch.json"]);
+        let out = env.cmd().current_dir(&root).args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let results: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            results[0]["next_page"],
+            json!({"page": "2"}),
+            "{label}: {results}"
+        );
+        assert_eq!(results[0]["result"].as_array().unwrap().len(), 2);
+        assert!(results[1].get("next_page").is_none(), "{label}: {results}");
+        assert_eq!(results[1]["result"][0]["id"], 3);
+        assert_eq!(
+            results[2]["result"],
+            json!({"count": 1}),
+            "{label}: {results}"
+        );
+        assert_eq!(
+            results[2]["next_page"],
+            json!({"continuationToken": "tok2"})
+        );
+    }
+}

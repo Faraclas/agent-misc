@@ -241,9 +241,45 @@ pub struct BatchResultItem {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// The arguments for the next page when `result` is one page of a longer list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub latency_ms: f64,
+}
+
+impl BatchResultItem {
+    /// A successful item; a page's next-page arguments go beside its `result`.
+    pub fn succeeded(id: String, tool: String, value: Value, latency_ms: f64) -> Self {
+        let (result, next_page) = match crate::transfer::split_page(value) {
+            Ok((result, next_page)) => (result, Some(next_page)),
+            Err(value) => (value, None),
+        };
+        Self {
+            id,
+            tool,
+            ok: true,
+            status: "OK".into(),
+            result: Some(result),
+            next_page,
+            error: None,
+            latency_ms,
+        }
+    }
+
+    pub fn failed(id: String, tool: String, error: String, latency_ms: f64) -> Self {
+        Self {
+            id,
+            tool,
+            ok: false,
+            status: "ERR".into(),
+            result: None,
+            next_page: None,
+            error: Some(error),
+            latency_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2212,6 +2248,13 @@ pub async fn execute_loaded_tool(
             crate::media::intercept_inline_media(&mut value, paths);
             crate::transfer::CallOutput::Json(value)
         }
+        crate::transfer::CallOutput::Page {
+            mut value,
+            next_page,
+        } => {
+            crate::media::intercept_inline_media(&mut value, paths);
+            crate::transfer::CallOutput::Page { value, next_page }
+        }
         crate::transfer::CallOutput::File(mut file) => {
             file.meta.tool = entry.name.clone();
             crate::transfer::CallOutput::File(file)
@@ -2499,27 +2542,11 @@ pub async fn batch_call_direct(
                 match outcome {
                     Ok(val) => (
                         idx,
-                        BatchResultItem {
-                            id: item.id,
-                            tool: item.tool,
-                            ok: true,
-                            status: "OK".to_string(),
-                            result: Some(val),
-                            error: None,
-                            latency_ms,
-                        },
+                        BatchResultItem::succeeded(item.id, item.tool, val, latency_ms),
                     ),
                     Err(err) => (
                         idx,
-                        BatchResultItem {
-                            id: item.id,
-                            tool: item.tool,
-                            ok: false,
-                            status: "ERR".to_string(),
-                            result: None,
-                            error: Some(format!("{err:#}")),
-                            latency_ms,
-                        },
+                        BatchResultItem::failed(item.id, item.tool, format!("{err:#}"), latency_ms),
                     ),
                 }
             }

@@ -97,7 +97,37 @@ impl std::fmt::Debug for FileDownload {
 #[derive(Debug)]
 pub enum CallOutput {
     Json(Value),
+    /// A JSON answer that is one page of a longer list. `next_page` holds the arguments that,
+    /// added to the call's own, fetch the next page.
+    Page {
+        value: Value,
+        next_page: Value,
+    },
     File(FileDownload),
+}
+
+/// A page of a longer list as `utcp call` prints it: the answer under `result`, the arguments for
+/// the next page under `next_page`.
+pub fn page_value(result: Value, next_page: Value) -> Value {
+    serde_json::json!({ "result": result, "next_page": next_page })
+}
+
+/// The answer and next-page arguments of a value built by [`page_value`]; any other value back as `Err`.
+pub fn split_page(value: Value) -> std::result::Result<(Value, Value), Value> {
+    let is_page = value.as_object().is_some_and(|map| {
+        map.len() == 2
+            && map.contains_key("result")
+            && map.get("next_page").is_some_and(Value::is_object)
+    });
+    if !is_page {
+        return Err(value);
+    }
+    let Value::Object(mut map) = value else {
+        unreachable!()
+    };
+    let result = map.remove("result").unwrap_or(Value::Null);
+    let next_page = map.remove("next_page").unwrap_or(Value::Null);
+    Ok((result, next_page))
 }
 
 impl FileDownload {
@@ -819,6 +849,14 @@ pub async fn finish_output_locally(
             };
             json_to_place(value, out, tool, paths, limits)
         }
+        CallOutput::Page { value, next_page } => {
+            let value = match fields {
+                Some(f) if !f.is_empty() => crate::catalog::project_json_fields(value, f),
+                _ => value,
+            };
+            let result = json_to_place(value, out, tool, paths, limits)?;
+            Ok(page_value(result, next_page))
+        }
     }
 }
 
@@ -867,6 +905,29 @@ mod tests {
             max_upload_mb: up,
             max_download_mb: down,
             settings_file: PathBuf::from("/cfg/settings.toml"),
+        }
+    }
+
+    #[test]
+    fn pages_split_back_into_answer_and_next_page_arguments() {
+        use serde_json::json;
+        let page = page_value(json!([1, 2]), json!({"page": "2"}));
+        assert_eq!(page, json!({"result": [1, 2], "next_page": {"page": "2"}}));
+        assert_eq!(
+            split_page(page).unwrap(),
+            (json!([1, 2]), json!({"page": "2"}))
+        );
+        // Anything else is an ordinary answer, returned unchanged.
+        for other in [
+            json!({"result": 1}),
+            json!({"result": 1, "next_page": "2"}),
+            json!({"result": 1, "next_page": null}),
+            json!({"result": 1, "next_page": {}, "count": 3}),
+            json!({"value": 1, "next_page": {}}),
+            json!([{"result": 1, "next_page": {}}]),
+            json!("result"),
+        ] {
+            assert_eq!(split_page(other.clone()), Err(other));
         }
     }
 

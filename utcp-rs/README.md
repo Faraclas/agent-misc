@@ -28,6 +28,8 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
     `--out <path>` and the call prints its path; a JSON answer over 10 MB is saved to a file instead of flooding the
     context. Tools that upload take `{"file": "<path>"}`. The calling process reads and writes the files, never the
     daemon, and `max_upload_mb` / `max_download_mb` in `settings.toml` set the limits.
+  - **Paged Lists Say So:** when an API's `Link` or `x-ms-continuationtoken` header says a list has more, the answer
+    prints as `{"result": ..., "next_page": {...}}`; call again with those arguments added for the next page.
 - **Dual-Mode Execution:**
   - **Daemon Mode (`utcp daemon start` / `utcp-daemon.service`):** `< 0.2 ms` Unix Domain Socket / Windows Named Pipe
     IPC with in-memory catalog, live `notify` reloads, `utcp daemon reload-env` shell sync (only env vars registered

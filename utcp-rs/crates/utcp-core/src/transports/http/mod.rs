@@ -167,6 +167,9 @@ impl ClientTransport for HttpClientTransport {
     ) -> Result<Value> {
         match self.call_tool_files(tool_name, args, prov, &NoFiles).await? {
             CallOutput::Json(value) => Ok(value),
+            CallOutput::Page { value, next_page } => {
+                Ok(crate::transfer::page_value(value, next_page))
+            }
             CallOutput::File(file) => Err(anyhow!(
                 "{tool_name} answered with a file ({}), which only `utcp call` and `utcp batch` can save",
                 file.meta.mime_type
@@ -246,6 +249,7 @@ impl ClientTransport for HttpClientTransport {
 
         let activity = Activity::new();
         let parts = plan_request(tool_name, http_prov, remaining_args)?;
+        let sent_query = parts.query.clone();
         if !parts.query.is_empty() {
             request_builder = request_builder.query(&parts.query);
         }
@@ -344,20 +348,25 @@ impl ClientTransport for HttpClientTransport {
                 stream: body,
             }));
         }
+        let next_page = next_page_args(&headers, http_prov, &url, &sent_query);
+        let answer = |value: Value| match next_page {
+            Some(next_page) => CallOutput::Page { value, next_page },
+            None => CallOutput::Json(value),
+        };
         let mut body_bytes = Vec::new();
         while let Some(chunk) = body.next().await {
             body_bytes.extend_from_slice(&chunk?);
         }
         if body_bytes.is_empty() {
-            return Ok(CallOutput::Json(Value::Null));
+            return Ok(answer(Value::Null));
         }
         if kind != AnswerKind::Text {
             if let Ok(result) = serde_json::from_slice::<Value>(&body_bytes) {
-                return Ok(CallOutput::Json(result));
+                return Ok(answer(result));
             }
         }
         match String::from_utf8(body_bytes) {
-            Ok(text) => Ok(CallOutput::Json(Value::String(text))),
+            Ok(text) => Ok(answer(Value::String(text))),
             // Not text after all: keep the bytes as they are instead of mangling them.
             Err(e) => {
                 let bytes = e.into_bytes();
@@ -409,6 +418,91 @@ fn query_value(value: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// The header Azure DevOps answers a page of a longer list with.
+const CONTINUATION_HEADER: &str = "x-ms-continuationtoken";
+
+/// The arguments that fetch the next page of a list, from the answer's paging headers; `None` when
+/// the answer is the last (or only) page.
+///
+/// - `x-ms-continuationtoken` (Azure DevOps): the token goes back as the tool's
+///   `x-ms-continuationtoken` header field when the template declares one, else as the
+///   `continuationToken` query argument.
+/// - `Link` with `rel="next"` (GitHub and others, RFC 8288): the next URL's query parameters that
+///   differ from the ones this call sent (for example `page`, or a cursor such as `after`).
+fn next_page_args(
+    headers: &header::HeaderMap,
+    prov: &HttpProvider,
+    sent_url: &str,
+    sent_query: &[(String, String)],
+) -> Option<Value> {
+    if let Some(token) = headers
+        .get(CONTINUATION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        let name = prov
+            .header_fields
+            .iter()
+            .flatten()
+            .find(|f| f.eq_ignore_ascii_case(CONTINUATION_HEADER))
+            .cloned()
+            .unwrap_or_else(|| "continuationToken".to_string());
+        let mut args = serde_json::Map::new();
+        args.insert(name, Value::String(token.to_string()));
+        return Some(Value::Object(args));
+    }
+
+    let next = headers
+        .get_all(header::LINK)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(link_next)?;
+    let base = url::Url::parse(sent_url).ok()?;
+    let next = base.join(&next).ok()?;
+    let mut sent: Vec<(String, String)> = base
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    sent.extend(sent_query.iter().cloned());
+    let args: serde_json::Map<String, Value> = next
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .filter(|pair| !sent.contains(pair))
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+    (!args.is_empty()).then_some(Value::Object(args))
+}
+
+/// The `rel="next"` target of one `Link` header value: `<url>; rel="next", <url>; rel="last"`.
+fn link_next(value: &str) -> Option<String> {
+    let mut rest = value;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let end = after.find('>')?;
+        let target = &after[..end];
+        let params_end = after[end..].find('<').map_or(after.len(), |i| end + i);
+        // Up to the next link, without the comma that separates the two.
+        let params = after[end + 1..params_end].trim_end().trim_end_matches(',');
+        let is_next = params.split(';').any(|param| {
+            let Some((key, val)) = param.split_once('=') else {
+                return false;
+            };
+            key.trim().eq_ignore_ascii_case("rel")
+                && val
+                    .trim()
+                    .trim_matches('"')
+                    .split_ascii_whitespace()
+                    .any(|rel| rel.eq_ignore_ascii_case("next"))
+        });
+        if is_next {
+            return Some(target.to_string());
+        }
+        rest = &after[params_end..];
+    }
+    None
 }
 
 /// What an HTTP call sends besides its URL and headers.
@@ -645,7 +739,9 @@ mod tests {
     use crate::auth::{ApiKeyAuth, AuthType, BasicAuth, OAuth2Auth};
     use crate::providers::base::{BaseProvider, ProviderType};
     use crate::providers::http::HttpProvider;
-    use axum::{extract::Json, routing::get, routing::post, Router};
+    use axum::{
+        extract::Json, extract::Query, response::IntoResponse, routing::get, routing::post, Router,
+    };
     use serde_json::json;
 
     #[test]
@@ -1256,5 +1352,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["type"], "text/x-markdown");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> header::HeaderMap {
+        let mut map = header::HeaderMap::new();
+        for (k, v) in pairs {
+            map.append(
+                header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn link_headers_name_their_next_target() {
+        let github = r#"<https://api.github.com/repositories/1/issues?page=2>; rel="next", <https://api.github.com/repositories/1/issues?page=9>; rel="last""#;
+        assert_eq!(
+            link_next(github).as_deref(),
+            Some("https://api.github.com/repositories/1/issues?page=2")
+        );
+        let reordered = r#"<https://x/?page=1>; rel="prev", <https://x/?page=3>;rel=next"#;
+        assert_eq!(link_next(reordered).as_deref(), Some("https://x/?page=3"));
+        let several = r#"</items?after=abc>; title="a, b"; rel="next last""#;
+        assert_eq!(link_next(several).as_deref(), Some("/items?after=abc"));
+        assert_eq!(link_next(r#"<https://x/?page=1>; rel="prev""#), None);
+        assert_eq!(link_next("garbage"), None);
+    }
+
+    #[test]
+    fn next_page_arguments_come_from_paging_headers() {
+        let prov = provider_at("https://dev.azure.com/ni/_apis/projects?api-version=7.1".into());
+        let sent = q(&[("$top", "2")]);
+        let url = &prov.url;
+
+        // Azure DevOps: a query argument, or the template's header field when it declares one.
+        let h = headers(&[("x-ms-continuationtoken", "2")]);
+        assert_eq!(
+            next_page_args(&h, &prov, url, &sent),
+            Some(json!({"continuationToken": "2"}))
+        );
+        let mut with_field = prov.clone();
+        with_field.header_fields = Some(vec!["x-ms-continuationtoken".into()]);
+        assert_eq!(
+            next_page_args(&h, &with_field, url, &sent),
+            Some(json!({"x-ms-continuationtoken": "2"}))
+        );
+        let empty = headers(&[("x-ms-continuationtoken", " ")]);
+        assert_eq!(next_page_args(&empty, &prov, url, &sent), None);
+
+        // Link: only what differs from what this call sent; relative targets resolve.
+        let gh = provider_at("https://api.github.com/repos/o/r/issues".into());
+        let sent = q(&[("per_page", "50"), ("state", "open")]);
+        let h = headers(&[(
+            "link",
+            r#"<https://api.github.com/repos/o/r/issues?per_page=50&state=open&page=2>; rel="next""#,
+        )]);
+        assert_eq!(
+            next_page_args(&h, &gh, &gh.url, &sent),
+            Some(json!({"page": "2"}))
+        );
+        let h = headers(&[(
+            "link",
+            r#"</repos/o/r/issues?after=Y3Vy&state=open>; rel="next""#,
+        )]);
+        assert_eq!(
+            next_page_args(&h, &gh, &gh.url, &sent),
+            Some(json!({"after": "Y3Vy"}))
+        );
+        let last = headers(&[("link", r#"<https://api.github.com/x?page=1>; rel="first""#)]);
+        assert_eq!(next_page_args(&last, &gh, &gh.url, &sent), None);
+        assert_eq!(next_page_args(&headers(&[]), &gh, &gh.url, &sent), None);
+    }
+
+    /// A paged answer comes back as a page with the next page's arguments; passing them gets the
+    /// last page, which is plain JSON again. File answers ignore paging headers.
+    #[tokio::test]
+    async fn a_paged_answer_carries_the_next_page_arguments() {
+        let list = |Query(q): Query<HashMap<String, String>>| async move {
+            match q.get("continuationToken").map(String::as_str) {
+                None => (
+                    [("x-ms-continuationtoken", "p2")],
+                    Json(json!({"count": 1, "value": [{"name": "a"}]})),
+                )
+                    .into_response(),
+                Some("p2") => Json(json!({"count": 1, "value": [{"name": "b"}]})).into_response(),
+                Some(other) => {
+                    (axum::http::StatusCode::BAD_REQUEST, other.to_string()).into_response()
+                }
+            }
+        };
+        let zip = || async {
+            (
+                [
+                    ("content-type", "application/zip"),
+                    ("x-ms-continuationtoken", "p2"),
+                ],
+                vec![1u8, 2, 3],
+            )
+        };
+        let addr = serve(
+            Router::new()
+                .route("/list", get(list))
+                .route("/zip", get(zip)),
+        )
+        .await;
+        let transport = HttpClientTransport::new();
+        let prov = provider_at(format!("http://{addr}/list"));
+
+        let first = transport
+            .call_tool_files("t.list", args(&[("$top", json!(1))]), &prov, &NoFiles)
+            .await
+            .unwrap();
+        let CallOutput::Page { value, next_page } = first else {
+            panic!("expected a page, got {first:?}")
+        };
+        assert_eq!(value["value"][0]["name"], "a");
+        assert_eq!(next_page, json!({"continuationToken": "p2"}));
+
+        let mut again = args(&[("$top", json!(1))]);
+        again.extend(serde_json::from_value::<HashMap<String, Value>>(next_page).unwrap());
+        let last = transport.call_tool("t.list", again, &prov).await.unwrap();
+        assert_eq!(last["value"][0]["name"], "b", "the last page is plain JSON");
+
+        let first = transport
+            .call_tool("t.list", HashMap::new(), &prov)
+            .await
+            .unwrap();
+        assert_eq!(first["next_page"], json!({"continuationToken": "p2"}));
+        assert_eq!(first["result"]["count"], 1);
+
+        let zip = transport
+            .call_tool_files(
+                "t.zip",
+                HashMap::new(),
+                &provider_at(format!("http://{addr}/zip")),
+                &NoFiles,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(zip, CallOutput::File(_)));
     }
 }

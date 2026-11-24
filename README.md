@@ -13,7 +13,8 @@ A fast, cross-platform (Linux & Windows), direct **Universal Tool Calling Protoc
 
 - **Zero-MCP Context Bloat:** Discovers and invokes REST APIs, WebSockets, GraphQL, SSE, local CLIs, OpenAPI specs, and
   even wrapped third-party MCP endpoints (`utcp import-mcp`) lazily on demand (`search` -> `schema` -> `call`), plus
-  auto-compact JSON output, generic `--fields` response projection, and a self-cleaning media spool.
+  auto-compact JSON output, generic `--fields` response projection, next-page arguments for paged lists, and a
+  self-cleaning media spool.
 - **Dual-Mode Execution (Standalone Direct + Optional Local Daemon):** Runs standalone out of the box with `bincode`
   page-cache lookups (`< 1 ms`), or connects to a single per-user `utcp daemon` over a `0600` Unix socket / Windows
   Named Pipe (`< 0.2 ms`) for in-memory catalogs, warm `rustls` HTTP/2 connection pools, live `reload-env` sync (the
@@ -35,7 +36,7 @@ Install: `dev-util/utcp` from [`adaptive-overlay`](https://github.com/Faraclas/a
 Linux and Windows archives on the Releases page (tags `utcp-rs-v*`); see the
 [installation section](./utcp-rs/README.md#installation).
 
-Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.13`),
+Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.14`),
 [issue log](./utcp-rs/issues/README.md) (upstream `rs-utcp` bugs and Windows fixes),
 [contributor rules](./utcp-rs/AGENTS.md).
 

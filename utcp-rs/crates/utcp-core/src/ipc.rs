@@ -963,27 +963,18 @@ impl DaemonServerState {
                                 match res {
                                     Ok(v) => (
                                         idx,
-                                        BatchResultItem {
-                                            id: item.id,
-                                            tool: item.tool,
-                                            ok: true,
-                                            status: "OK".into(),
-                                            result: Some(v),
-                                            error: None,
-                                            latency_ms,
-                                        },
+                                        BatchResultItem::succeeded(
+                                            item.id, item.tool, v, latency_ms,
+                                        ),
                                     ),
                                     Err(e) => (
                                         idx,
-                                        BatchResultItem {
-                                            id: item.id,
-                                            tool: item.tool,
-                                            ok: false,
-                                            status: "ERR".into(),
-                                            result: None,
-                                            error: Some(format!("{e:#}")),
+                                        BatchResultItem::failed(
+                                            item.id,
+                                            item.tool,
+                                            format!("{e:#}"),
                                             latency_ms,
-                                        },
+                                        ),
                                     ),
                                 }
                             }
@@ -1191,7 +1182,8 @@ fn server_info(
 }
 
 /// A call's output as the daemon answers it: JSON with `fields` applied, or a file (or a JSON answer
-/// too large to print) streamed to the caller, who saves it.
+/// too large to print) streamed to the caller, who saves it. A page of a longer list keeps its
+/// next-page arguments beside the answer.
 async fn deliver(
     output: CallOutput,
     tool: &str,
@@ -1200,18 +1192,10 @@ async fn deliver(
     item: Option<usize>,
 ) -> Result<Value> {
     match output {
-        CallOutput::Json(value) => {
-            let value = match fields {
-                Some(f) if !f.is_empty() => project_json_fields(value, f),
-                _ => value,
-            };
-            match (conn, oversized_json(&value)) {
-                (Some(conn), Some(bytes)) => {
-                    let meta = json_file_meta(FileKind::LargeAnswer, tool, bytes.len());
-                    conn.pump(FileDownload::from_bytes(meta, bytes), item).await
-                }
-                _ => Ok(value),
-            }
+        CallOutput::Json(value) => deliver_json(value, tool, fields, conn, item).await,
+        CallOutput::Page { value, next_page } => {
+            let result = deliver_json(value, tool, fields, conn, item).await?;
+            Ok(crate::transfer::page_value(result, next_page))
         }
         CallOutput::File(file) => match conn {
             Some(conn) => conn.pump(file, item).await,
@@ -1219,6 +1203,26 @@ async fn deliver(
                 "{tool} answered with a file, which only `utcp call` and `utcp batch` can save"
             )),
         },
+    }
+}
+
+async fn deliver_json(
+    value: Value,
+    tool: &str,
+    fields: Option<&[String]>,
+    conn: Option<&ConnFiles>,
+    item: Option<usize>,
+) -> Result<Value> {
+    let value = match fields {
+        Some(f) if !f.is_empty() => project_json_fields(value, f),
+        _ => value,
+    };
+    match (conn, oversized_json(&value)) {
+        (Some(conn), Some(bytes)) => {
+            let meta = json_file_meta(FileKind::LargeAnswer, tool, bytes.len());
+            conn.pump(FileDownload::from_bytes(meta, bytes), item).await
+        }
+        _ => Ok(value),
     }
 }
 

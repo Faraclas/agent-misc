@@ -53,6 +53,11 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
   boilerplate keys while keeping full fidelity when omitted. Dotted paths pass through lists (`assets.name`), and
   for a wrapped list such as `{"total_count": N, "workflow_runs": [...]}` you can name the item keys directly
   (`--fields id,name,conclusion`).
+- **Long lists come in pages:** when a list has more, utcp prints `{"result": <answer>, "next_page": {...}}`. For
+  the next page, call the same tool again with your arguments plus the ones in `next_page` (such as
+  `{"page": "2"}` or `{"continuationToken": "..."}`). The last page prints the answer alone. `--fields` and `--out`
+  apply to `result`; in `batch`, `next_page` is next to the item's `result`. Fetch more pages only when you need
+  them, and say so when you stop early.
 - **Images and Binary Media:** If a tool writes an image or binary payload to a file path on disk (for example,
   `"type": "media_file"` with a `"path"`), pass that file path to your multimodal file-reading/vision tool only when
   visual inspection is needed.
