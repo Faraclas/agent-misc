@@ -35,6 +35,12 @@ that the token lacks something:
   (`{"page": "2"}`, a cursor such as `{"after": "..."}`, or `{"since": "..."}` for `list_users` and
   `list_public_repos`). The last page prints the plain answer. `--fields` and `--out` apply to `result`. Search
   stops at 1000 results: the tenth page of 100 has no `next_page`, and asking for page 11 is refused (422).
+- **Large lists:** narrow them with GitHub's own filters first, so fewer pages come back:
+  `list_workflow_runs_for_repo` takes `status` (also a conclusion such as `failure`), `branch`, `event` and `created`;
+  `list_jobs_for_workflow_run` and `list_check_runs_for_ref` take `filter: "latest"` (only the last attempt), and
+  check runs also `check_name` and `status`. `--fields` then keeps only the fields you need.
+  <!-- TODO(utcp 0.2.4): document --where for the item filtering GitHub cannot do (failed jobs, check runs by
+  conclusion, files by path), with examples tested through the daemon and with direct; no jq or save-to-file. -->
 - **Files:** log, archive and artifact downloads (`download_job_logs_for_workflow_run`, `download_zipball_archive`,
   `download_artifact`, ...) save a file and print its path. `upload_release_asset` takes the file as
   `"body": {"file": "<path>"}` and the asset name as `name`.
