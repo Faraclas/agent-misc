@@ -60,6 +60,9 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   markers, HTML tags and Markdown emphasis go), cut to about 400 characters. DELETEs start with
   "Delete only what the user asked for or what you created."; untested writes with `(untested)`.
 - **Tags:** `github`, the category, the subcategory, and `untested` for untested writes.
+- **Tested writes:** `config::TESTED_WRITES` lists, by operationId, the writes that worked live through
+  `utcp call --staged` against a throwaway public repository of the token's owner (117 of 222 in 0.1.0). A name it
+  holds that the description lacks fails `generate`, so a new pin shows which tested operations GitHub dropped.
 
 ## Names (scheme C)
 

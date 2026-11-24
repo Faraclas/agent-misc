@@ -36,8 +36,8 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
 4. **Tool names are an interface.** Renaming a tool breaks agents that learned it. Change the naming rules or
    `Config::names` only on purpose, and list renamed tools in the release notes. A clash is an error, never resolved
    silently.
-5. **Writes:** all included writes are generated; those not in `Config::tested_writes` start their description with
-   `(untested)` and carry the tag `untested`. A write moves to `tested_writes` only after it worked live against a
+5. **Writes:** all included writes are generated; those not in `config::TESTED_WRITES` start their description with
+   `(untested)` and carry the tag `untested`. A write moves to `TESTED_WRITES` only after it worked live against a
    throwaway repository. Every DELETE's description starts with `generate::DELETE_NOTE`.
 6. **utcp limits are not worked around here.** When utcp cannot send what an operation needs (a body on DELETE, a
    plain-text body), the operation is left out with a reason naming the limit, and the fix is a utcp-rs change.

@@ -75,9 +75,10 @@ A generator that turns GitHub's OpenAPI description of the REST API (version 202
 - **Verified source:** GitHub's description is downloaded on demand from a pinned commit of
   `github/rest-api-description` and checked against its SHA-256. Nothing from GitHub is stored in this repository.
 - **Everything safe to offer, the token decides:** 605 tools with GitHub's own argument names and flat request
-  bodies. Organization and enterprise administration and a reviewed list of dangerous operations (repository
-  settings and deletion, access grants, webhooks, protection, security settings, secrets) are left out; `generate`
-  prints what was left out and why, and the README lists each group.
+  bodies (117 of the 222 writes tested live on a throwaway repository, the others marked untested). Organization and
+  enterprise administration and a reviewed list of dangerous operations (repository settings and deletion, access
+  grants, webhooks, protection, security settings, secrets) are left out; `generate` prints what was left out and why,
+  and the README lists each group.
 - **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
   what changes, and `utcp promote` makes them active.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.

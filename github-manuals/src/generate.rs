@@ -16,7 +16,7 @@ use crate::config::{Config, PAT_VAR};
 use crate::names;
 use crate::text::{one_line, plain, truthy};
 
-/// Starts the description of a write that `write-test` does not cover.
+/// Starts the description of a write that has not yet worked in a live test against a throwaway repository.
 pub const UNTESTED: &str = "(untested)";
 /// Starts the description of every DELETE.
 pub const DELETE_NOTE: &str = "Delete only what the user asked for or what you created.";

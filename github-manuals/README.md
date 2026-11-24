@@ -52,7 +52,11 @@ Tool names follow GitHub's operation names in snake_case: `repos/create-or-updat
 added where the name would be unclear (`pulls/list-files` is `list_pull_request_files`, `dependabot/get-alert` is
 `get_dependabot_alert`). Arguments are GitHub's own: path parameters, query parameters and the fields of the request
 body side by side (`create_issue` takes `owner`, `repo`, `title`, `body`, `labels`, ...). Writes not yet covered by a
-live write test start their description with `(untested)`.
+live write test start their description with `(untested)`. In 0.1.0, 117 of the 222 writes worked against a throwaway
+repository. Most of the others need what one personal repository does not have: an organization, a GitHub App token
+(check runs), a self-hosted runner, packages, security alerts, forks or templates, a paid plan, or workflow runs that
+GitHub starts (the test runs stayed queued). A few were not tried because they reach beyond the test repository:
+following users, marking all notifications read, requesting a CVE.
 
 ## Usage
 
