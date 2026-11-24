@@ -10,9 +10,10 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the GitHub REST API, so agents ca
 - **Output:** seven manuals with 605 tools for REST API version `2026-03-10` (every tool sends
   `X-GitHub-Api-Version: 2026-03-10`), and a `report.json` listing every tool and every operation left out with the
   reason. The manuals name no user or organization: one set works for any account.
-- **Requirements:** one static binary, no runtime; utcp 0.2.2 or newer (earlier versions cannot send the bodies
-  of some tools, and `generate --stage` refuses them). Network access to `raw.githubusercontent.com` for the first run
-  (one 14 MB download); later runs use the cache and take about a second.
+- **Requirements:** one static binary, no runtime; utcp 0.2.3 or newer (earlier versions cannot send the bodies
+  of some tools and silently return only the first page of a list, and `generate --stage` refuses them). Network
+  access to `raw.githubusercontent.com` for the first run (one 14 MB download); later runs use the cache and take
+  about a second.
 - **Docs:** this README (installation, first setup, what is left out), the [operating guide](./docs/operating.md)
   (the token, upgrades, troubleshooting) and the [specification](./docs/github-manuals-spec.md) (how the manuals are
   built).

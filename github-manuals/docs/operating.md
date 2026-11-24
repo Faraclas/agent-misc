@@ -30,8 +30,11 @@ that the token lacks something:
 
 ## Using the tools
 
-- **Pagination:** list tools take `per_page` (up to 100) and `page`. GitHub's `Link` header is not shown by utcp; ask
-  for the next page until a page has fewer items than `per_page`.
+- **Pagination:** list tools take `per_page` (up to 100). When more items exist, utcp prints
+  `{"result": <the answer>, "next_page": {...}}`; call again with the same arguments plus the `next_page` values
+  (`{"page": "2"}`, a cursor such as `{"after": "..."}`, or `{"since": "..."}` for `list_users` and
+  `list_public_repos`). The last page prints the plain answer. `--fields` and `--out` apply to `result`. Search
+  stops at 1000 results: the tenth page of 100 has no `next_page`, and asking for page 11 is refused (422).
 - **Files:** log, archive and artifact downloads (`download_job_logs_for_workflow_run`, `download_zipball_archive`,
   `download_artifact`, ...) save a file and print its path. `upload_release_asset` takes the file as
   `"body": {"file": "<path>"}` and the asset name as `name`.
@@ -55,8 +58,8 @@ description; the first run downloads it once.
   changed. Nothing was used or cached. Retry; if it persists, report it.
 - **"category ... has no manual"**: only with a pins file other than the built-in one. GitHub added an area that has
   not been reviewed; use the built-in pins.
-- **"utcp 0.2.2 or newer is needed"**: `generate --stage` checks `utcp --version` first, because older utcp
-  versions drop the body of a DELETE and cannot send a text body. Upgrade utcp, or use `--utcp` to point at a newer
-  one.
+- **"utcp 0.2.3 or newer is needed"**: `generate --stage` checks `utcp --version` first, because older utcp
+  versions drop the body of a DELETE, cannot send a text body, and silently return only the first page of a list.
+  Upgrade utcp, or use `--utcp` to point at a newer one.
 - **Proxies:** set `HTTPS_PROXY` (both github-manuals and utcp read it). Trusted CAs come from the system store, so a
   company root CA for TLS inspection works.

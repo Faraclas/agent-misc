@@ -2,7 +2,7 @@
 //!
 //! Set UPDATE_EXPECTED=1 to rewrite tests/fixtures/expected/ after an intended change (then review the diff).
 //! The utcp load test runs the `utcp` from UTCP_BIN, else from PATH, and is skipped when there is none or it is
-//! older than 0.2.2 (CI sets REQUIRE_UTCP=1 on Linux to make it fail instead).
+//! older than 0.2.3 (CI sets REQUIRE_UTCP=1 on Linux to make it fail instead).
 //! GITHUB_MANUALS_TEST_FIXTURES points the compiled test binary at a copy of tests/fixtures/, so it can run on a
 //! machine without the source tree (a Windows test machine).
 

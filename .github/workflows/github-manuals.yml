@@ -114,7 +114,7 @@ jobs:
           workspaces: github-manuals
           key: ${{ matrix.target }}
 
-      # The load test stages the expected manuals in a throwaway utcp, using the latest utcp-rs release (0.2.2+).
+      # The load test stages the expected manuals in a throwaway utcp, using the latest utcp-rs release (0.2.3+).
       - name: Download the latest utcp release (Linux)
         if: matrix.test && runner.os == 'Linux'
         env:

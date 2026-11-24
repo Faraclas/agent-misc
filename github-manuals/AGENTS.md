@@ -48,7 +48,7 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
 
 - Offline (CI, `.github/workflows/github-manuals.yml`): `cargo fmt --check`,
   `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary
-  (0.2.2 or newer) to include the load test; CI uses the latest `utcp-rs` release on Linux and sets `REQUIRE_UTCP=1`.
+  (0.2.3 or newer) to include the load test; CI uses the latest `utcp-rs` release on Linux and sets `REQUIRE_UTCP=1`.
 - On a machine without the source tree (a Windows test machine), copy the compiled test binary with
   `tests/fixtures/` and set `GITHUB_MANUALS_TEST_FIXTURES` to that copy.
 - Live checks use a real token and real repositories: reads against public repositories (any owner) are fine; writes
