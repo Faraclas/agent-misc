@@ -15,8 +15,8 @@
       "reads": 2,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2982,
-      "approx_tokens": 745
+      "bytes": 3073,
+      "approx_tokens": 768
     },
     "github_issues_pulls": {
       "title": "GitHub issues and pull requests",

@@ -28,7 +28,7 @@
           },
           "path": {
             "type": "string",
-            "description": "path parameter"
+            "description": "The path of a file or directory in the repository, such as docs/README.md. Leave it out for the repository root."
           },
           "ref": {
             "type": "string",
@@ -37,8 +37,7 @@
         },
         "required": [
           "owner",
-          "repo",
-          "path"
+          "repo"
         ]
       },
       "outputs": {

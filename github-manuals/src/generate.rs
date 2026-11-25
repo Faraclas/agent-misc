@@ -438,6 +438,25 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
         let place = str_of(p, "in");
         let mut schema = convert(spec, p.get("schema").unwrap_or(&json!({})), 0, &[])?;
         let mut description = field_description(str_of(p, "description"));
+        if place == "path" && description == format!("{name} parameter") {
+            description = match conf.param_descriptions.get(name) {
+                Some(d) => d.clone(),
+                None => {
+                    return err(format!(
+                        "{op_id}: path parameter '{name}' has only the placeholder description \"{description}\"; \
+                         add one to config param_descriptions"
+                    ))
+                }
+            };
+        }
+        let optional = place == "path"
+            && conf
+                .optional_path
+                .iter()
+                .any(|(id, param)| id == op_id && param == name);
+        if optional {
+            description = format!("{description} Leave it out for the repository root.");
+        }
         if place == "query" && schema.get("type") == Some(&json!("array")) {
             // utcp sends an array as one JSON string; GitHub reads repeated parameters. One value always works.
             let items = schema
@@ -452,6 +471,7 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
             schema.insert("description".into(), json!(description));
         }
         match place {
+            "path" if optional => {}
             "path" => required.push(name.to_string()),
             "query" => {
                 query.push(name.to_string());
@@ -615,7 +635,12 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
 /// Every operationId the configuration names must exist, so a typo cannot silently keep an old name.
 fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
     let ids: HashSet<&str> = operations(spec).iter().map(|o| o.op_id).collect();
-    let mut named: Vec<&String> = conf.names.keys().chain(conf.tested_writes.iter()).collect();
+    let mut named: Vec<&String> = conf
+        .names
+        .keys()
+        .chain(conf.tested_writes.iter())
+        .chain(conf.optional_path.iter().map(|(id, _)| id))
+        .collect();
     named.sort();
     for op_id in named {
         if !ids.contains(op_id.as_str()) {

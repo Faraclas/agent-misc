@@ -339,6 +339,34 @@ fn query_parameters() {
 }
 
 #[test]
+fn placeholder_descriptions_and_optional_path() {
+    let tools = tools_by_name(&run_generate().0);
+    let content = &tools["get_content"];
+    assert_eq!(required(content), ["owner", "repo"]);
+    let path = content["inputs"]["properties"]["path"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        path.starts_with("The path of a file or directory")
+            && path.ends_with("Leave it out for the repository root."),
+        "{path}"
+    );
+    let mut conf = test_config();
+    conf.param_descriptions.remove("path");
+    let e = generate(&description(), API_VERSION, &source_json(), &conf)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("'path' has only the placeholder"), "{e}");
+    let mut conf = test_config();
+    conf.optional_path
+        .push(("repos/no-such".into(), "path".into()));
+    let e = generate(&description(), API_VERSION, &source_json(), &conf)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("repos/no-such"), "{e}");
+}
+
+#[test]
 fn descriptions() {
     let tools = tools_by_name(&run_generate().0);
     let repo = tools["get_repo"]["description"].as_str().unwrap();
@@ -820,6 +848,9 @@ fn utcp_stage_schema_dry_run_promote() {
         "https://api.github.com/repos/o/r/contents/a%2Fb.txt"
     );
     assert_eq!(out["method"], "GET");
+    // Without the optional path: the repository root.
+    let out = dry("github_repos.get_content", r#"{"owner": "o", "repo": "r"}"#);
+    assert_eq!(out["url"], "https://api.github.com/repos/o/r/contents");
     let out = dry(
         "github_issues_pulls.remove_issue_assignees",
         r#"{"owner": "o", "repo": "r", "issue_number": 5, "body": {"assignees": ["a"]}}"#,

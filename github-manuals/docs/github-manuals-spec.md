@@ -32,8 +32,11 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
 - **Headers:** `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: <API version>` on every tool. Auth:
   `{"auth_type": "api_key", "var_name": "Authorization", "api_key": "Bearer ${GITHUB_MANUALS_PAT}", "location":
   "header"}`. GitHub's description declares no security scheme, so this is added by the generator.
-- **Arguments:** path parameters (required), query parameters (required when the description says so), then the
-  request body. The description has no header or cookie parameters; one would be an error.
+- **Arguments:** path parameters (required, except those in `Config::optional_path`, which utcp 0.2.4 drops from
+  the URL when left out: `get_content` without `path` lists the repository root), query parameters (required when
+  the description says so), then the request body. The description has no header or cookie parameters; one would be
+  an error. A path parameter whose description is only GitHub's placeholder ("path parameter") gets the one in
+  `Config::param_descriptions`; a placeholder without an entry fails `generate`.
 - **Bodies are flat** when the JSON body is an object with properties, the operation has no query parameters, and no
   body field shares a name with a parameter: the fields become arguments, and utcp sends the leftover arguments of a
   POST, PUT or PATCH as the JSON body. This matches GitHub's documentation and the earlier hand-written manual, and

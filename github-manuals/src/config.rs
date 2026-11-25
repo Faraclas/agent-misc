@@ -81,6 +81,12 @@ pub struct Config {
     pub names: HashMap<String, String>,
     /// Writes that worked in live tests ([`TESTED_WRITES`]). The others are marked "(untested)" and tagged `untested`.
     pub tested_writes: Vec<String>,
+    /// Path parameter name -> its description, for GitHub's placeholder descriptions ("path parameter"). A
+    /// placeholder without an entry fails `generate`.
+    pub param_descriptions: HashMap<String, String>,
+    /// (operationId, path parameter) pairs an agent may leave out; utcp then drops that part of the URL
+    /// (`/contents/{path}` -> `/contents`, the repository root).
+    pub optional_path: Vec<(String, String)>,
     /// Leave out every write.
     pub read_only: bool,
 }
@@ -556,6 +562,19 @@ impl Config {
             home_tags,
             names,
             tested_writes: TESTED_WRITES.iter().map(|s| s.to_string()).collect(),
+            param_descriptions: pairs(&[
+                (
+                    "path",
+                    "The path of a file or directory in the repository, such as docs/README.md.",
+                ),
+                ("deployment_id", "The ID of the deployment."),
+                (
+                    "account_id",
+                    "The user's numeric ID (the id field of a user).",
+                ),
+                ("tag", "The tag name of the release, such as v1.0.0."),
+            ]),
+            optional_path: vec![("repos/get-content".into(), "path".into())],
             read_only: false,
         }
     }
