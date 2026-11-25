@@ -398,13 +398,12 @@
             "type": "boolean"
           },
           "project": {
-            "description": "Project ID or project name",
+            "description": "Project ID or project name. Optional: leave it out for the whole organization instead of one project.",
             "type": "string"
           }
         },
         "required": [
-          "gadgetId",
-          "project"
+          "gadgetId"
         ]
       },
       "outputs": {
@@ -861,13 +860,12 @@
             "type": "string"
           },
           "project": {
-            "description": "Project ID or project name",
+            "description": "Project ID or project name. Optional: leave it out for the whole organization instead of one project.",
             "type": "string"
           }
         },
         "required": [
-          "kind",
-          "project"
+          "kind"
         ]
       },
       "outputs": {
@@ -979,6 +977,10 @@
           },
           "project": {
             "type": "string"
+          },
+          "team": {
+            "type": "string",
+            "description": "Optional: leave it out for the project's default team."
           }
         },
         "required": [
@@ -992,7 +994,7 @@
       "tool_call_template": {
         "call_template_type": "http",
         "http_method": "POST",
-        "url": "https://dev.azure.com/contoso/{project}/_apis/alpha/query?api-version=7.1",
+        "url": "https://dev.azure.com/contoso/{project}/{team}/_apis/alpha/query?api-version=7.1",
         "headers": {
           "Accept": "application/json",
           "Content-Type": "application/json"

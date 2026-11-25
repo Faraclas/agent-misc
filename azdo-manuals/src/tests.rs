@@ -20,8 +20,8 @@ use crate::archive::{self, Archive};
 use crate::cli::{help, help_alias, next_steps, permission_lines, scopes_markdown, which};
 use crate::config::{list_map, manual, nested, Config};
 use crate::generate::{
-    api_version_of, assign_names, base_name, covering_scopes, generate, minimal_scopes, Entry,
-    Specs,
+    api_version_of, assign_names, base_name, covering_scopes, generate, minimal_scopes,
+    placeholders_named_as_inputs, Entry, Specs,
 };
 use crate::http::{Request, Response, Transport};
 use crate::readtest::{self, ReadTest};
@@ -72,10 +72,6 @@ pub(crate) fn test_config() -> Config {
         names: nested(&[(
             "beta",
             &[("Subject Query_Query", "query_subjects".to_string())],
-        )]),
-        drop_optional_path_params: HashMap::from([(
-            "alpha".to_string(),
-            HashSet::from(["team".to_string()]),
         )]),
         body_overrides: HashMap::new(),
         host_overrides: HashMap::new(),
@@ -229,9 +225,11 @@ fn selection_and_urls() {
         "a create has no version to match"
     );
     assert!(!tools.contains_key("get_profile"));
+    // `project` is `x-ms-required: false`: optional, with what leaving it out means.
+    assert_eq!(tools["list_widgets"]["inputs"]["required"], json!(["kind"]));
     assert_eq!(
-        tools["list_widgets"]["inputs"]["required"],
-        json!(["kind", "project"])
+        tools["list_widgets"]["inputs"]["properties"]["project"]["description"],
+        "Project ID or project name. Optional: leave it out for the whole organization instead of one project."
     );
     // Same operationId in two areas of one manual: the manual's first area keeps the name, the other gets its prefix.
     assert!(tools.contains_key("list_widgets"));
@@ -246,13 +244,20 @@ fn selection_and_urls() {
         url("get_widget_by_id"),
         "https://dev.azure.com/contoso/{project}/_apis/alpha/widgets/{widgetId}?api-version=7.1-preview.2"
     );
+    // An optional `{team}` stays in the URL; utcp leaves its segment out when it is not passed.
     assert_eq!(
         url("run_query"),
-        "https://dev.azure.com/contoso/{project}/_apis/alpha/query?api-version=7.1"
+        "https://dev.azure.com/contoso/{project}/{team}/_apis/alpha/query?api-version=7.1"
     );
-    assert!(tools["run_query"]["inputs"]["properties"]
-        .get("team")
-        .is_none());
+    let query_inputs = &tools["run_query"]["inputs"];
+    assert!(!query_inputs["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("team")));
+    assert!(query_inputs["properties"]["team"]["description"]
+        .as_str()
+        .unwrap()
+        .ends_with("Optional: leave it out for the project's default team."));
     assert_eq!(
         url("get_thing_template"),
         "https://dev.azure.com/contoso/{project}/_apis/alpha/things/%24{type}?api-version=7.1"
@@ -562,7 +567,7 @@ fn help_shows_getting_started() {
     let text = main.render().to_string();
     assert!(text.contains("Getting started"));
     assert!(text.contains("azdo-manuals generate --org <your-org> --stage"));
-    assert!(text.contains("utcp promote"));
+    assert!(text.contains("utcp promote 'azdo_*'"));
     assert!(text.contains("azdo-manuals help generate"));
     assert!(!text.contains("subcommand"));
     assert!(!text.contains("--register"));
@@ -594,9 +599,15 @@ fn next_steps_cover_the_pat_review_test_and_promote() {
     assert!(steps[1].contains("add AZURE_DEVOPS_EXT_PAT to it)\n"));
     assert!(steps[1].ends_with("- either way, then run: utcp daemon reload-env"));
     assert!(steps[2].contains("[SET] AZURE_DEVOPS_EXT_PAT"));
-    assert_eq!(steps[3], "See what changes for your agents: utcp diff");
+    assert_eq!(
+        steps[3],
+        "See what changes for your agents: utcp diff 'azdo_*'"
+    );
     assert!(steps[4].contains("azdo-manuals read-test --org contoso --project <a project>"));
-    assert_eq!(steps[5], "Make them active for your agents: utcp promote");
+    assert_eq!(
+        steps[5],
+        "Make them active for your agents: utcp promote 'azdo_*'"
+    );
     let custom = next_steps("contoso", Some(Path::new("manuals-here")));
     assert!(custom[4].contains("read-test --manuals manuals-here --project"));
     for step in steps {
@@ -1429,10 +1440,23 @@ fn fill_chains_ids() {
         Value::Object(args),
         json!({"project": "P", "kind": "round", "$top": 5})
     );
+    // The default team comes from get_project.
     assert_eq!(
         test.fill(&tools["run_query"]),
-        Err("no sample body".to_string())
+        Err("waiting for get_project".to_string())
     );
+
+    // An optional path parameter with no value is left out instead of skipping the tool.
+    let mut seeds = Map::new();
+    seeds.insert("kind".into(), json!("round"));
+    let test = ReadTest::new(
+        Utcp::shared(PathBuf::from("utcp")),
+        IndexMap::new(),
+        BTreeSet::new(),
+        seeds,
+    );
+    let args = test.fill(&tools["list_widgets"]).unwrap();
+    assert_eq!(Value::Object(args), json!({"kind": "round", "$top": 5}));
 }
 
 // utcp load test
@@ -1441,11 +1465,35 @@ fn find_utcp() -> Option<PathBuf> {
     let path = std::env::var_os("UTCP_BIN")
         .map(PathBuf::from)
         .or_else(|| which("utcp"));
-    let found = path.clone().filter(|p| p.is_file());
+    let found = path.clone().filter(|p| p.is_file()).filter(|p| {
+        let out = Command::new(p).arg("--version").output();
+        let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        let version = text.ok().and_then(|t| crate::cli::utcp_version(&t));
+        let new_enough = version.is_some_and(|v| v >= crate::cli::MIN_UTCP);
+        if !new_enough {
+            eprintln!(
+                "{} is utcp {version:?}, older than {:?}",
+                p.display(),
+                crate::cli::MIN_UTCP
+            );
+        }
+        new_enough
+    });
     if found.is_none() && std::env::var_os("REQUIRE_UTCP").is_some() {
         panic!("REQUIRE_UTCP is set but no usable utcp binary was found (UTCP_BIN={path:?})");
     }
     found
+}
+
+#[test]
+fn utcp_versions_are_read_from_utcp_version() {
+    assert_eq!(crate::cli::utcp_version("utcp 0.2.4\n"), Some((0, 2, 4)));
+    assert_eq!(
+        crate::cli::utcp_version("utcp 1.10.0-rc1"),
+        Some((1, 10, 0))
+    );
+    assert_eq!(crate::cli::utcp_version("utcp"), None);
+    assert!(crate::cli::utcp_version("utcp 0.2.3").unwrap() < crate::cli::MIN_UTCP);
 }
 
 /// The expected manuals stage in a throwaway utcp, staged dry runs build the right requests, and they promote.
@@ -1492,7 +1540,11 @@ fn utcp_stage_schema_dry_run_promote() {
         &["stage", "t_main", file.to_str().unwrap(), "--hint", "test"],
         None,
     );
-    assert_eq!(run(&["list", "--json"], None).trim(), "[]");
+    let listed: Value = serde_json::from_str(&run(&["list", "--json"], None)).unwrap();
+    assert_eq!(
+        listed,
+        json!([{"name": "t_main", "tools": 14, "hint": "test", "staged": true}])
+    );
     let manual: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
     for tool in manual["tools"].as_array().unwrap() {
         let name = format!("t_main.{}", tool["name"].as_str().unwrap());
@@ -1508,12 +1560,28 @@ fn utcp_stage_schema_dry_run_promote() {
             "--dry-run",
             "--args-stdin",
         ],
-        Some(r#"{"project": "My Project", "body": {"text": "x"}, "$top": 2}"#),
+        Some(r#"{"project": "My Project", "body": {"text": "x", "$top": 2}}"#),
+    ))
+    .unwrap();
+    // `team` is optional: left out, its segment is too.
+    assert_eq!(
+        out["url"],
+        "https://dev.azure.com/contoso/My%20Project/_apis/alpha/query?api-version=7.1"
+    );
+    let out: Value = serde_json::from_str(&run(
+        &[
+            "call",
+            "--staged",
+            "t_main.run_query",
+            "--dry-run",
+            "--args-stdin",
+        ],
+        Some(r#"{"project": "P", "team": "Red Team", "body": {"text": "x"}}"#),
     ))
     .unwrap();
     assert_eq!(
         out["url"],
-        "https://dev.azure.com/contoso/My%20Project/_apis/alpha/query?api-version=7.1"
+        "https://dev.azure.com/contoso/P/Red%20Team/_apis/alpha/query?api-version=7.1"
     );
     assert_eq!(out["method"], "POST");
     assert!(!out.to_string().contains("not-a-real-token"));
@@ -1551,4 +1619,22 @@ fn isolated_utcp_registers_and_lists() {
         BTreeSet::from(["t_main".to_string()])
     );
     assert!(utcp.manual_names(true).unwrap().is_empty());
+}
+
+#[test]
+fn url_placeholders_take_the_inputs_spelling() {
+    let props: Map<String, Value> =
+        serde_json::from_value(json!({"project": {}, "definitionId": {}})).unwrap();
+    assert_eq!(
+        placeholders_named_as_inputs(
+            "https://h/o/{project}/_apis/build/definitions/{DefinitionId}/tags",
+            &props
+        ),
+        "https://h/o/{project}/_apis/build/definitions/{definitionId}/tags"
+    );
+    // No input of any case: left as it is.
+    assert_eq!(
+        placeholders_named_as_inputs("https://h/{other}", &props),
+        "https://h/{other}"
+    );
 }

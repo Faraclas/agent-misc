@@ -571,7 +571,7 @@ fn join_adds_what_the_spec_lacks() {
     );
 
     let get = tool(&manuals, "t_main", "get_gadget");
-    assert_eq!(get["inputs"]["required"], json!(["gadgetId", "project"]));
+    assert_eq!(get["inputs"]["required"], json!(["gadgetId"]));
 
     let create = tool(&manuals, "t_main", "create_gadget");
     assert!(create["description"]

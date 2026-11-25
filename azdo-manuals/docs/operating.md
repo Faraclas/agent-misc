@@ -109,11 +109,11 @@ A new version can change the manuals (new tools, fixed parameters, new hints). A
    azdo-manuals generate --org contoso --stage
    ```
 
-2. See what changes for your agents. `utcp diff` lists, per manual, the tools added (`+`), removed (`-`) and changed
-   (`~`):
+2. See what changes for your agents. `utcp diff 'azdo_*'` lists, per manual, the tools added (`+`), removed (`-`)
+   and changed (`~`):
 
    ```sh
-   utcp diff
+   utcp diff 'azdo_*'
    ```
 
 3. Test the staged manuals (read-only; see section 5):
@@ -125,14 +125,15 @@ A new version can change the manuals (new tools, fixed parameters, new hints). A
 4. Make them active:
 
    ```sh
-   utcp promote
+   utcp promote 'azdo_*'
    ```
 
-Replace `contoso` with your organization and `Fabrikam` with one of its projects.
+Replace `contoso` with your organization and `Fabrikam` with one of its projects. `'azdo_*'` (quoted, so the shell
+leaves the `*` alone) picks only these manuals when others are staged too; it needs utcp 0.2.4 or newer.
 
-If the staged manuals look wrong, `utcp discard` drops them and the active ones stay. If you find a problem after
-promoting, `utcp rollback azdo_git` (one manual at a time) brings back the version the promote replaced; running it
-again undoes the rollback.
+If the staged manuals look wrong, `utcp discard 'azdo_*'` drops them and the active ones stay. If you find a problem
+after promoting, `utcp rollback azdo_git` (one manual at a time) brings back the version the promote replaced;
+running it again undoes the rollback.
 
 The same steps switch between full and read-only manuals: run `generate` with or without `--read-only`, then review
 and promote.
@@ -236,7 +237,8 @@ Downloads folder.
 | `cannot download https://codeload.github.com/...` | No network path to GitHub, which serves Microsoft's client libraries. | Check the network and proxy (section 8), or run with `--spec-only`. |
 | `microsoft/azure-devops-...@<commit>: <file> has hash ..., pinned ...` | GitHub sent a file other than the pinned one. | Retry; if it repeats, report it. |
 | `Analytics left out: Analytics $metadata: HTTP 401` | The PAT lacks "Analytics: Read". | Add it to the PAT; the other manuals are written anyway. |
-| `utcp stage <manual> failed (output above; utcp 0.2.0 or newer is needed)` | utcp is older than 0.2.0, which added staging, or utcp's own message above says why. | Upgrade utcp, then run `generate --stage` again. |
+| `<path> is utcp 0.2.3; these manuals need utcp 0.2.4 or newer, ...` (`generate --stage`, `read-test`, `write-test`) | The manuals leave out optional URL segments such as `{team}` when they are not passed, which older utcp sends as they are. | Upgrade utcp, or pass `--utcp <newer utcp>`. |
+| `utcp stage <manual> failed (output above)` | utcp's own message above says why. | Fix that, then run `generate --stage` again. |
 | `no utcp binary (use --utcp)` | utcp is not on `PATH`. | Put it on `PATH`, or pass `--utcp <path>`. |
 | `utcp has neither a staged nor an active manual named ...` (`read-test`) | The manuals were generated but never staged or registered. | `azdo-manuals generate --org contoso --stage`. |
 | `utcp doctor` shows `[MISSING] AZURE_DEVOPS_EXT_PAT` | utcp has no value for the secret. | Section 2, then `utcp daemon reload-env`. |

@@ -1,6 +1,6 @@
 # azdo-manuals specification
 
-- **Version:** describes `azdo-manuals` 7.1.2 (REST API 7.1). Keep it in step with the code (see
+- **Version:** describes `azdo-manuals` 7.1.3 (REST API 7.1). Keep it in step with the code (see
   [`AGENTS.md`](../AGENTS.md), "Lockstep docs").
 - **Audience:** maintainers and agents changing the generator. Users start with the [README](../README.md) and the
   [operating guide](./operating.md).
@@ -129,7 +129,6 @@ in a manual nor in `excluded_areas`.
 | `skip_gets` | GETs left out, with the service's answer as the reason (deprecated, broken, or no scope a scoped PAT can have). |
 | `required_params` | Parameters the spec calls optional but the service requires. |
 | `names` | Tool names set by hand, for clashes or names that say too little. |
-| `drop_optional_path_params` | Optional path parameters removed with their segment (`team` in `wit`). |
 | `body_overrides` | Request body schemas replacing the spec's (`bodies::real()`). |
 | `host_overrides` | Hosts replacing the spec's, per area (`profile` -> `vssps.dev.azure.com`; the spec's host refuses an organization's PAT). A test refuses an area no manual includes. |
 | `read_only` | Set by `--read-only`: no writes, and no reads that only a write-level scope allows. |
@@ -195,7 +194,7 @@ like any spec operation (selection, names, URL, inputs, bodies, report, live che
 8. **Path.** `/{organization}/` plus the route template with `{area}` and `{resource}` filled in and each route
    parameter the method supplies named as the method names it (also inside a segment, `@{packageScope}`). A segment
    whose parameter the method does not supply is left out, as the libraries do. An optional route value (Go
-   `(optional)`, Node `?`) is marked `x-ms-required: false`, so `drop_optional_path_params` applies to it.
+   `(optional)`, Node `?`) is marked `x-ms-required: false`, so it is an optional input (see Inputs).
 9. **Inputs and body.** Query and header parameters with the library's types: integers with their format, uuid and
    date-time formats, enums with their values, lists as comma-separated strings. The body is a `$ref` into the
    spec's `definitions`, built from the library's types down to four levels (section 6, Body, then inlines three).
@@ -255,14 +254,21 @@ tool per entity set, in the manual `azdo_analytics`:
   `{organization}` then gets it as its first segment, and the tool is sent the PAT.
 - `{organization}` is replaced with `--org`. The name must match `^[A-Za-z0-9][A-Za-z0-9-]{0,48}[A-Za-z0-9]?$`, so it
   needs no encoding. No tool takes the organization as a parameter.
-- Segments of `drop_optional_path_params` are removed. A literal `$` before a path parameter becomes `%24`, because
-  utcp reads `${NAME}` as a variable.
+- Every path parameter stays in the URL, optional ones too. A literal `$` before a path parameter becomes `%24`,
+  because utcp reads `${NAME}` as a variable.
+- utcp fills `{name}` from the argument of exactly that name, so each placeholder takes the spelling of the input it
+  matches case-insensitively: the spec's `{DefinitionId}` with the parameter `definitionId` becomes `{definitionId}`
+  (since 7.1.3; before, those calls sent the placeholder literally). A placeholder with no such input is kept.
 - `version` is `7.1` plus the operation's preview suffix from its `api-Version-preview.N` parameter reference
   (`7.1-preview.1`). An inline `api-version` parameter, an unknown suffix or no version fails `generate`.
 
 ### Inputs
 
-- Path parameters are always required. Query and header parameters are required when the spec says so or
+- Path parameters are required, except those marked `x-ms-required: false` (since 7.1.3): utcp 0.2.4 leaves the
+  segment of one that is not passed out of the URL (`…/timeline/{timelineId}` -> `…/timeline`, the build's own
+  timeline). Before 7.1.3 they were required, and `team` in `wit` was dropped from the URL. An optional `project`
+  or `team` gets what leaving it out means added to its description: the whole organization, or the project's
+  default team (`scope_note`). Query and header parameters are required when the spec says so or
   `required_params` lists them.
 - `organization` and `api-version` are not inputs.
 - Spec formats `array (...)` become a comma-separated string; other known formats (`int32`, `date-time`, `uuid`, ...)
@@ -387,7 +393,8 @@ library operations left out before generation by reason, and the `skipped` opera
 reason has more than three); how many tools came from the client libraries and from OData, or, without the live
 inputs, how to get them; with `--stage`, `Staged the 9 manuals in utcp.`; the permissions as a table with
 "All tools" and "Reads only" columns (one column with `--read-only`); and numbered next steps (stage if not staged,
-make the PAT, give it to utcp, `utcp doctor`, `utcp diff`, `read-test`, `utcp promote`).
+make the PAT, give it to utcp, `utcp doctor`, `utcp diff 'azdo_*'`, `read-test`, `utcp promote 'azdo_*'`). The
+`'azdo_*'` keeps other staged manuals out; it needs utcp 0.2.4 or newer, which also refuses a bare `promote`.
 
 ### `readtest.json`
 
@@ -447,6 +454,8 @@ has `tool`, `status` (`ok`, `mismatch`, `http NNN`, `error`, `not run`), `args`,
   snapshot queries stay small. A reference to a tool that has not answered, or a path that is missing or empty, makes
   the tool wait.
 - Required query parameters come from seeds and `SOURCES`. Tool-specific `SOURCES` also fill optional parameters.
+  An optional path parameter with no value is left out, so the default (the build's timeline, the default team)
+  is tested.
   `$top`, `top` and `searchCriteria.$top` are set to 5 when the tool has them.
 - Printed output has tool names, statuses and sizes only. `readtest.json` has the arguments, which come from the
   organization.
@@ -511,9 +520,9 @@ endpoints).
   a small Go and Node library (`tests/fixtures/sdk/`), a route list and `resourceAreas` answer (`live.json`), and a
   `$metadata` document (`analytics-metadata.xml`). The full output for them is in `tests/fixtures/expected-extra/`
   (`extra_manuals_match_expected_bytes`, rewritten the same way). Tarballs are built in the test.
-- With `UTCP_BIN` (utcp 0.2.0 or newer), a load test stages the expected manuals in a throwaway utcp, checks
-  `schema --staged` and the requests `call --staged --dry-run` builds, and promotes them. Without a binary it is
-  skipped, unless `REQUIRE_UTCP=1` (CI on Linux).
+- With `UTCP_BIN` (utcp 0.2.4 or newer; an older one is skipped), a load test stages the expected manuals in a
+  throwaway utcp, checks `schema --staged` and the requests `call --staged --dry-run` builds, and promotes them.
+  Without a binary it is skipped, unless `REQUIRE_UTCP=1` (CI on Linux).
 - `AZDO_TEST_FIXTURES` points a copied test binary at a copy of `tests/fixtures/` (Windows test machines).
 - The live checks (section 9) are run by hand; their output stays private.
 

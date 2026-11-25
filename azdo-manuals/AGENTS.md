@@ -41,9 +41,10 @@ Analytics service's OData `$metadata`. A standalone crate with its own `Cargo.to
 4. **Changing what is generated** (`src/config.rs`, `src/generate.rs`, `src/sdkops.rs`, the parsers,
    `src/analytics.rs`): run the offline tests, rewrite the expected files with `UPDATE_EXPECTED=1 cargo test`, and
    review that diff before committing. Then regenerate the real manuals with the PAT and check them in utcp:
-   `generate --stage`, `utcp diff` (what changes; spec tools must not change unless that was the point),
+   `generate --stage`, `utcp diff 'azdo_*'` (what changes; spec tools must not change unless that was the point),
    `check-routes`, `utcp schema --staged` and `utcp call --staged --dry-run`, and `read-test` (one manual per run);
-   `utcp promote` only once they are right (`utcp discard` otherwise).
+   `utcp promote 'azdo_*'` only once they are right (`utcp discard 'azdo_*'` otherwise; never a bare or `--all`
+   promote, which would also take other staged manuals).
    Never point `UTCP_CONFIG_DIR` or `HOME` at a scratch folder to try manuals: stage them instead.
 5. **Coverage: everything, unless there is a stated reason.** Every area of the spec folder goes into a manual or into
    `excluded_areas` with its reason (a test enforces this), and every operation of an included area becomes a tool
@@ -74,8 +75,8 @@ Analytics service's OData `$metadata`. A standalone crate with its own `Cargo.to
 
 - Offline (CI, `.github/workflows/azdo-manuals.yml`): `cargo fmt --check`,
   `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary
-  (0.2.0 or newer, for `stage`) to include the load test; CI uses the latest `utcp-rs` release on Linux and sets
-  `REQUIRE_UTCP=1` so a missing binary fails instead of skipping.
+  (0.2.4 or newer; an older one is skipped) to include the load test; CI uses the latest `utcp-rs` release on Linux
+  and sets `REQUIRE_UTCP=1` so a missing binary fails instead of skipping.
 - On a machine without the source tree (for example a Windows test machine), copy the compiled test binary with
   `tests/fixtures/` and set `AZDO_TEST_FIXTURES` to that copy.
 - Live checks against a real organization are run by hand: `check-routes` (every tool's URL against the
@@ -108,7 +109,9 @@ expected files in `tests/fixtures/expected/` whenever the output format changes.
 - Any change to what a release ships needs a new version before it is released (for example `7.1.0` -> `7.1.1`).
   Changing `pins.json` (including its `sdk` part) or `src/config.rs` changes the generated manuals, so it needs a new
   version too.
-- `generate --stage` needs utcp 0.2.0 or newer (`utcp stage`); keep the Gentoo ebuild's dependency in step.
+- The manuals need utcp 0.2.4 or newer (`MIN_UTCP` in `src/cli.rs`, checked by `generate --stage`, `read-test` and
+  `write-test`): it leaves out the segment of an optional path parameter that is not passed, and has the
+  `utcp diff`/`promote 'azdo_*'` the docs use. Keep the Gentoo ebuild's dependency in step (0.2.4 since 7.1.3).
 - **Releasing:** set the new `version`, build so `Cargo.lock` follows, commit and push to `main`. Then run the
   workflow on `main` with `release` ticked (`gh workflow run azdo-manuals.yml --ref main -f release=true`). CI reads
   the version from `Cargo.toml`, creates the tag `azdo-manuals-vX.Y.Z` and the GitHub Release; never tag by hand. It

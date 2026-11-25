@@ -174,6 +174,17 @@ pub(crate) fn scopes_of(spec: &Value, op: &Value) -> Vec<String> {
     scopes.into_iter().collect()
 }
 
+/// What leaving out an optional path parameter means, for the two whose absence changes the call's scope.
+fn scope_note(name: &str) -> Option<&'static str> {
+    match name {
+        "project" => {
+            Some("Optional: leave it out for the whole organization instead of one project.")
+        }
+        "team" => Some("Optional: leave it out for the project's default team."),
+        _ => None,
+    }
+}
+
 fn param_schema(p: &Value) -> Value {
     let mut schema = Map::new();
     let mut ptype = p.get("type").cloned().unwrap_or_else(|| json!("string"));
@@ -328,12 +339,37 @@ fn strings(v: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// utcp fills `{name}` in a URL from the argument of exactly that name. A few specs spell a path parameter
+/// differently in the path and in its parameter (`{DefinitionId}`, `definitionId`); the URL takes the input's
+/// spelling. A placeholder with no input of any case stays as it is (utcp accepts it as an argument anyway).
+pub(crate) fn placeholders_named_as_inputs(url: &str, props: &Map<String, Value>) -> String {
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(start) = rest.find('{') {
+        let Some(len) = rest[start..].find('}') else {
+            break;
+        };
+        let name = &rest[start + 1..start + len];
+        let input = props
+            .keys()
+            .find(|k| k.as_str() == name)
+            .or_else(|| props.keys().find(|k| k.eq_ignore_ascii_case(name)))
+            .map_or(name, String::as_str);
+        out.push_str(&rest[..start]);
+        out.push('{');
+        out.push_str(input);
+        out.push('}');
+        rest = &rest[start + len + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn build_url(
     spec: &Value,
     path: &str,
     org: &str,
     version: &str,
-    dropped: &[String],
     host_override: Option<&str>,
 ) -> Result<String> {
     let host = host_override.unwrap_or_else(|| str_of(spec, "host"));
@@ -366,9 +402,6 @@ fn build_url(
     let mut path = path.split('?').next().unwrap_or("").to_string();
     if host_override.is_some() && !path.contains("{organization}") {
         path = format!("/{{organization}}{path}");
-    }
-    for name in dropped {
-        path = path.replacen(&format!("/{{{name}}}"), "", 1);
     }
     // `valid_org` allows only letters, digits and `-`, none of which need percent-encoding.
     path = path.replace("{organization}", org);
@@ -497,16 +530,6 @@ fn build_tool(
             None => params.push(p),
         }
     }
-    let drop = conf.drop_optional_path_params.get(area);
-    let dropped: Vec<String> = params
-        .iter()
-        .filter(|p| {
-            p.get("in").and_then(Value::as_str) == Some("path")
-                && drop.is_some_and(|d| d.contains(str_of(p, "name")))
-                && p.get("x-ms-required") == Some(&Value::Bool(false))
-        })
-        .map(|p| str_of(p, "name").to_string())
-        .collect();
     let mut props = Map::new();
     let mut required: Vec<String> = Vec::new();
     let mut body_field = false;
@@ -515,7 +538,7 @@ fn build_tool(
         let name = p.get("name").and_then(Value::as_str);
         let place = p.get("in").and_then(Value::as_str);
         if let Some(n) = name {
-            if n == "organization" || n == "api-version" || dropped.iter().any(|d| d == n) {
+            if n == "organization" || n == "api-version" {
                 continue;
             }
         }
@@ -564,9 +587,24 @@ fn build_tool(
                 if let Some(real) = real_header {
                     n = real.to_string();
                 }
-                props.insert(n.clone(), param_schema(p));
-                // A create has no version to match yet, so If-Match is never required.
-                if w == "path" || (truthy(p.get("required")) && n != "If-Match") {
+                // A create has no version to match yet, so If-Match is never required. An optional path parameter
+                // (`x-ms-required: false`) is not required: utcp leaves its segment out when it is not passed.
+                let optional_path =
+                    w == "path" && p.get("x-ms-required") == Some(&Value::Bool(false));
+                let mut schema = param_schema(p);
+                if let (true, Some(note)) = (optional_path, scope_note(&n)) {
+                    let desc = str_of(&schema, "description");
+                    let desc = if desc.is_empty() {
+                        note.to_string()
+                    } else {
+                        format!("{desc}. {note}")
+                    };
+                    schema["description"] = json!(desc);
+                }
+                props.insert(n.clone(), schema);
+                if (w == "path" && !optional_path)
+                    || (w != "path" && truthy(p.get("required")) && n != "If-Match")
+                {
                     required.push(n.clone());
                 }
                 if w == "header" {
@@ -602,16 +640,10 @@ fn build_tool(
     template.insert("call_template_type".into(), json!("http"));
     template.insert("http_method".into(), json!(o.method.to_uppercase()));
     let host_override = conf.host_overrides.get(area).map(String::as_str);
+    let url = build_url(spec, o.path, org, &version, host_override)?;
     template.insert(
         "url".into(),
-        json!(build_url(
-            spec,
-            o.path,
-            org,
-            &version,
-            &dropped,
-            host_override,
-        )?),
+        json!(placeholders_named_as_inputs(&url, &props)),
     );
     if body_field {
         let consumes = op

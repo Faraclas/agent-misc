@@ -6,7 +6,7 @@
 //! included too: utcp saves the file or reads the file to send. The PAT's permissions, not this list, decide what an
 //! agent can do; leaving a tool out only spares agents an operation that cannot be undone or cannot work.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -58,10 +58,6 @@ pub struct Config {
     pub required_params: HashMap<String, HashMap<String, Vec<String>>>,
     /// Explicit tool names, per area and operationId, for names the automatic rule gets wrong or makes clash.
     pub names: HashMap<String, HashMap<String, String>>,
-    /// Path parameters the spec marks `x-ms-required: false` that are left out of the URL (with their segment), per
-    /// area. utcp cannot leave a segment out per call (an unfilled `{team}` stays in the URL), so each is either
-    /// always required or always dropped.
-    pub drop_optional_path_params: HashMap<String, HashSet<String>>,
     /// Request body schemas that replace the spec's, per area and operationId (see `bodies.rs`).
     pub body_overrides: HashMap<String, HashMap<String, Value>>,
     /// Hosts that replace the spec's, per area, for areas the service also serves under the organization. A path
@@ -555,9 +551,6 @@ impl Config {
                     HashMap::from([("Releases_Get Logs".to_string(), "get_release_logs".to_string())]),
                 ),
             ]),
-            // In `wit`, `team` only matters for team-relative WIQL macros such as @CurrentIteration; in `work`
-            // (boards, iterations, capacity) it selects the team, so it stays.
-            drop_optional_path_params: HashMap::from([("wit".to_string(), HashSet::from(["team".to_string()]))]),
             body_overrides: crate::bodies::real(),
             // The spec's host, app.vssps.visualstudio.com, refuses an organization's PAT (401); the organization's
             // identity host serves the same route and accepts it (checked 2026-11-23).

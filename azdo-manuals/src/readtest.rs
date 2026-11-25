@@ -428,6 +428,10 @@ impl ReadTest {
                 value = self.source(name, param, true)?;
             }
             let Some(value) = value else {
+                // An optional path parameter is left out: utcp leaves its segment out (the default timeline, team...).
+                if !required.contains(param) {
+                    continue;
+                }
                 return Ok(Err(format!("no value for {{{param}}}")));
             };
             args.insert(param.to_string(), value);

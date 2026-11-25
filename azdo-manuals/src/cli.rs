@@ -36,9 +36,9 @@ Getting started (once per user and organization):
   4. Run step 1 again with the PAT in AZURE_DEVOPS_EXT_PAT: it adds the endpoints only Microsoft's client libraries
      describe, and the Analytics manual
   5. Test the staged manuals (read-only): azdo-manuals read-test --org <your-org> --project <a project>
-  6. Make them active for your agents: utcp promote
+  6. Make them active for your agents: utcp promote 'azdo_*'
 generate prints these steps again when it is done. After upgrading azdo-manuals, run step 4 again, check what
-changes with utcp diff, then steps 5 and 6.";
+changes with utcp diff 'azdo_*', then steps 5 and 6. Steps 1 to 6 need utcp 0.2.4 or newer.";
 
 const HELP_EXAMPLES: &str = "\
 Examples:
@@ -57,8 +57,8 @@ that only Microsoft's client libraries describe (several hundred more tools, dow
 and writes the Analytics manual from the Analytics service's OData description. Without a PAT the manuals hold what
 the REST API descriptions have; generate then says how to get the rest.
 
-With --stage the manuals go to utcp's staging area, where agents do not see them yet: review them with utcp diff,
-test them with azdo-manuals read-test, then make them active with utcp promote.
+With --stage the manuals go to utcp's staging area, where agents do not see them yet: review them with
+utcp diff 'azdo_*', test them with azdo-manuals read-test, then make them active with utcp promote 'azdo_*'.
 
 Example (writes, stages, and prints what to do next):
   azdo-manuals generate --org <your-org> --stage
@@ -600,10 +600,41 @@ pub(crate) fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The oldest utcp the manuals work with: 0.2.4 leaves out the URL segment of an optional path parameter that is not
+/// passed (`{team}`, `{timelineId}`), where older versions send the placeholder as it is.
+pub const MIN_UTCP: (u32, u32, u32) = (0, 2, 4);
+
 fn find_utcp(given: Option<PathBuf>) -> Result<PathBuf, Fail> {
-    given
+    let bin = given
         .or_else(|| which("utcp"))
-        .ok_or_else(|| Fail(2, "no utcp binary (use --utcp)".into()))
+        .ok_or_else(|| Fail(2, "no utcp binary (use --utcp)".into()))?;
+    let out = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| Fail(2, format!("cannot run {}: {e}", bin.display())))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (a, b, c) = MIN_UTCP;
+    match utcp_version(&text) {
+        Some(v) if v >= MIN_UTCP => Ok(bin),
+        found => Err(Fail(
+            2,
+            format!(
+                "{} is utcp {}; these manuals need utcp {a}.{b}.{c} or newer, which leaves out optional URL segments \
+                 such as {{team}} instead of sending them as they are. Update utcp, or pass --utcp <newer utcp>",
+                bin.display(),
+                found.map_or("of an unknown version".to_string(), |(x, y, z)| format!("{x}.{y}.{z}")),
+            ),
+        )),
+    }
+}
+
+/// `(major, minor, patch)` from `utcp --version` (`utcp 0.2.4`).
+pub fn utcp_version(text: &str) -> Option<(u32, u32, u32)> {
+    let word = text.split_whitespace().nth(1)?;
+    let mut parts = word
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|n| n.parse::<u32>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
 /// Everything besides the spec, for `generate` and `route-gaps`.
@@ -834,10 +865,7 @@ fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
                 if !output.status.success() {
                     print!("{}", String::from_utf8_lossy(&output.stdout));
                     eprint!("{}", String::from_utf8_lossy(&output.stderr));
-                    return Err(Fail(
-                        1,
-                        format!("utcp stage {name} failed (output above; utcp 0.2.0 or newer is needed)"),
-                    ));
+                    return Err(Fail(1, format!("utcp stage {name} failed (output above)")));
                 }
             }
             println!(
@@ -903,9 +931,9 @@ pub(crate) fn next_steps(org: &str, out: Option<&Path>) -> Vec<String> {
              - either way, then run: utcp daemon reload-env"
         ),
         format!("Check it with: utcp doctor   (it should show [SET] {PAT_VAR})"),
-        "See what changes for your agents: utcp diff".to_string(),
+        "See what changes for your agents: utcp diff 'azdo_*'".to_string(),
         format!("Test the staged manuals (read-only): azdo-manuals read-test {folder} --project <a project>"),
-        "Make them active for your agents: utcp promote".to_string(),
+        "Make them active for your agents: utcp promote 'azdo_*'".to_string(),
     ]
 }
 

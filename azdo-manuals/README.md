@@ -134,7 +134,7 @@ Left out (`generate` prints this list, `report.json` has every operation with it
 
 ## Usage
 
-`azdo-manuals help` shows the same steps. Once per user and organization (needs utcp 0.2.0 or newer):
+`azdo-manuals help` shows the same steps. Once per user and organization (needs utcp 0.2.4 or newer):
 
 | Step | Run | What you should see |
 | --- | --- | --- |
@@ -143,9 +143,9 @@ Left out (`generate` prints this list, `report.json` has every operation with it
 | 3. Give it to utcp | Add it as the secret `AZURE_DEVOPS_EXT_PAT`: a line `AZURE_DEVOPS_EXT_PAT=<the token>` in utcp's `.env` file (`utcp doctor` shows it as `Secrets File`), or, if `utcp doctor` shows a `Secrets Command`, where that command reads secrets (add the name to its allowlist if it has one), then `utcp daemon reload-env`. See the secrets section of the [utcp operating guide](../utcp-rs/docs/operating.md). | Nothing yet. |
 | 4. Add the rest | Step 1 again with the PAT in the environment of that one command: `AZURE_DEVOPS_EXT_PAT=<the token> azdo-manuals generate --org <your-org> --stage` (the [operating guide](./docs/operating.md#2-the-pat) shows how to keep it out of your shell history) | Nine manuals, and how many tools came from the client libraries and from Analytics. |
 | 5. Check | `utcp doctor` | `[SET] AZURE_DEVOPS_EXT_PAT`, listing the azdo manuals, marked `(staged)`. |
-| 6. Review | `utcp diff` | Each manual as `new manual, N tools`, or for an update the tools added, removed and changed. |
+| 6. Review | `utcp diff 'azdo_*'` | Each manual as `new manual, N tools`, or for an update the tools added, removed and changed. |
 | 7. Test | `azdo-manuals read-test --org <your-org> --project <a project>` | One line per read tool with its status, then `Results: N ok, ...` (below). |
-| 8. Make them active | `utcp promote` | `Promoted 'azdo_git' (186 tools, new)` and so on; agents now find them, and their skills list them. |
+| 8. Make them active | `utcp promote 'azdo_*'` | `Promoted 'azdo_git' (186 tools, new)` and so on; agents now find them, and their skills list them. |
 
 `--org` is the name in `https://dev.azure.com/<your-org>`. Step 1 writes the manuals to a private folder,
 `~/.local/share/azdo-manuals/<your-org>` (`%LOCALAPPDATA%\azdo-manuals\manuals\<your-org>` on Windows; `--out` picks
@@ -153,9 +153,9 @@ another), and stages each one in utcp under its name and hint. Without `--stage`
 manual names do not contain the organization, so one utcp setup holds the manuals of one organization.
 `azdo-manuals <command> help` and `azdo-manuals help <command>` both print the help for one command.
 
-**After upgrading azdo-manuals**, run step 4 again (step 1 with the PAT), then steps 6 to 8: `utcp diff` shows what
-the new version changes, and `utcp rollback <manual>` brings back the previous version if something is wrong. The
-[operating guide](./docs/operating.md) has the details, and what to do when a step fails.
+**After upgrading azdo-manuals**, run step 4 again (step 1 with the PAT), then steps 6 to 8: `utcp diff 'azdo_*'`
+shows what the new version changes, and `utcp rollback <manual>` brings back the previous version if something is
+wrong. The [operating guide](./docs/operating.md) has the details, and what to do when a step fails.
 
 The manuals contain the organization name in every URL, so keep them private (never in a public repository). The
 downloaded specs and client library files are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache`
@@ -272,7 +272,7 @@ azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-dele
 - `azdo-manuals route-gaps --org <org>` (PAT in the environment) lists the organization's live endpoints that no
   tool covers: left out by a rule (with the reason), or described neither by the specs nor by a client library. It
   writes `route-gaps.json` next to the manuals.
-- Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary, 0.2.0 or newer, to also stage the manuals in a
+- Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary, 0.2.4 or newer, to also stage the manuals in a
   throwaway utcp).
 - Version: the REST API version plus a counter, so `7.1.x` for API 7.1 (`azdo-manuals --version`).
 - How it works inside, file formats and design decisions: [`docs/azdo-manuals-spec.md`](./docs/azdo-manuals-spec.md).

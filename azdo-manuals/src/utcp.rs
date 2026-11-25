@@ -107,21 +107,21 @@ impl Utcp {
         Ok(())
     }
 
-    /// The names of the manuals with tools in `utcp list` (or `utcp list --staged`).
+    /// The names of the active (or staged) manuals with tools, from `utcp list --json`: one row per manual with
+    /// `name`, `tools` and `staged`.
     pub fn manual_names(&self, staged: bool) -> Result<BTreeSet<String>, String> {
-        let args: &[&str] = if staged {
-            &["list", "--json", "--staged"]
-        } else {
-            &["list", "--json"]
-        };
-        let out = self.run_ok(args)?;
-        let tools: Value = serde_json::from_str(py_strip(&out))
+        let args = ["list", "--json"];
+        let out = self.run_ok(&args)?;
+        let manuals: Value = serde_json::from_str(py_strip(&out))
             .map_err(|e| format!("utcp {} did not print JSON: {e}", args.join(" ")))?;
-        Ok(tools
+        Ok(manuals
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|t| t["manual"].as_str().map(String::from))
+            .filter(|m| {
+                m["staged"].as_bool() == Some(staged) && m["tools"].as_u64().unwrap_or(0) > 0
+            })
+            .filter_map(|m| m["name"].as_str().map(String::from))
             .collect())
     }
 
