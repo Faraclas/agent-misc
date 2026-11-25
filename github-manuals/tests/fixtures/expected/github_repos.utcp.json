@@ -62,7 +62,7 @@
     },
     {
       "name": "get_repo",
-      "description": "Get a repository. Gets a repository. See \"Repositories\".",
+      "description": "Get a repository",
       "tags": [
         "github",
         "repos"

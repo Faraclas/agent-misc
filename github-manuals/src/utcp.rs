@@ -4,16 +4,17 @@ use std::path::Path;
 use std::process::Command;
 
 /// The oldest utcp that runs every generated tool correctly: 0.2.2 added DELETE bodies and text bodies, 0.2.3
-/// reports GitHub's next page (`next_page`, from the `Link` header) instead of silently returning only the first.
-pub const MIN_VERSION: (u64, u64, u64) = (0, 2, 3);
+/// reports GitHub's next page (`next_page`, from the `Link` header) instead of silently returning only the first,
+/// and 0.2.4 takes the `'github_*'` pattern the next steps use (`utcp diff`, `utcp promote`) and adds `--where`.
+pub const MIN_VERSION: (u64, u64, u64) = (0, 2, 4);
 
-/// "0.2.3", for messages.
+/// "0.2.4", for messages.
 pub fn min_version_text() -> String {
     let (a, b, c) = MIN_VERSION;
     format!("{a}.{b}.{c}")
 }
 
-/// The version `utcp --version` prints ("utcp 0.2.3"), or `None` when it cannot be run or read.
+/// The version `utcp --version` prints ("utcp 0.2.4"), or `None` when it cannot be run or read.
 pub fn version(bin: &Path) -> Option<(u64, u64, u64)> {
     let out = Command::new(bin).arg("--version").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);

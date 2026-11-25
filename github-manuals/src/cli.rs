@@ -22,10 +22,10 @@ Getting started (once per user):
   1. github-manuals generate --stage
      Writes the manuals and stages them in utcp (agents do not see them yet).
   2. Give utcp a GitHub token as the secret GITHUB_MANUALS_PAT, then check it with: utcp doctor
-  3. Review and try the staged manuals: utcp diff, utcp call --staged ...
-  4. Make them active for your agents: utcp promote
+  3. Review and try the staged manuals: utcp diff 'github_*', utcp call --staged ...
+  4. Make them active for your agents: utcp promote 'github_*'
 generate prints these steps again when it is done. After upgrading github-manuals, run step 1 again, check what
-changes with utcp diff, then step 4.";
+changes with utcp diff 'github_*', then step 4.";
 
 const HELP_EXAMPLES: &str = "\
 Examples:
@@ -40,8 +40,8 @@ Downloads GitHub's OpenAPI description on the first run (about 14 MB, checked ag
 afterwards) and writes one utcp manual per area of GitHub, plus report.json (every tool, and every operation left
 out with the reason). No token is needed for this.
 
-With --stage the manuals go to utcp's staging area, where agents do not see them yet: review them with utcp diff,
-try them with utcp call --staged, then make them active with utcp promote.
+With --stage the manuals go to utcp's staging area, where agents do not see them yet: review them with
+utcp diff 'github_*', try them with utcp call --staged, then make them active with utcp promote 'github_*'.
 
 Example (writes, stages, and prints what to do next):
   github-manuals generate --stage
@@ -334,9 +334,9 @@ pub(crate) fn next_steps() -> Vec<String> {
              - either way, then run: utcp daemon reload-env"
         ),
         format!("Check it with: utcp doctor   (it should show [SET] {PAT_VAR})"),
-        "See what changes for your agents: utcp diff".to_string(),
+        "See what changes for your agents: utcp diff 'github_*'".to_string(),
         "Try a staged tool: utcp call --staged github_users.get_authenticated_user".to_string(),
-        "Make them active for your agents: utcp promote".to_string(),
+        "Make them active for your agents: utcp promote 'github_*'".to_string(),
     ]
 }
 

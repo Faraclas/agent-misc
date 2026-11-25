@@ -10,8 +10,9 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the GitHub REST API, so agents ca
 - **Output:** seven manuals with 605 tools for REST API version `2026-03-10` (every tool sends
   `X-GitHub-Api-Version: 2026-03-10`), and a `report.json` listing every tool and every operation left out with the
   reason. The manuals name no user or organization: one set works for any account.
-- **Requirements:** one static binary, no runtime; utcp 0.2.3 or newer (earlier versions cannot send the bodies
-  of some tools and silently return only the first page of a list, and `generate --stage` refuses them). Network
+- **Requirements:** one static binary, no runtime; utcp 0.2.4 or newer (earlier versions cannot send the bodies
+  of some tools, silently return only the first page of a list, or cannot promote the manuals by the `'github_*'`
+  pattern; `generate --stage` refuses them). Network
   access to `raw.githubusercontent.com` for the first run (one 14 MB download); later runs use the cache and take
   about a second.
 - **Docs:** this README (installation, first setup, what is left out), the [operating guide](./docs/operating.md)
@@ -71,12 +72,13 @@ reason, and prints the next steps:
 
 1. Give utcp the token as the secret `GITHUB_MANUALS_PAT` (see [The token](#the-token)), then check it with
    `utcp doctor`.
-2. See what changes for your agents: `utcp diff`. Try a tool: `utcp call --staged github_users.get_authenticated_user`.
-3. Make them active: `utcp promote`.
+2. See what changes for your agents: `utcp diff 'github_*'`. Try a tool:
+   `utcp call --staged github_users.get_authenticated_user`.
+3. Make them active: `utcp promote 'github_*'`.
 
-`utcp promote` without a name promotes every staged manual, also ones staged by someone else; name the manuals
-(`utcp promote github_repos`, ...) when other manuals may be staged. `--read-only` leaves out every write tool.
-After upgrading github-manuals, run `generate --stage` again and check `utcp diff` before promoting.
+The pattern names only these seven manuals, so manuals that others staged stay staged. `--read-only` leaves out every
+write tool. After upgrading github-manuals, run `generate --stage` again and check `utcp diff 'github_*'` before
+promoting.
 
 ## The token
 

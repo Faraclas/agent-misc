@@ -115,11 +115,12 @@
     "/repos/{owner}/{repo}/issues/{issue_number}/reactions": {
       "get": {
         "summary": "List reactions for an issue",
+        "description": "Lists the reactions to an issue. OAuth app tokens and personal access tokens (classic) need the `repo` scope to use this endpoint with a private repository. You can use parameters to narrow the list of results. For more information about using parameters, see [Parameters](https://docs.github.com/rest/guides/getting-started-with-the-rest-api#parameters).\n\nEach reaction has a type, e.g. `heart`. Anyone with read access to the repository can use this endpoint.",
         "operationId": "reactions/list-for-issue",
         "parameters": [
           {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"},
           {"name": "content", "in": "query", "schema": {"type": "string", "enum": ["+1", "-1", "heart"]}},
-          {"name": "per_page", "in": "query", "schema": {"type": "integer", "default": 30}}
+          {"name": "per_page", "in": "query", "description": "The number of results per page (max 100). For more information, see \"[Using pagination in the REST API](https://docs.github.com/rest/using-the-rest-api/using-pagination-in-the-rest-api).\"", "schema": {"type": "integer", "default": 30}}
         ],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
         "x-github": {"category": "reactions", "subcategory": "reactions"}

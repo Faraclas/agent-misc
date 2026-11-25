@@ -82,7 +82,7 @@
     },
     {
       "name": "create_issue",
-      "description": "(untested) Create an issue. Any user with pull access can create an issue. See rate limits.",
+      "description": "(untested) Create an issue. Any user with pull access can create an issue.",
       "tags": [
         "github",
         "issues",
@@ -309,7 +309,7 @@
     },
     {
       "name": "list_reactions_for_issue",
-      "description": "List reactions for an issue",
+      "description": "List reactions for an issue. Classic tokens need the repo scope with a private repository. You can use parameters to narrow the list of results. Each reaction has a type, e.g. heart. Anyone with read access to the repository can use this endpoint.",
       "tags": [
         "github",
         "reactions"
@@ -339,7 +339,8 @@
           },
           "per_page": {
             "type": "integer",
-            "default": 30
+            "default": 30,
+            "description": "The number of results per page (max 100)."
           }
         },
         "required": [

@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 
 use crate::config::{Config, PAT_VAR};
 use crate::names;
-use crate::text::{one_line, plain, truthy};
+use crate::text::{one_line, plain, tidy, truthy};
 
 /// Starts the description of a write that has not yet worked in a live test against a throwaway repository.
 pub const UNTESTED: &str = "(untested)";
@@ -29,7 +29,7 @@ const READ_ONLY: &str = "write (--read-only)";
 /// utcp refuses a manual hint longer than this (`MAX_MANUAL_HINT_CHARS` in utcp-core).
 pub const UTCP_MAX_HINT_CHARS: usize = 60;
 const SCHEMA_DEPTH: usize = 3;
-const MAX_DESCRIPTION: usize = 400;
+const MAX_DESCRIPTION: usize = 800;
 const MAX_FIELD_DESCRIPTION: usize = 300;
 /// Where a description stops being about the operation: token-type boilerplate, and media types the fixed
 /// `Accept` header does not ask for.
@@ -100,7 +100,7 @@ fn deref<'a>(spec: &'a Value, mut node: &'a Value) -> Result<&'a Value> {
 }
 
 fn field_description(text: &str) -> String {
-    one_line(&plain(text), MAX_FIELD_DESCRIPTION)
+    one_line(&tidy(&plain(text), ""), MAX_FIELD_DESCRIPTION)
 }
 
 /// A JSON Schema for a tool's input from an OpenAPI schema: `$ref` and `allOf` inlined down to SCHEMA_DEPTH levels,
@@ -121,14 +121,14 @@ pub fn convert(
                 .unwrap_or_else(|| json!("object"));
             out.insert("type".into(), t);
             let d = [
-                str_of(target, "description"),
-                str_of(target, "title"),
-                &name,
+                field_description(str_of(target, "description")),
+                field_description(str_of(target, "title")),
+                name.clone(),
             ]
             .into_iter()
             .find(|d| !d.is_empty())
-            .unwrap_or("");
-            out.insert("description".into(), json!(field_description(d)));
+            .unwrap_or_default();
+            out.insert("description".into(), json!(d));
             return Ok(out);
         }
         let mut seen = seen.to_vec();
@@ -167,9 +167,9 @@ pub fn convert(
     if let Some(t) = &stype {
         out.insert("type".into(), t.clone());
     }
-    let d = str_of(schema, "description");
+    let d = field_description(str_of(schema, "description"));
     if !d.is_empty() {
-        out.insert("description".into(), json!(field_description(d)));
+        out.insert("description".into(), json!(d));
     }
     if let Some(f) = schema.get("format").and_then(Value::as_str) {
         if SCHEMA_FORMATS.contains(&f) {
@@ -405,10 +405,9 @@ fn tool_description(o: &Operation, untested: bool) -> String {
             detail = &detail[..i];
         }
     }
-    let detail = plain(detail);
+    let detail = one_line(&tidy(&plain(detail), &summary), MAX_DESCRIPTION);
     let mut text = summary.trim_end_matches('.').to_string();
-    let detail = one_line(&detail, MAX_DESCRIPTION);
-    if !detail.is_empty() && detail != summary {
+    if !detail.is_empty() {
         text = format!("{text}. {detail}");
     }
     if o.method == "DELETE" {

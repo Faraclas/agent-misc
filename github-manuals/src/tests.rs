@@ -2,7 +2,7 @@
 //!
 //! Set UPDATE_EXPECTED=1 to rewrite tests/fixtures/expected/ after an intended change (then review the diff).
 //! The utcp load test runs the `utcp` from UTCP_BIN, else from PATH, and is skipped when there is none or it is
-//! older than 0.2.3 (CI sets REQUIRE_UTCP=1 on Linux to make it fail instead).
+//! older than 0.2.4 (CI sets REQUIRE_UTCP=1 on Linux to make it fail instead).
 //! GITHUB_MANUALS_TEST_FIXTURES points the compiled test binary at a copy of tests/fixtures/, so it can run on a
 //! machine without the source tree (a Windows test machine).
 
@@ -22,7 +22,7 @@ use crate::generate::{generate, DELETE_NOTE, FILE_ANSWER, UNTESTED, UTCP_MAX_HIN
 use crate::http::{Request, Response, Transport};
 use crate::names;
 use crate::source::{self, sha256_hex, Pins, PINS};
-use crate::text::{one_line, plain, snake, write_json};
+use crate::text::{one_line, plain, restates, sentences, snake, tidy, write_json};
 
 fn fixtures() -> PathBuf {
     if let Some(dir) = std::env::var_os("GITHUB_MANUALS_TEST_FIXTURES") {
@@ -342,10 +342,8 @@ fn query_parameters() {
 fn descriptions() {
     let tools = tools_by_name(&run_generate().0);
     let repo = tools["get_repo"]["description"].as_str().unwrap();
-    assert_eq!(
-        repo,
-        "Get a repository. Gets a repository. See \"Repositories\"."
-    );
+    // "Gets a repository." restates the summary, and "See Repositories." lost its link.
+    assert_eq!(repo, "Get a repository");
     let content = tools["get_content"]["description"].as_str().unwrap();
     assert_eq!(
         content,
@@ -354,7 +352,18 @@ fn descriptions() {
     let issue = tools["create_issue"]["description"].as_str().unwrap();
     assert_eq!(
         issue,
-        format!("{UNTESTED} Create an issue. Any user with pull access can create an issue. See rate limits.")
+        format!("{UNTESTED} Create an issue. Any user with pull access can create an issue.")
+    );
+    // The classic-token scope is shortened in place; "e.g." does not end a sentence.
+    assert_eq!(
+        tools["list_reactions_for_issue"]["description"],
+        "List reactions for an issue. Classic tokens need the repo scope with a private repository. You can use \
+         parameters to narrow the list of results. Each reaction has a type, e.g. heart. Anyone with read access \
+         to the repository can use this endpoint."
+    );
+    assert_eq!(
+        tools["list_reactions_for_issue"]["inputs"]["properties"]["per_page"]["description"],
+        "The number of results per page (max 100)."
     );
     // A tested write has no marker; a DELETE starts with the note.
     assert_eq!(
@@ -530,6 +539,83 @@ fn text_helpers() {
         plain("Use <a href=\"x\">rate limits</a>.<br/>Then wait."),
         "Use rate limits. Then wait."
     );
+    assert_eq!(
+        plain("An _issue id_ (_not_ the pull_request key or `_links`)."),
+        "An issue id (not the pull_request key or _links)."
+    );
+}
+
+#[test]
+fn sentences_split_at_ends_only() {
+    assert_eq!(
+        sentences("Use a name (e.g. GitHub). See \"Docs.\" Then v1.2 works, etc. Done? Yes"),
+        [
+            "Use a name (e.g. GitHub).",
+            "See \"Docs.\"",
+            "Then v1.2 works, etc. Done?",
+            "Yes"
+        ]
+    );
+    assert!(sentences("  ").is_empty());
+}
+
+#[test]
+fn tidy_descriptions() {
+    // A first sentence that restates the summary goes, whatever its verb form or filler words.
+    assert!(restates(
+        "List workflow runs for a repository",
+        "Lists all workflow runs for a repository."
+    ));
+    assert!(restates("Get a gist comment", "Gets a comment on a gist."));
+    assert!(!restates(
+        "List concurrency groups for a repository",
+        "Lists the active concurrency groups."
+    ));
+    assert!(!restates(
+        "Delete a repository",
+        "Deleting a repository requires admin access."
+    ));
+    assert_eq!(
+        tidy("Gets a gist. It may be truncated.", "Get a gist"),
+        "It may be truncated."
+    );
+    // Without a summary, nothing is taken as a restatement.
+    assert_eq!(tidy("Gets a gist.", ""), "Gets a gist.");
+    // Pointers to stripped links go.
+    assert_eq!(
+        tidy(
+            "Page number. For more information, see \"Using pagination.\" Starts at 1.",
+            ""
+        ),
+        "Page number. Starts at 1."
+    );
+    assert_eq!(tidy("See \"Searching topics\" for qualifiers.", ""), "");
+    // Classic-token scope sentences are shortened where they stand.
+    assert_eq!(
+        tidy(
+            "If the repository is private, OAuth tokens and personal access tokens (classic) need the repo scope to \
+             use this endpoint. The workflow scope is also required.",
+            ""
+        ),
+        "If the repository is private, classic tokens need the repo scope. The workflow scope is also required."
+    );
+    assert_eq!(
+        tidy(
+            "Lists alerts. OAuth app tokens and personal access tokens (classic) need the security_events scope to \
+             use this endpoint with private or public repositories, or the public_repo scope to use this endpoint \
+             with only public repositories.",
+            ""
+        ),
+        "Lists alerts. Classic tokens need the security_events scope with private or public repositories, or the \
+         public_repo scope with only public repositories."
+    );
+    assert_eq!(
+        tidy(
+            "OAuth apps and personal access tokens (classic) cannot use this endpoint.",
+            ""
+        ),
+        "Classic tokens cannot use this endpoint."
+    );
 }
 
 // Source
@@ -611,7 +697,9 @@ fn help_and_next_steps() {
         .contains("unknown command 'nope'"));
     let steps = next_steps().join("\n");
     assert!(
-        steps.contains(PAT_VAR) && steps.contains("utcp promote"),
+        steps.contains(PAT_VAR)
+            && steps.contains("utcp diff 'github_*'")
+            && steps.contains("utcp promote 'github_*'"),
         "{steps}"
     );
 }
@@ -685,7 +773,17 @@ fn utcp_stage_schema_dry_run_promote() {
             None,
         );
     }
-    assert_eq!(run(&["list", "--json"], None).trim(), "[]");
+    let listed = |staged: bool| {
+        let list: Value = serde_json::from_str(&run(&["list", "--json"], None)).unwrap();
+        let list = list.as_array().unwrap().clone();
+        assert_eq!(list.len(), manuals.len(), "{list:?}");
+        assert!(
+            list.iter()
+                .all(|m| m["staged"].as_bool().unwrap_or(false) == staged),
+            "{list:?}"
+        );
+    };
+    listed(true);
     for (name, manual) in &manuals {
         for tool in manual["tools"].as_array().unwrap() {
             let full = format!("{name}.{}", tool["name"].as_str().unwrap());
@@ -738,6 +836,7 @@ fn utcp_stage_schema_dry_run_promote() {
     assert_eq!(out["body"], "# Hi");
     assert_eq!(out["body_type"], "text");
     assert_eq!(out["headers"]["Content-Type"], "text/plain");
-    run(&["promote"], None);
+    run(&["promote", "github_*"], None);
+    listed(false);
     run(&["schema", "github_repos.get_repo"], None);
 }

@@ -11,9 +11,9 @@ is in the [specification](./github-manuals-spec.md).
 2. Make the token available to utcp as `GITHUB_MANUALS_PAT`: either a line `GITHUB_MANUALS_PAT=<token>` in utcp's
    `.env` file, or the store a "Secrets Command" reads from (add the name to its allowlist if it has one). Then
    `utcp daemon reload-env` and `utcp doctor` (it should show `[SET] GITHUB_MANUALS_PAT`).
-3. Try the staged manuals: `utcp diff`, `utcp schema --staged github_repos.get_repo`,
+3. Try the staged manuals: `utcp diff 'github_*'`, `utcp schema --staged github_repos.get_repo`,
    `utcp call --staged github_users.get_authenticated_user`.
-4. Promote them by name: `utcp promote github_repos` (and the others), or `utcp promote` when nothing else is staged.
+4. Promote them: `utcp promote 'github_*'`. The pattern leaves manuals that others staged alone.
 
 ## The token
 
@@ -54,8 +54,9 @@ that the token lacks something:
 
 ## Upgrading
 
-After installing a new github-manuals: `github-manuals generate --stage`, then `utcp diff` (renamed or removed tools
-are listed there and in the release notes), try a few tools, and promote. A new release may pin a newer commit of the
+After installing a new github-manuals: `github-manuals generate --stage`, then `utcp diff 'github_*'` (renamed or
+removed tools are listed there and in the release notes), try a few tools, and `utcp promote 'github_*'`. A new
+release may pin a newer commit of the
 description; the first run downloads it once.
 
 ## Troubleshooting
@@ -64,8 +65,9 @@ description; the first run downloads it once.
   changed. Nothing was used or cached. Retry; if it persists, report it.
 - **"category ... has no manual"**: only with a pins file other than the built-in one. GitHub added an area that has
   not been reviewed; use the built-in pins.
-- **"utcp 0.2.3 or newer is needed"**: `generate --stage` checks `utcp --version` first, because older utcp
-  versions drop the body of a DELETE, cannot send a text body, and silently return only the first page of a list.
+- **"utcp 0.2.4 or newer is needed"**: `generate --stage` checks `utcp --version` first, because older utcp
+  versions drop the body of a DELETE, cannot send a text body, silently return only the first page of a list, and
+  cannot take the `'github_*'` pattern.
   Upgrade utcp, or use `--utcp` to point at a newer one.
 - **Proxies:** set `HTTPS_PROXY` (both github-manuals and utcp read it). Trusted CAs come from the system store, so a
   company root CA for TLS inspection works.
