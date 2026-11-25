@@ -632,7 +632,8 @@ Like git's index, one staging area lets a manual be reviewed and tested before a
   difference in description, schemas, tags or request) and unchanged, and the hint. Each changed tool says what
   changed: `description`; `inputs added: a, b`, `inputs removed: ...`, `now required: ...`, `no longer required: ...`,
   `inputs changed: ...` (or `inputs`); `method: GET -> POST`, `url: A -> B`, `auth`, `headers`, or the name of another
-  request key; or another top-level key's name (`outputs`, `tags`).
+  request key; or another top-level key's name (`outputs`, `tags`). A tool keeps its request under both `provider`
+  and `tool_call_template`, so each change is listed once, not once per copy (since 0.2.5).
 - `utcp diff <manual>.<tool>...` shows one staged tool against the version it replaces, part by part: `description`,
   `input <name>` (that input's schema plus `"required"`), `inputs` (the rest of the input schema), `method`, `url`,
   `auth`, `headers`, another request key, or another top-level key, each with its old value after `-` and its new

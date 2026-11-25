@@ -172,6 +172,9 @@ fn tool_changes(old: &serde_json::Value, new: &serde_json::Value) -> Vec<String>
             other => what.push(other.to_string()),
         }
     }
+    // A cached tool keeps its request as both `provider` and `tool_call_template`; name each change once.
+    let mut seen = BTreeSet::new();
+    what.retain(|w| seen.insert(w.clone()));
     what
 }
 
@@ -511,7 +514,14 @@ fn tool_parts(old: &serde_json::Value, new: &serde_json::Value) -> Vec<PartChang
             ),
         }
     }
-    parts
+    // A cached tool keeps its request as both `provider` and `tool_call_template`; show each change once.
+    let mut unique: Vec<PartChange> = Vec::with_capacity(parts.len());
+    for p in parts {
+        if !unique.contains(&p) {
+            unique.push(p);
+        }
+    }
+    unique
 }
 
 /// Compare tool `tool` of staged manual `manual` with its version in the manual the staged one replaces.
@@ -802,6 +812,24 @@ mod tests {
         let mut same_props = new.clone();
         same_props["inputs"]["additionalProperties"] = json!(false);
         assert_eq!(tool_changes(&new, &same_props), vec!["inputs"]);
+    }
+
+    /// A cached tool keeps its request under both `provider` and `tool_call_template`; a URL change is
+    /// reported once, not once per copy.
+    #[test]
+    fn a_request_kept_twice_is_reported_once() {
+        let tool = |url: &str| {
+            let req = json!({"http_method": "GET", "url": url});
+            json!({"name": "t", "provider": req.clone(), "tool_call_template": req})
+        };
+        let (old, new) = (tool("https://x/a"), tool("https://x/b"));
+        assert_eq!(
+            tool_changes(&old, &new),
+            vec!["url: https://x/a -> https://x/b"]
+        );
+        let parts = tool_parts(&old, &new);
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert_eq!(parts[0].part, "url");
     }
 
     /// `utcp diff <manual>.<tool>` shows each differing part old against new; secrets stay hidden, but a
