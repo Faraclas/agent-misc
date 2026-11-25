@@ -33,14 +33,28 @@ that the token lacks something:
 - **Pagination:** list tools take `per_page` (up to 100). When more items exist, utcp prints
   `{"result": <the answer>, "next_page": {...}}`; call again with the same arguments plus the `next_page` values
   (`{"page": "2"}`, a cursor such as `{"after": "..."}`, or `{"since": "..."}` for `list_users` and
-  `list_public_repos`). The last page prints the plain answer. `--fields` and `--out` apply to `result`. Search
+  `list_public_repos`). The last page prints the plain answer. `--where`, `--fields` and `--out` apply to `result`. Search
   stops at 1000 results: the tenth page of 100 has no `next_page`, and asking for page 11 is refused (422).
 - **Large lists:** narrow them with GitHub's own filters first, so fewer pages come back:
   `list_workflow_runs_for_repo` takes `status` (also a conclusion such as `failure`), `branch`, `event` and `created`;
   `list_jobs_for_workflow_run` and `list_check_runs_for_ref` take `filter: "latest"` (only the last attempt), and
   check runs also `check_name` and `status`. `--fields` then keeps only the fields you need.
-  <!-- TODO(utcp 0.2.4): document --where for the item filtering GitHub cannot do (failed jobs, check runs by
-  conclusion, files by path), with examples tested through the daemon and with direct; no jq or save-to-file. -->
+- **Filtering what GitHub cannot (`--where`):** utcp keeps only the list items that match. For example:
+  - failed jobs of a run: `list_jobs_for_workflow_run` with `--where 'conclusion=failure|cancelled'`;
+  - one job's failed steps: `get_job_for_workflow_run` with `--where steps.conclusion=failure`;
+  - check runs: `list_check_runs_for_ref` with `--where 'check_runs.conclusion!=success'`;
+  - files by path: `compare_commits` with `--where 'files.filename^=src/'`, or `get_git_tree` with
+    `"recursive": "1"` and `--where 'path^=src/' --where type=blob`;
+  - large changes: `list_pull_request_files` with `--where 'changes>=200'`;
+  - issues without pull requests (GitHub's issue lists include them): `list_issues_for_repo` with
+    `--where pull_request=null`, or `pull_request!=null` for the pull requests only;
+  - by label: `--where labels.name=bug` keeps the items with any label of that name;
+  - by time: `--where 'completed_at>=2026-11-24'` (a date alone is a whole day, in UTC).
+
+  Matrix job names need no escaping (`'name=check-latest (ubuntu-latest, 3.13)'`). Values ignore case; field names
+  do not (`conclusion`, not `CONCLUSION`). `--where` filters only the page that came back, so a page can be empty
+  and still have `next_page`; `total_count` stays GitHub's count of the unfiltered list. When nothing matches, utcp
+  prints a note with the values the field has: check the value before concluding there are none.
 - **Files:** log, archive and artifact downloads (`download_job_logs_for_workflow_run`, `download_zipball_archive`,
   `download_artifact`, ...) save a file and print its path. `upload_release_asset` takes the file as
   `"body": {"file": "<path>"}` and the asset name as `name`.

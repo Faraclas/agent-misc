@@ -723,13 +723,37 @@ fn help_and_next_steps() {
     assert!(help(Some("nope"))
         .to_string()
         .contains("unknown command 'nope'"));
-    let steps = next_steps().join("\n");
+    let steps = next_steps(false).join("\n");
     assert!(
         steps.contains(PAT_VAR)
             && steps.contains("utcp diff 'github_*'")
             && steps.contains("utcp promote 'github_*'"),
         "{steps}"
     );
+    let steps = next_steps(true).join("\n");
+    assert!(
+        !steps.contains(PAT_VAR) && steps.contains("utcp promote 'github_*'"),
+        "{steps}"
+    );
+    let doctor = |creds: Value| json!({"doctor": {"credentials": creds}});
+    let cred = |var: &str, set: bool| json!({"env_var": var, "is_set": set});
+    let set_in = crate::utcp::secret_is_set_in;
+    assert_eq!(
+        set_in(
+            &doctor(json!([cred(PAT_VAR, false), cred(PAT_VAR, true)])),
+            PAT_VAR
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        set_in(
+            &doctor(json!([cred(PAT_VAR, false), cred("X", true)])),
+            PAT_VAR
+        ),
+        Some(false)
+    );
+    assert_eq!(set_in(&doctor(json!([cred("X", true)])), PAT_VAR), None);
+    assert_eq!(set_in(&json!({}), PAT_VAR), None);
 }
 
 // utcp load test

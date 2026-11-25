@@ -82,8 +82,8 @@ A generator that turns GitHub's OpenAPI description of the REST API (version 202
   enterprise administration and a reviewed list of dangerous operations (repository settings and deletion, access
   grants, webhooks, protection, security settings, secrets) are left out; `generate` prints what was left out and why,
   and the README lists each group.
-- **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
-  what changes, and `utcp promote` makes them active.
+- **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area;
+  `utcp diff 'github_*'` shows what changes, and `utcp promote 'github_*'` makes them active.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
 
 Docs: [README](./github-manuals/README.md), [operating guide](./github-manuals/docs/operating.md),

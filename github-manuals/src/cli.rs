@@ -285,13 +285,13 @@ fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
     for line in left_out_lines(&report) {
         println!("{line}");
     }
-    let staged = match utcp {
+    let staged = match &utcp {
         None => false,
         Some(utcp) => {
             for (name, m) in report["manuals"].as_object().into_iter().flatten() {
                 let file = out.join(format!("{name}.utcp.json"));
                 let hint = m["hint"].as_str().unwrap_or("");
-                let output = Command::new(&utcp)
+                let output = Command::new(utcp)
                     .args(["stage", name])
                     .arg(&file)
                     .args(["--hint", hint])
@@ -311,33 +311,47 @@ fn cmd_generate(args: GenerateArgs) -> Result<i32, Fail> {
         }
     };
     println!();
+    let token_set = staged
+        && utcp
+            .as_deref()
+            .and_then(|u| crate::utcp::secret_is_set(u, PAT_VAR))
+            == Some(true);
+    if token_set {
+        println!("utcp already has the token {PAT_VAR} (utcp doctor shows it [SET]).");
+    }
     println!("Next:");
     let mut steps = Vec::new();
     if !staged {
         steps.push("Stage the manuals in utcp: github-manuals generate --stage".to_string());
     }
-    steps.extend(next_steps());
+    steps.extend(next_steps(token_set));
     for (i, step) in steps.iter().enumerate() {
         println!("  {}. {step}", i + 1);
     }
     Ok(0)
 }
 
-/// The steps after staging: the token, then review and promote.
-pub(crate) fn next_steps() -> Vec<String> {
-    vec![
-        format!(
+/// The steps after staging: the token (unless utcp has it), then review and promote.
+pub(crate) fn next_steps(token_set: bool) -> Vec<String> {
+    let mut steps = Vec::new();
+    if !token_set {
+        steps.push(format!(
             "Give utcp a GitHub token as the secret {PAT_VAR} (README: \"The token\"), in one of two ways:\n     \
              - add the line {PAT_VAR}=<the token> to utcp's .env file (utcp doctor: \"Secrets File\")\n     \
              - or, if utcp doctor shows a \"Secrets Command\", store it where that command reads secrets (if the\n       \
              command has an allowlist, add {PAT_VAR} to it)\n     \
              - either way, then run: utcp daemon reload-env"
-        ),
-        format!("Check it with: utcp doctor   (it should show [SET] {PAT_VAR})"),
+        ));
+        steps.push(format!(
+            "Check it with: utcp doctor   (it should show [SET] {PAT_VAR})"
+        ));
+    }
+    steps.extend([
         "See what changes for your agents: utcp diff 'github_*'".to_string(),
         "Try a staged tool: utcp call --staged github_users.get_authenticated_user".to_string(),
         "Make them active for your agents: utcp promote 'github_*'".to_string(),
-    ]
+    ]);
+    steps
 }
 
 fn cmd_pins(args: PinsArgs) -> Result<i32, Fail> {
