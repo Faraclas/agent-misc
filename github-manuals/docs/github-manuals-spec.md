@@ -66,8 +66,10 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   summary is dropped as a restatement; and "OAuth app tokens and personal access tokens (classic) need the `repo`
   scope to use this endpoint" becomes "Classic tokens need the `repo` scope", in place, because later sentences may
   refer back to it. The result is cut to about 800 characters at a word, ending in "..." (parameter descriptions:
-  300). Parameter descriptions get the same treatment without the summary. DELETEs start with "Delete only what the
-  user asked for or what you created."; untested writes with `(untested)`.
+  300). Parameter descriptions get the same treatment without the summary. The summary always ends with a period.
+  DELETEs have "Delete only what the user asked for or what you created." right after the summary, not before it,
+  so the first sentence (all that `utcp search` and `utcp list` show) still says what is deleted. Untested writes
+  start with `(untested)`.
 - **Tags:** `github`, the category, the subcategory, and `untested` for untested writes.
 - **Tested writes:** `config::TESTED_WRITES` lists, by operationId, the writes that worked live through
   `utcp call --staged` against a throwaway public repository of the token's owner (117 of 222 in 0.1.0). A name it

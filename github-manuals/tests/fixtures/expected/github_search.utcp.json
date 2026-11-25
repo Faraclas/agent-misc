@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "search_code",
-      "description": "Search code",
+      "description": "Search code.",
       "tags": [
         "github",
         "search"

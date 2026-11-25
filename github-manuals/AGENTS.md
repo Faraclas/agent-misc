@@ -38,7 +38,7 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
    silently.
 5. **Writes:** all included writes are generated; those not in `config::TESTED_WRITES` start their description with
    `(untested)` and carry the tag `untested`. A write moves to `TESTED_WRITES` only after it worked live against a
-   throwaway repository. Every DELETE's description starts with `generate::DELETE_NOTE`.
+   throwaway repository. Every DELETE's description has `generate::DELETE_NOTE` right after its summary.
 6. **utcp limits are not worked around here.** When utcp cannot send what an operation needs (a body on DELETE, a
    plain-text body), the operation is left out with a reason naming the limit, and the fix is a utcp-rs change.
 7. **HTTP behaves like utcp's.** `src/http.rs` uses `ureq` with `platform-verifier` (system CA store), like

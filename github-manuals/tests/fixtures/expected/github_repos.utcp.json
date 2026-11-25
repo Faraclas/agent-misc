@@ -61,7 +61,7 @@
     },
     {
       "name": "get_repo",
-      "description": "Get a repository",
+      "description": "Get a repository.",
       "tags": [
         "github",
         "repos"
@@ -104,7 +104,7 @@
     },
     {
       "name": "upload_release_asset",
-      "description": "(untested) Upload a release asset",
+      "description": "(untested) Upload a release asset.",
       "tags": [
         "github",
         "releases",

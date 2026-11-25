@@ -146,9 +146,9 @@ branches. Limit the token itself (scopes, a fine-grained token, or a separate ac
 ### Deletes
 
 Everyday deletes are included: branches and tags (refs), releases and release assets, comments, labels, milestones,
-reactions, workflow runs and logs, artifacts, caches, package versions, environments, deployments. Every DELETE tool's
-description starts with "Delete only what the user asked for or what you created." Deleting a release asset breaks
-anything that downloads it (an ebuild, an install script).
+reactions, workflow runs and logs, artifacts, caches, package versions, environments, deployments. In every DELETE
+tool's description, "Delete only what the user asked for or what you created." follows the summary. Deleting a
+release asset breaks anything that downloads it (an ebuild, an install script).
 
 ### Copilot agent automations
 

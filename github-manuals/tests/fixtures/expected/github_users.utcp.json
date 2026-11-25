@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "get_authenticated_user",
-      "description": "Get the authenticated user",
+      "description": "Get the authenticated user.",
       "tags": [
         "github",
         "users"
@@ -39,7 +39,7 @@
     },
     {
       "name": "get_org",
-      "description": "Get an organization",
+      "description": "Get an organization.",
       "tags": [
         "github",
         "orgs"
@@ -76,7 +76,7 @@
     },
     {
       "name": "get_zen",
-      "description": "Get the Zen of GitHub",
+      "description": "Get the Zen of GitHub.",
       "tags": [
         "github",
         "meta"
@@ -106,7 +106,7 @@
     },
     {
       "name": "render_markdown_raw",
-      "description": "(untested) Render a Markdown document in raw mode",
+      "description": "(untested) Render a Markdown document in raw mode.",
       "tags": [
         "github",
         "markdown",

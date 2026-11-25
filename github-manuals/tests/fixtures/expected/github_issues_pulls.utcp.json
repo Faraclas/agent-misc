@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "add_issue_labels",
-      "description": "(untested) Add labels to an issue",
+      "description": "(untested) Add labels to an issue.",
       "tags": [
         "github",
         "issues",
@@ -157,7 +157,7 @@
     },
     {
       "name": "create_issue_comment",
-      "description": "Create an issue comment",
+      "description": "Create an issue comment.",
       "tags": [
         "github",
         "issues",
@@ -210,7 +210,7 @@
     },
     {
       "name": "delete_issue_comment",
-      "description": "(untested) Delete only what the user asked for or what you created. Delete an issue comment",
+      "description": "(untested) Delete an issue comment. Delete only what the user asked for or what you created.",
       "tags": [
         "github",
         "issues",
@@ -260,7 +260,7 @@
     },
     {
       "name": "list_issue_assignees",
-      "description": "List assignees of an issue",
+      "description": "List assignees of an issue.",
       "tags": [
         "github",
         "issues",
@@ -370,7 +370,7 @@
     },
     {
       "name": "remove_issue_assignees",
-      "description": "(untested) Delete only what the user asked for or what you created. Remove assignees from an issue",
+      "description": "(untested) Remove assignees from an issue. Delete only what the user asked for or what you created.",
       "tags": [
         "github",
         "issues",

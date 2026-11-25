@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "list_agent_tasks_for_repo",
-      "description": "List tasks for repository",
+      "description": "List tasks for repository.",
       "tags": [
         "github",
         "agent-tasks"

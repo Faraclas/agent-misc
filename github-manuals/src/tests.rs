@@ -371,7 +371,7 @@ fn descriptions() {
     let tools = tools_by_name(&run_generate().0);
     let repo = tools["get_repo"]["description"].as_str().unwrap();
     // "Gets a repository." restates the summary, and "See Repositories." lost its link.
-    assert_eq!(repo, "Get a repository");
+    assert_eq!(repo, "Get a repository.");
     let content = tools["get_content"]["description"].as_str().unwrap();
     assert_eq!(
         content,
@@ -393,17 +393,17 @@ fn descriptions() {
         tools["list_reactions_for_issue"]["inputs"]["properties"]["per_page"]["description"],
         "The number of results per page (max 100)."
     );
-    // A tested write has no marker; a DELETE starts with the note.
+    // A tested write has no marker; a DELETE has the note after its summary, so search still shows what it deletes.
     assert_eq!(
         tools["create_issue_comment"]["description"],
-        "Create an issue comment"
+        "Create an issue comment."
     );
     let delete = tools["delete_issue_comment"]["description"]
         .as_str()
         .unwrap();
     assert_eq!(
         delete,
-        format!("{UNTESTED} {DELETE_NOTE} Delete an issue comment")
+        format!("{UNTESTED} Delete an issue comment. {DELETE_NOTE}")
     );
     assert!(tools["delete_issue_comment"]["tags"]
         .as_array()

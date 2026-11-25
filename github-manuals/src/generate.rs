@@ -407,11 +407,15 @@ fn tool_description(o: &Operation, untested: bool) -> String {
     }
     let detail = one_line(&tidy(&plain(detail), &summary), MAX_DESCRIPTION);
     let mut text = summary.trim_end_matches('.').to_string();
-    if !detail.is_empty() {
-        text = format!("{text}. {detail}");
+    if !text.is_empty() && !text.ends_with(['?', '!']) {
+        text.push('.');
     }
+    // After the summary, so the first sentence (all that `utcp search` shows) still says what is deleted.
     if o.method == "DELETE" {
-        text = format!("{DELETE_NOTE} {text}");
+        text = format!("{text} {DELETE_NOTE}");
+    }
+    if !detail.is_empty() {
+        text = format!("{text} {detail}");
     }
     if untested {
         text = format!("{UNTESTED} {text}");

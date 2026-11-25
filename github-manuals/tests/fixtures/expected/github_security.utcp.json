@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "create_attestation",
-      "description": "(untested) Create an attestation",
+      "description": "(untested) Create an attestation.",
       "tags": [
         "github",
         "repos",
@@ -71,7 +71,7 @@
     },
     {
       "name": "get_code_scanning_alert",
-      "description": "Get a code scanning alert",
+      "description": "Get a code scanning alert.",
       "tags": [
         "github",
         "code-scanning"
@@ -118,7 +118,7 @@
     },
     {
       "name": "get_dependabot_alert",
-      "description": "Get a Dependabot alert",
+      "description": "Get a Dependabot alert.",
       "tags": [
         "github",
         "dependabot",

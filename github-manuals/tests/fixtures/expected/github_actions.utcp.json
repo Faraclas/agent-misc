@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "create_check_run",
-      "description": "(untested) Create a check run",
+      "description": "(untested) Create a check run.",
       "tags": [
         "github",
         "checks",
@@ -62,7 +62,7 @@
     },
     {
       "name": "download_job_logs_for_workflow_run",
-      "description": "Download job logs for a workflow run",
+      "description": "Download job logs for a workflow run.",
       "tags": [
         "github",
         "actions",
