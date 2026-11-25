@@ -194,16 +194,110 @@ pub fn manual_label(name: &str, hint: Option<&str>) -> String {
     }
 }
 
-/// Labels of the active manuals, sorted by name, for the skill description (see [`manual_label`]).
+/// Labels of the active manuals, sorted by name, for the skill description (see [`grouped_manual_labels`]).
 pub fn registered_manual_labels(paths: &UtcpPaths) -> Vec<String> {
     UtcpRegistryConfig::load(paths)
         .map(|cfg| {
-            cfg.manuals
+            let entries: Vec<(String, Option<String>)> = cfg
+                .manuals
                 .iter()
-                .map(|(name, e)| manual_label(name, e.hint.as_deref()))
-                .collect()
+                .map(|(name, e)| (name.clone(), e.hint.clone()))
+                .collect();
+            grouped_manual_labels(&entries)
         })
         .unwrap_or_default()
+}
+
+/// Labels for the skill description, which every agent loads on every task. Manuals named
+/// `<prefix>_<rest>` that share a prefix with another manual become one label, and the words their
+/// hints all start or end with are written once: `azdo_admin (Azure DevOps permissions, org ni)` and
+/// `azdo_git (Azure DevOps repos and PRs, org ni)` become
+/// `azdo_* (Azure DevOps, org ni: admin (permissions), git (repos and PRs))`. Other manuals get
+/// [`manual_label`]. `entries` must be sorted by name.
+pub fn grouped_manual_labels(entries: &[(String, Option<String>)]) -> Vec<String> {
+    let prefix_of = |name: &str| name.split_once('_').map(|(p, _)| p.to_string());
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, _) in entries {
+        if let Some(p) = prefix_of(name) {
+            *counts.entry(p).or_default() += 1;
+        }
+    }
+    let mut labels = Vec::new();
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, hint) in entries {
+        let group = prefix_of(name).filter(|p| counts.get(p).copied().unwrap_or(0) > 1);
+        let Some(prefix) = group else {
+            labels.push(manual_label(name, hint.as_deref()));
+            continue;
+        };
+        if !done.insert(prefix.clone()) {
+            continue;
+        }
+        let members: Vec<(&str, Option<&str>)> = entries
+            .iter()
+            .filter(|(n, _)| prefix_of(n).as_deref() == Some(prefix.as_str()))
+            .map(|(n, h)| {
+                (
+                    &n[prefix.len() + 1..],
+                    h.as_deref().filter(|h| !h.trim().is_empty()),
+                )
+            })
+            .collect();
+        labels.push(group_label(&prefix, &members));
+    }
+    labels
+}
+
+fn group_label(prefix: &str, members: &[(&str, Option<&str>)]) -> String {
+    let words: Vec<Vec<&str>> = members
+        .iter()
+        .filter_map(|(_, h)| h.map(|h| h.split_whitespace().collect()))
+        .collect();
+    // Shared words only when every member has a hint; otherwise they would describe the ones without.
+    let (lead, tail) = if words.len() == members.len() {
+        let min = words.iter().map(Vec::len).min().unwrap_or(0);
+        let lead = (0..min)
+            .take_while(|&i| words.iter().all(|w| w[i] == words[0][i]))
+            .count();
+        let tail = (0..min - lead)
+            .take_while(|&i| {
+                let last = &words[0][words[0].len() - 1 - i];
+                words.iter().all(|w| &w[w.len() - 1 - i] == last)
+            })
+            .count();
+        (lead, tail)
+    } else {
+        (0, 0)
+    };
+    let trim = |s: String| s.trim_end_matches([',', ';', ':']).to_string();
+    let shared = match (&words.first(), lead, tail) {
+        (Some(w), l, t) if l + t > 0 => {
+            let head = trim(w[..l].join(" "));
+            let end = w[w.len() - t..].join(" ");
+            [head, end]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        _ => String::new(),
+    };
+    let parts: Vec<String> = members
+        .iter()
+        .map(|(rest, hint)| match hint {
+            Some(h) => {
+                let w: Vec<&str> = h.split_whitespace().collect();
+                let own = trim(w[lead..w.len() - tail].join(" "));
+                manual_label(rest, Some(&own))
+            }
+            None => rest.to_string(),
+        })
+        .collect();
+    if shared.is_empty() {
+        format!("{prefix}_* ({})", parts.join(", "))
+    } else {
+        format!("{prefix}_* ({shared}: {})", parts.join(", "))
+    }
 }
 
 /// Enumerate the global and optional workspace skills root folders across Zed (`~/.agents/skills`),
@@ -439,15 +533,70 @@ mod tests {
             SkillTargetPlatform::LinuxPosix,
             SkillTargetPlatform::WindowsPowerShell,
         ] {
-            let md = render_skill_markdown(platform, &["github".to_string()]);
-            assert!(!md.contains("{{"), "unrendered placeholder in {platform:?}");
-            assert!(md.contains("--command npx --arg -y --arg @scope/some-mcp-server"));
-            assert!(md.contains("-H 'Authorization: Bearer ${EXAMPLE_TOKEN}'"));
-            assert!(md.contains("-e 'API_KEY=${SOME_API_KEY}'"));
+            let md = render_admin_skill_markdown(platform);
+            assert!(md.contains("--command <program> --arg <a> --arg <b>"));
+            assert!(md.contains("takes the program only"));
+            assert!(md.contains("each `env` entry to `-e`"));
+            assert!(md.contains("write `${VAR}` placeholders in `-H` and `-e`"));
             assert!(md.contains("list <name>"));
         }
-        let linux = render_skill_markdown(SkillTargetPlatform::LinuxPosix, &[]);
-        assert!(linux.contains("value in `~/.config/utcp/.env`"));
+        let linux = render_admin_skill_markdown(SkillTargetPlatform::LinuxPosix);
+        assert!(linux.contains("`VAR=value` to\n  `~/.config/utcp/.env`"));
+    }
+
+    fn entries(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        list.iter()
+            .map(|(n, h)| (n.to_string(), h.map(str::to_string)))
+            .collect()
+    }
+
+    /// Nine `azdo_*` manuals repeated "Azure DevOps ..., org ni" nine times in every agent's prompt.
+    #[test]
+    fn manuals_sharing_a_prefix_get_one_label_with_the_shared_hint_words_once() {
+        let labels = grouped_manual_labels(&entries(&[
+            (
+                "azdo_admin",
+                Some("Azure DevOps permissions, connections, hooks, org ni"),
+            ),
+            ("azdo_git", Some("Azure DevOps repos and PRs, org ni")),
+            (
+                "azdo_wiki_search",
+                Some("Azure DevOps wiki and search, org ni"),
+            ),
+            ("context7", Some("library and framework docs")),
+            ("d2", None),
+            ("github", Some("GitHub REST API")),
+            ("my_tool", Some("one of a kind")),
+        ]));
+        assert_eq!(
+            labels,
+            vec![
+                "azdo_* (Azure DevOps, org ni: admin (permissions, connections, hooks), git (repos and PRs), \
+                 wiki_search (wiki and search))",
+                "context7 (library and framework docs)",
+                "d2",
+                "github (GitHub REST API)",
+                "my_tool (one of a kind)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_with_a_manual_without_hint_or_nothing_in_common_shares_no_words() {
+        let labels = grouped_manual_labels(&entries(&[
+            ("gh_issues", Some("GitHub issues")),
+            ("gh_users", None),
+        ]));
+        assert_eq!(labels, vec!["gh_* (issues (GitHub issues), users)"]);
+        let labels = grouped_manual_labels(&entries(&[
+            ("x_a", Some("alpha docs")),
+            ("x_b", Some("beta api")),
+        ]));
+        assert_eq!(labels, vec!["x_* (a (alpha docs), b (beta api))"]);
+        // A hint that is all shared words leaves the member bare.
+        let labels =
+            grouped_manual_labels(&entries(&[("x_a", Some("Foo")), ("x_b", Some("Foo bar"))]));
+        assert_eq!(labels, vec!["x_* (Foo: a, b (bar))"]);
     }
 
     #[test]
@@ -471,8 +620,12 @@ mod tests {
             ),
             "{front}"
         );
-        assert!(md.contains("set-hint <name>"), "skill teaches set-hint");
-        assert!(md.contains("--hint '<few words>'"), "skill teaches --hint");
+        let admin = render_admin_skill_markdown(SkillTargetPlatform::LinuxPosix);
+        assert!(admin.contains("set-hint <name>"), "skill teaches set-hint");
+        assert!(
+            admin.contains("--hint '<few words>'"),
+            "skill teaches --hint"
+        );
     }
 
     /// The description is all an agent sees before it picks a skill. A VS Code agent asked to call
@@ -533,17 +686,45 @@ mod tests {
             SkillTargetPlatform::WindowsPowerShell,
         ] {
             let md = render_skill_markdown(platform, &[]);
+            assert!(md.contains("log recent --failed"), "{platform:?}");
+            assert!(md.contains("Nothing was sent"), "{platform:?}");
+            assert!(md.contains("use the utcp-admin skill"), "{platform:?}");
+            let admin = render_admin_skill_markdown(platform);
             for command in [
                 "log recent --failed",
                 "daemon servers",
                 "daemon restart-server <name>",
                 "daemon stop-server <name>",
             ] {
-                assert!(md.contains(command), "{platform:?} skill lacks `{command}`");
+                assert!(
+                    admin.contains(command),
+                    "{platform:?} skill lacks `{command}`"
+                );
             }
             assert!(
-                md.contains("ask the user before running"),
+                admin.contains("ask the user before `"),
                 "deregister needs the user's OK"
+            );
+        }
+    }
+
+    /// Agents learn to filter list answers and that a filtered page still has a next page.
+    #[test]
+    fn rendered_skill_teaches_where() {
+        for platform in [
+            SkillTargetPlatform::LinuxPosix,
+            SkillTargetPlatform::WindowsPowerShell,
+        ] {
+            let md = render_skill_markdown(platform, &[]);
+            assert!(
+                md.contains("'records.result=failed|canceled'"),
+                "{platform:?}"
+            );
+            assert!(md.contains("`note` in `batch`"), "{platform:?}");
+            assert!(md.contains("`\"where\": [\"path=value\"]`"), "{platform:?}");
+            assert!(
+                md.contains("no matching items still has `next_page`"),
+                "{platform:?}"
             );
         }
     }

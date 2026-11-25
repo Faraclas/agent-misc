@@ -35,22 +35,40 @@ MCP servers. A change you make here changes them for all agents.
 ## Key Commands
 
 ```sh
-{{BIN_NAME}} register <name> <url_or_file> --hint '<few words>'           # OpenAPI spec or UTCP manual
+{{BIN_NAME}} register <name> <url_or_file> --hint '<few words>'           # OpenAPI 2.0/3.x spec or UTCP manual
 {{BIN_NAME}} stage <name> <url_or_file> --hint '<few words>'              # the same, staged for review first
-{{BIN_NAME}} diff [<name>]                       # staged vs active: tools added, removed, changed
+{{BIN_NAME}} diff [<name>...]                    # staged vs active: tools added, removed, and what changed
+{{BIN_NAME}} diff <manual>.<tool>                # one changed tool: old against new, part by part
+{{BIN_NAME}} search --staged "<keywords>"        # will agents find the staged tools?
 {{BIN_NAME}} call --staged <manual.tool> '<json>' # test a staged manual
-{{BIN_NAME}} promote [<name>]                    # make staged manuals active (discard drops them)
+{{BIN_NAME}} promote <name>...                   # make staged manuals active (--all: every staged one)
+{{BIN_NAME}} discard <name>...                   # drop staged manuals (--all: every staged one)
 {{BIN_NAME}} rollback <name>                     # back to the version the last promote replaced
+{{BIN_NAME}} refresh <name>...                   # read the manual's source again (--all: every manual)
 {{BIN_NAME}} import-mcp <name> --url <url> --register --hint '<few words>' # MCP server over HTTP
 {{BIN_NAME}} import-mcp <name> --command <program> --arg <a> --arg <b> --register --hint '<few words>'
-{{BIN_NAME}} set-hint <name> '<few words>'       # add or change a hint
+{{BIN_NAME}} import <url_or_file> -o <file.utcp.json> # write a manual file without registering it
+{{BIN_NAME}} set-hint <name> '<few words>'       # add or change a hint (get-hint [<name>] shows them)
+{{BIN_NAME}} list                                # the manuals, their tool counts and hints
 {{BIN_NAME}} log recent --failed                 # recent failed calls with their full errors
-{{BIN_NAME}} daemon servers                      # local MCP servers: state, PID, restarts
+{{BIN_NAME}} daemon servers                      # local MCP servers: state, PID, uptime, restarts
 {{BIN_NAME}} daemon restart-server <name>        # fix a hung local MCP server
-{{BIN_NAME}} daemon status                       # stopped: names daemon.log with the last start error or crash
+{{BIN_NAME}} daemon stop-server <name>           # stop it until the next call starts it again
+{{BIN_NAME}} daemon status                       # version (WARNING: needs a restart); stopped: names daemon.log
 {{BIN_NAME}} daemon reload-env                   # pick up changed secrets (shell, .env, secrets command)
 {{BIN_NAME}} doctor                              # daemon, paths, secrets and their source, skill status
 ```
+
+- `promote`, `discard` and `refresh` need names or `--all`; `--all` changes every manual for every agent. A name
+  ending in `*` takes every manual it starts (`'azdo_*'`, quoted).
+- `import-mcp --command` takes the program only (`--command "npx -y pkg"` fails): pass each argument with its own
+  `--arg` and each environment variable with `-e 'KEY=${VAR}'`. A server's `mcpServers` JSON (from its README) maps
+  directly: `command` to `--command`, each `args` entry to `--arg`, each `env` entry to `-e`. Remote servers take
+  auth in `-H`. Discovery waits up to 60 s, since a first `npx` or `uvx` run downloads the package. The name is
+  optional (taken from the URL host or package).
+- Local MCP servers (imported with `--command`) run inside the daemon, start on first use and are shared by every
+  agent. A restart or stop fails the calls waiting on that server at once ("was stopped on request"), including
+  other agents' calls. To keep a server off for good, ask the user before `{{BIN_NAME}} deregister <name>`.
 
 ## Full Guide
 

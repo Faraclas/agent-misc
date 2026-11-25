@@ -1086,6 +1086,7 @@ impl AppState {
                     args: args.clone(),
                     dry_run,
                     fields: None,
+                    filters: Vec::new(),
                     caller_env: manual_caller_env(&self.paths),
                     staged: false,
                 },
@@ -1107,7 +1108,7 @@ impl AppState {
             tool,
             args,
             dry_run,
-            None,
+            Default::default(),
             false,
             None,
         ))
@@ -1562,7 +1563,7 @@ impl AppState {
             .enable_all()
             .build()
         {
-            match rt.block_on(refresh_manuals(&paths, Some(&target))) {
+            match rt.block_on(refresh_manuals(&paths, std::slice::from_ref(&target))) {
                 Ok(_) => {
                     notify_daemon_reload(&self.paths);
                     self.status_message = format!("Refreshed manual '{}'.", target);
@@ -2275,7 +2276,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 /// Formats an RFC 3339 activity timestamp in `tz` as `(table, popup)` text: the table shows
 /// `HH:MM:SS` for `today` and `MM-DD HH:MM:SS` for other days; the popup always shows the full
 /// `YYYY-MM-DD HH:MM:SS`. A timestamp that does not parse is shown unchanged.
-fn local_activity_time<Tz: chrono::TimeZone>(
+pub(crate) fn local_activity_time<Tz: chrono::TimeZone>(
     timestamp: &str,
     tz: &Tz,
     today: chrono::NaiveDate,
@@ -3752,8 +3753,9 @@ fn draw_daemon_monitor_tab(f: &mut Frame, app: &AppState, area: Rect) {
             Line::from(format!("  Daemon State        : RUNNING (PID {})", d.pid)),
             Line::from(format!("  IPC Endpoint        : {}", d.socket_endpoint)),
             Line::from(format!(
-                "  Uptime & Traffic    : {}s uptime | {} IPC requests served",
-                d.uptime_secs, d.requests_served
+                "  Uptime & Traffic    : {} uptime | {} IPC requests served",
+                crate::format_uptime(d.uptime_secs),
+                d.requests_served
             )),
             Line::from(format!(
                 "  Loaded in RAM       : {} manuals | {} tools | {} env vars used by manuals",
@@ -3940,6 +3942,7 @@ mod tests {
             tags: Vec::new(),
             inputs: None,
             outputs: None,
+            staged: false,
         }
     }
 
@@ -5487,6 +5490,20 @@ mod tests {
         let file = paths.cached_manual_path("demo");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, manual.to_string()).unwrap();
+        let mut registry = UtcpRegistryConfig::default();
+        registry.manuals.insert(
+            "demo".into(),
+            utcp_core::catalog::RegisteredManualEntry {
+                name: "demo".into(),
+                source_url: "test".into(),
+                cached: true,
+                cached_file: Some(file.display().to_string()),
+                base_url: None,
+                headers: Default::default(),
+                hint: None,
+            },
+        );
+        registry.save(&paths).unwrap();
 
         let mut app = AppState::unloaded(paths, None);
         app.active_tab = 1;

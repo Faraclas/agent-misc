@@ -1,11 +1,14 @@
 # `utcp-rs`: Direct UTCP Rust Workspace Specification (Zero-MCP, Dual-Mode CLI + Daemon, Linux & Windows)
 
-- **Status:** v1.14 (Implemented: Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
+- **Status:** v1.16 (Implemented: Dual-Mode CLI + Daemon, `import-mcp`, `tmpfs` Media Spool, Auto-Compact & `--fields`,
   manual lifecycle (deregister / re-register / purge), env var allow-list, per-manual skill hints, 6-tab TUI with Try
   popup and MCP import, concurrent stdio MCP routing, stdio MCP process-tree cleanup, clear rate-limit errors,
   `utcp log recent`, stdio MCP server management, interruptible direct mode, `utcp-admin` skill and operating guide,
   secrets command, staging (stage / diff / promote / discard / rollback), file uploads and downloads with limits,
-  large answers saved to files, stall timeout, self-updating `settings.toml` template, paged answers with `next_page`)
+  large answers saved to files, stall timeout, self-updating `settings.toml` template, paged answers with `next_page`,
+  `--where` list filter, daemon version and features in `daemon status`, arguments and secrets checked before
+  sending (inside bodies too), `list` of manuals, grouped skill description, `search --staged`, per-tool `diff`,
+  optional URL segments, `--where` comparisons of numbers and dates, keys with dots in `--fields` and `--where`)
 - **Repository:** `agent-misc` (`/utcp-rs`)
 - **License:** MIT. `utcp-core` is derived from `rs-utcp` 0.3.2 (`MIT OR Apache-2.0`; its Apache-2.0 text is kept as
   `crates/utcp-core/LICENSE-UPSTREAM-RS-UTCP`, see `NOTICE`).
@@ -370,9 +373,11 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 
 - **Zero-Tokio Synchronous Execution for Local Commands (`list`, `search`, `schema`):** Reads `search_index.bin`
   directly from the OS RAM page cache (~15 microseconds) without initializing Tokio or TLS.
-- **Direct Single-Manual Lookup on `utcp call <manual>.<tool>`:** Opens only `~/.cache/utcp/manuals/<manual>.utcp.json`
-  (1 file read from OS page cache) and loads `.env` only when `${...}` secret interpolation is required. The secrets
-  command, if configured, is then asked for that manual's names only.
+- **Direct Single-Manual Lookup on `utcp call <manual>.<tool>`:** Reads the small registry, then opens only
+  `~/.cache/utcp/manuals/<manual>.utcp.json` (1 file read from OS page cache), and loads `.env` only when `${...}`
+  secret interpolation is required. The secrets command, if configured, is then asked for that manual's names only.
+  As through the daemon, a manual the registry does not list as active is refused (`is staged, not active yet`, or
+  `is not registered`), even when a deregistered manual's saved copy is still in the cache.
 - **Secrets Command Without the Daemon:** other commands that resolve secrets (`batch`, `register` / `import-mcp`
   placeholders, `doctor`) ask it for every name registered manuals use, plus the placeholders of a manual being
   registered. A process reuses a run for the same names for 60 s. Its values win over the environment and `.env`.
@@ -427,7 +432,8 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 
 ### 5. Single-Process Batch Execution (`utcp batch`)
 
-- `utcp batch [--stdin | --file <path>] [--concurrency 8]` accepts a JSON array of calls:
+- `utcp batch [--stdin | --file <path>] [--concurrency 8]` accepts a JSON array of calls (without `--file`, stdin is
+  read when `--stdin` is given or stdin is not a terminal, so `utcp batch < items.json` works):
 
 ```json
 [
@@ -446,7 +452,14 @@ Even when running without the daemon, Direct Mode remains sub-2ms on Linux:
 
 - Executes concurrently (via the daemon if running, or a shared in-process Tokio runtime and connection pool in Direct
   Mode), returning a structured JSON array of results (`id`, `tool`, `ok`, `status`, `result` or `error`, `next_page`
-  when `result` is a page of a longer list, `latency_ms`) so partial failures never abort the entire batch.
+  when `result` is a page of a longer list, `note` when the arguments had undeclared keys, `--where` kept none of a
+  list's items or a `--fields` path matched nothing, `latency_ms` rounded to 0.01) so partial failures never abort
+  the entire batch.
+- An item has `tool` and optionally `id`, `args` (alias `arguments`), `fields`, `where` and `out`. `id` defaults to
+  the item's position (`"0"`, `"1"`, ...). Any other key is refused before anything is called (so a misspelled
+  `feilds` can't be ignored quietly), and so are two items with the same id.
+- Every item's answer or error is printed; when any item failed, `utcp batch` then exits with status 2 (and
+  `utcp: k of n batch items failed (ids: ...)` on stderr). A batch that could not run at all exits with 1.
 
 ---
 
@@ -513,6 +526,55 @@ requests per window. Every agent using this token shares the limit, so retrying 
 - **Debugging without disk logging:** the error is returned to the calling agent and kept in the daemon's in-memory
   ring, so `utcp log recent --failed` (or `utcp ui` Tab 5) shows it afterwards.
 
+### Checks Before Sending: Errors About the Call, Not the API
+
+A call the API misreads gets an answer that points the wrong way: a missing argument leaves `{repo}` in the URL and
+the API says 404 (the agent concludes the repository doesn't exist), a misspelled filter becomes a query parameter
+the API ignores (the call succeeds with the wrong data), and an unset secret goes out empty (401). So `call` and
+each `batch` item check before sending, through the daemon and in direct mode, and an error says
+`Nothing was sent`:
+
+- **Secrets:** every `${VAR}` placeholder the manual's call template uses must have a value (secrets command,
+  environment, `.env`): `these placeholders were not set: VAR (manual m needs it). Nothing was sent. ...` with
+  where to set it and `utcp doctor`. `--dry-run` shows a set secret as `***REDACTED:VAR***` and an unset one as
+  `***UNSET:VAR***`.
+- **Arguments** (`arguments.rs`, against the tool's input schema; every problem is listed together, then
+  `utcp schema <manual.tool>`):
+  - Every `required` input without a `default`, and every `{name}` left in an HTTP URL template, must be passed,
+    except a URL placeholder the schema declares and does not require: left out, it is passed as `""`. A required
+    placeholder may not be empty (`'x' is empty, but it is part of the URL and required`), since that would call
+    another URL.
+  - Filling the URL (`fill_url`): each value is URL-encoded, and an empty (or `null`) value leaves its placeholder's
+    whole path segment out, as Azure DevOps routes with optional segments expect (`{organization}/{project}/_apis/...`
+    without a project; `/_apis/build/builds/{buildId}/timeline/{timelineId}` without a timeline).
+  - Names must be declared inputs, URL placeholders, header or body fields, or the paging names utcp itself puts
+    in `next_page` (`continuationToken`, `x-ms-continuationtoken`, `page`, `after`, `before`, `cursor`), unless the
+    schema has no `properties` (its inputs are unknown) or allows `additionalProperties`. `"properties": {}`
+    declares that the tool takes no arguments, and the error says so. An unknown name gets `did you mean ...?` when
+    a declared one is close (optimal string alignment distance, so a swap of two letters is one edit).
+  - A name that differs only in case from exactly one declared name, which the call does not also pass, is renamed
+    to it (`Fields` to `fields`), at the top level and inside bodies.
+  - `integer`, `number` and `boolean` inputs take those values or strings that parse as them; `string` inputs take
+    any single value but not a list or object, except a list of plain values for a query input, which is joined
+    with commas first (Azure DevOps and GitHub declare list filters such as `definitions` and `labels` as strings).
+    A string given for an `integer`, `number` or `boolean` input (not also declared `string`) becomes that JSON
+    value, so a body field gets `5`, not `"5"`.
+  - Enum values match ignoring case (a comma-separated string value by value, for Azure DevOps flag enums) and are
+    rewritten to the declared spelling; a number passes a string enum. The error lists up to 30 allowed values.
+  - Objects whose schema declares `properties` (a JSON body, the objects inside it, and the items of lists of
+    objects, up to 16 levels) are checked the same way, with paths such as `body.fields` and `body[0].op` in the
+    errors. An undeclared key close to a declared key the object lacks (`feilds`, `Title`) is refused, since the API
+    would ignore it. Other undeclared keys are sent: a body is often an answer read back with keys the schema
+    leaves out (`_links`, `url`, read-only fields), so refusing them would break round trips. They are named in a
+    note (`sent as given, but not in the tool's schema (the API may ignore them): ...`, up to 8, then `and N more`)
+    that travels like a `--where` note: on stderr for `call`, in `note` for a `batch` item, in the dry-run output.
+    `required` inside a body is left to the API, whose error names the field.
+- **Lists in the query:** a list of plain values for a query parameter is sent once, joined with commas
+  (`ids=1,2,3`), as Azure DevOps reads it.
+- **The API's own errors** are printed on one line: `HTTP request failed with status <code>: <body>`, with a JSON
+  body re-serialized compactly and any other body (HTML, plain text, a body cut at 64 KB) with each run of whitespace
+  collapsed to one space.
+
 ### Mode A: Cache-on-Register (`utcp register <name> <url_or_path>`)
 
 Reads `cache_on_register` (default: `true`) from `settings.toml` (overridable via `--cache` / `--no-cache`):
@@ -559,18 +621,43 @@ Like git's index, one staging area lets a manual be reviewed and tested before a
 - `utcp stage <name> <source>` fetches and converts like `register` but stores the entry in a `staged` map in
   `.utcp_config.json` and the copy in `manuals/staged/<name>.utcp.json`. At most one staged copy per name; staging
   again replaces it. Without `--hint` it keeps the hint of the staged, active or deregistered manual of that name.
-- Staged manuals are not in `search_index.bin`, `list`, `search` or the skills. `list`, `schema`, `call` and `batch`
-  reach them with `--staged` (daemon or direct mode). The daemon loads them next to the active manuals, adds their
-  variable names to its allow-list and to the names it asks the secrets command for, and `doctor` lists their
-  credentials with `"staged": true`.
-- `utcp diff [<name>]` compares each staged manual with the manual it replaces: tools added, removed, changed (any
-  difference in description, schemas, tags or request) and unchanged, and the hint.
-- `utcp promote [<name>]` (all staged manuals when omitted) makes them active, keeps the registration each replaced
+- Staged manuals are not in `search_index.bin`, `search` or the skills; `list` without a manual shows them in their own
+  Staged section. `list`, `search`, `schema`, `call` and `batch` reach them with `--staged` (daemon or direct mode).
+  `search --staged` answers the review question "will agents find the right tool?": it searches the active and
+  staged manuals together, a staged manual replacing the active version of the same name, and marks staged results
+  `[staged]` (`"staged": true` in `--json`). The daemon
+  loads them next to the active manuals, adds their variable names to its allow-list and to the names it asks the
+  secrets command for, and `doctor` lists their credentials with `"staged": true`.
+- `utcp diff [<name>...]` compares each staged manual with the manual it replaces: tools added, removed, changed (any
+  difference in description, schemas, tags or request) and unchanged, and the hint. Each changed tool says what
+  changed: `description`; `inputs added: a, b`, `inputs removed: ...`, `now required: ...`, `no longer required: ...`,
+  `inputs changed: ...` (or `inputs`); `method: GET -> POST`, `url: A -> B`, `auth`, `headers`, or the name of another
+  request key; or another top-level key's name (`outputs`, `tags`).
+- `utcp diff <manual>.<tool>...` shows one staged tool against the version it replaces, part by part: `description`,
+  `input <name>` (that input's schema plus `"required"`), `inputs` (the rest of the input schema), `method`, `url`,
+  `auth`, `headers`, another request key, or another top-level key, each with its old value after `-` and its new
+  one after `+` (`(none)` for missing). When both are present and either is over 120 characters or has several
+  lines, the part shows as one word diff instead (`description (word diff: [-old-]{+new+}):`): words, runs of space
+  and single punctuation marks are compared, removed text is `[-...-]` (red in a terminal) and added `{+...+}`
+  (green), a space between two changes joins them, and unchanged text keeps 60 characters next to each change,
+  ending at a word, with `...` for the rest. In `auth` and `headers`, every string except a `${VAR}` placeholder and
+  the values of `auth_type`, `location` and `var_name` prints as `***`, so a changed secret shows as a change
+  without its value. A tool only in the staged copy is `added`, only in the active one `removed`. `--json` gives
+  `[{"manual", "tool", "replaces", "status", "parts": [{"part", "old", "new"}]}]`. Mixing manual names and
+  `<manual>.<tool>` names is an error, and so is a tool neither copy has.
+- `diff`, `promote`, `discard` and `refresh` take several names; a name ending in `*` selects every manual that
+  starts with the rest (`'azdo_*'`; only a trailing `*`). The selection is sorted and has no repeats, and a name or
+  pattern that selects nothing is an error that lists the candidates (`No staged manual matches 'gh_*' (staged: ...)`,
+  `'x' is not staged (staged: ...)`), before anything changes. One promote or discard saves the registry, rebuilds the
+  index and rewrites the skills once.
+- `utcp promote <name>...` (or `--all` for every staged manual) makes them active, keeps the registration each replaced
   (active or deregistered) in a `previous` map with its copy in `manuals/previous/`, rebuilds the index, reloads the
   daemon and rewrites the installed global skills. It is the only staging step that changes what agents see.
-- `utcp discard [<name>]` drops staged manuals. `utcp rollback <name>` swaps the active manual with its previous
-  version, so a second rollback undoes the first. `deregister --purge-cache` also deletes the staged copy and the
-  previous version. The `staged` and `previous` maps are omitted from the file while empty.
+- `utcp discard <name>...` (or `--all`) drops staged manuals. Without a name or `--all`, `promote`, `discard` and
+  `refresh` refuse and list the candidates, so a bare command never changes every manual by accident.
+- `utcp rollback <name>` swaps the active manual with its previous version, so a second rollback undoes the first.
+  `deregister --purge-cache` also deletes the staged copy and the previous version. The `staged` and `previous` maps
+  are omitted from the file while empty.
 
 ### Host + Per-Container Manual Pattern (Containerized Agents)
 
@@ -607,12 +694,12 @@ bypass the daemon and force standalone execution.
 | Command | Description | Execution Path |
 | :--- | :--- | :--- |
 | Global flags: `--config <path>`, `--direct` | `--config` uses another `.utcp_config.json` instead of the shared user catalog (a separate setup with its own cache folder and daemon endpoint, section 3); `--direct` skips the daemon. | All commands |
-| `utcp list [<manual>] [--json] [--staged]` | Fast summary of all registered tools (`name`, `protocol`, `description`), or of one manual's; with `--staged`, of the staged manuals' tools. A manual with no match errors and says what to run instead (for example `--staged` for a staged manual). | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp search <query> [--limit 10] [--schemas] [--json]` | Ranked keyword/tag search returning compact 1-line tool summaries by default (the first line of each description; or full schemas with `--schemas`). Matches tool names, descriptions, tags and the manual's hint words. | **Hot (Daemon IPC or Sync Direct)** |
+| `utcp list [<manual>] [--tools] [--json] [--staged]` | Without a manual, one line per manual: name, hint, tool count, and whether it is active or staged (`--json`: `name`, `hint`, `tools`, `staged`); `--tools` lists every tool instead (`name`, `protocol`, `description`). With a manual, that manual's tools; with `--staged`, the staged manuals (or one staged manual's tools). Tool descriptions are cut to the first sentence, at most about 120 characters (`schema` has the full text). A manual with no match errors and says what to run instead (for example `--staged` for a staged manual). | **Hot (Daemon IPC or Sync Direct)** |
+| `utcp search <query> [--limit 10] [--schemas] [--json] [--staged]` | Ranked keyword/tag search returning compact 1-line tool summaries by default (the first sentence of each description, at most about 120 characters; or full schemas with `--schemas`). Matches tool names, descriptions, tags and the manual's hint words. `--staged` searches the staged manuals with the active ones (a staged manual replaces its active version) and marks their results `[staged]`; through a daemon without the `search_staged` feature it fails and says to restart it or use `--direct`. | **Hot (Daemon IPC or Sync Direct)** |
 | `utcp schema <manual.tool> [--staged]` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms. | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--pretty \| --compact] [--dry-run] [--log] [--staged] [-o \| --out <path>]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); dotted paths pass through arrays (`workflow_runs.id`), and when no field names a top-level key it projects the response's list (`items`/`results`/`data`, else its only array of objects). `--staged` calls a staged manual (logged as `call --staged`). When the call fails because the manual is only on the other side of `--staged`, the error gives the command with or without `--staged`; `utcp call x y` (a tool name where the JSON goes) errors with `utcp call x.y` instead of a JSON parse error. `schema` does the same for `--staged`. A file answer (non-JSON, non-text, sent with `Content-Disposition: attachment`, or the template's `"response_type": "file"`) is saved and its reference `{"type": "file", "path", "mime_type", "bytes", "filename"}` printed (`mime_type` is the `Content-Type` essence, lowercased, without parameters: `application/zip; api-version=7.1` becomes `application/zip`; `application/octet-stream` when the server sends none): to `--out <path>` (overwritten; a folder keeps the server's name; `-` is stdout), else `download_dir`, the Downloads folder, or `<cache>/downloads`. A JSON answer over 10 MB after `--fields` goes to `<cache>/downloads` (pruned after a day) with a `note`; with `--out` any JSON answer goes to that file. A template's `"body_type": "file"` uploads `{"file": "<path>", "offset"?, "length"?}`, read by the calling process; only POST, PUT and PATCH carry it, so on GET, DELETE or HEAD the call fails before sending (a broken manual). Arguments not used in the path or `header_fields` go to the query, except the body: POST, PUT and PATCH send the `body_field` argument (else all arguments as one JSON object); DELETE sends the `body_field` argument as the body only when the template sets `body_field` and the call passes it; GET and HEAD send none. `"body_type": "text"` sends the `body_field` string as is (POST, PUT, PATCH or DELETE; `Content-Type` from the template's headers, default `text/plain; charset=utf-8`); an unknown `body_type` fails as a broken manual. `--dry-run` prints the planned `query` and `body` next to `args`. Limits: `max_upload_mb`, `max_download_mb`. A JSON or text answer that is one page of a longer list prints as `{"result": <answer>, "next_page": {<args>}}`; calling again with the call's own arguments plus `next_page` gets the next page, and the last page prints the answer alone. The HTTP transport reads two paging headers: `x-ms-continuationtoken` (Azure DevOps) becomes `{"continuationToken": <token>}`, or `{"x-ms-continuationtoken": <token>}` when the template's `header_fields` declares that name (any case); `Link` with `rel="next"` (RFC 8288, GitHub) becomes the next URL's query pairs that differ from the ones this call sent (the template URL's query and the query arguments), as strings, after resolving a relative URL. `--fields` and `--out` apply to `result` only; file answers ignore paging headers. | **Hot (Daemon IPC or Async Direct)** |
-| `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--pretty \| --compact] [--log] [--staged]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` as well as `--fields`, and per-item `"out": "<path>"` like `call --out`, but not `-`). An item whose answer is a page has `next_page` next to its `result` (see `call`). With `--staged`, every item calls a staged manual. | **Hot (Daemon IPC or Async Direct)** |
-| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds), the setup is the default one (not a separate setup, section 3) and `UTCP_SOCKET_PATH` is not set (for `start` and `restart`, also no `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run. | Management |
+| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--where <path=v1\|v2 \| path~=v1\|v2 \| path^=v1\|v2 \| path>v \| path>=v \| path<v \| path<=v; ! before =, ~=, ^= negates>]... [--pretty \| --compact] [--dry-run] [--log] [--staged] [-o \| --out <path>]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); a key that itself contains dots is matched whole, the longest run of path parts that names a key winning (`fields.System.State` is the key `System.State` under `fields`; `--where` reads paths the same way); dotted paths pass through arrays (`workflow_runs.id`). Each path is resolved on its own: one whose first part names a top-level key projects that key, and the others project the fields of the items of the response's list (`items`/`results`/`data`, else its only array of objects, else on an empty page its only empty array; found before `--where`, so a list `--where` emptied stays, with its count), so `--fields name,total_count` on `{"total_count": 5, "jobs": [...]}` keeps `total_count` and each job's `name`. Optional `--where` (repeatable; every condition must hold) keeps the list items whose value at the path equals (`=`), contains (`~=`) or starts with (`^=`) one of the values separated by `\|`, before `--fields`; a `!` before the operator (`!=`, `!~=`, `!^=`) keeps the items that match none of them. Values are trimmed and compared as text, ignoring case (`null`, `true`); with `=`, a number field and a number value compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends). `>`, `>=`, `<` and `<=` keep the items whose value is greater, at least, less or at most one value: a JSON number, or an ISO date with a time and zone (`2026-11-24T10:00:00Z`, `+01:00`), with a time and no zone (UTC), or alone (`2026-11-24`, which compares the field's day in UTC, so `<=2026-11-24` includes that whole day; `=` and `!=` with a date alone also mean that whole day, `completed_at=2026-11-24` matching any time on it, while a full timestamp, or a field that is itself a date alone, compares as text); numbers written as strings count, and a field that is not a number (or not a date) does not match, with a note counting those items (`left out K of the N items in <list> whose <path> is not a number (as: ...)`). A comparison with several values, a value that is neither, a `!`, `~` or `^` before it (the opposite of `>` is `<=`), and `=<5` or `=>5` (write `<=5`) are errors; `\\|` is a `\|` inside a value and a comma is literal (matrix job names); an empty value is refused for `~=` and `^=` (it would match everything), while `path=` means the empty string. A missing field, or a path through a missing or `null` parent, counts as `null`; an object at the end of the path never matches; an array on the path matches when any element does (an empty array has no value), and the matching item keeps that inner array whole. The list is the root array; else the top-level array the path's first part names (when the path has more parts); else the response's `value`, `items`, `results` or `data` array; else its only array with objects; else, when every other top-level value is plain (an empty page such as `{"total_count": 0, "workflow_runs": []}`), its only empty array. Some problems show only in the answer, after the request was sent (it may have been a write), so they never fail the call: it succeeds (exit 0) with the whole answer, unfiltered (`--fields` still applied), and the note `the call succeeded; --where was not applied, so no items were left out: <reason>`. The reasons: a path that is only the name of a top-level array, whatever the array holds (`value.value` filters the items' own `value`; for a non-empty array of plain values the reason says only that it can't be filtered); a path whose first part is another top-level key of an object answer, naming the answer's list when it has one (that field belongs to the answer, not to its items); a non-empty list with no objects (log lines); several candidate arrays, naming the arrays whose items have the path's first part, with the path to write (`files.filename`), or all of them when none do; a single object; a non-JSON answer. A file answer is saved as usual, with the note that `--where` and `--fields` were not applied. Separately, a path no item of the list has at all (often a typo) counts as `null` in every item, with a note (`no item in <list> has <path> (...), so it counted as null in each`), since `!=` would otherwise silently keep everything. A condition without an operator or a field, with `==`, or with an empty path part (`a..b`) is an error before anything is called. The rest of the answer (`count`, `total_count`) is unchanged. Conditions on different lists each filter their own. When a condition keeps none of a non-empty list's items, `call` prints on stderr `note: --where '<condition>' kept none of the N items in <list> (<path> here: <values>)`: up to 10 distinct values the path has on that list, as JSON (strings quoted, a missing field `null`, `, and K more` after them), or `(no item has a value at <path>)`. Likewise a `--fields` path that matches nothing gets a note listing the keys there (a note, not an error: an optional field can be missing from a whole page). Several notes are joined with `; `, and stdout is the answer as without the note. Between the daemon (or Direct Mode) and the printer, the note travels beside the answer as `{"result", "next_page"?, "note"}`. Before sending, the arguments and the manual's secrets are checked (section 5, Checks Before Sending). With a daemon whose Status lacks the `where` feature (0.2.3 or older), `call --where` and a `batch` with any condition fail before calling and say to restart it or use `--direct`. `--staged` calls a staged manual (logged as `call --staged`). When the call fails because the manual is only on the other side of `--staged`, the error gives the command with or without `--staged`; `utcp call x y` (a tool name where the JSON goes) errors with `utcp call x.y` instead of a JSON parse error. `schema` does the same for `--staged`. A file answer (non-JSON, non-text, sent with `Content-Disposition: attachment`, or the template's `"response_type": "file"`) is saved and its reference `{"type": "file", "path", "mime_type", "bytes", "filename"}` printed (`mime_type` is the `Content-Type` essence, lowercased, without parameters: `application/zip; api-version=7.1` becomes `application/zip`; `application/octet-stream` when the server sends none): to `--out <path>` (overwritten; a folder keeps the server's name; `-` is stdout), else `download_dir`, the Downloads folder, or `<cache>/downloads`. A JSON answer over 10 MB after `--where` and `--fields` goes to `<cache>/downloads` (pruned after a day) with a `note`; with `--out` any JSON answer goes to that file, and when that file can't be written the answer prints instead, with the note `the call succeeded, but its answer could not be saved, so it is shown here: <reason>`. A template's `"body_type": "file"` uploads `{"file": "<path>", "offset"?, "length"?}`, read by the calling process; only POST, PUT and PATCH carry it, so on GET, DELETE or HEAD the call fails before sending (a broken manual). Arguments not used in the path or `header_fields` go to the query, except the body: POST, PUT and PATCH send the `body_field` argument (else all arguments as one JSON object); DELETE sends the `body_field` argument as the body only when the template sets `body_field` and the call passes it; GET and HEAD send none. `"body_type": "text"` sends the `body_field` string as is (POST, PUT, PATCH or DELETE; `Content-Type` from the template's headers, default `text/plain; charset=utf-8`); an unknown `body_type` fails as a broken manual. `--dry-run` prints the planned `query` and `body` next to `args`; when the arguments have a note, or `--fields` or `--where` were given, it prints `{"result": <request>, "note"}`, with the argument note first and then that a dry run has no answer for `--fields` and `--where` to shape. Limits: `max_upload_mb`, `max_download_mb`. A JSON or text answer that is one page of a longer list prints as `{"result": <answer>, "next_page": {<args>}}`; calling again with the call's own arguments plus `next_page` gets the next page, and the last page prints the answer alone. The HTTP transport reads two paging headers: `x-ms-continuationtoken` (Azure DevOps) becomes `{"continuationToken": <token>}`, or `{"x-ms-continuationtoken": <token>}` when the template's `header_fields` declares that name (any case); `Link` with `rel="next"` (RFC 8288, GitHub) becomes the next URL's query pairs that differ from the ones this call sent (the template URL's query and the query arguments), as strings, after resolving a relative URL. `--where`, `--fields` and `--out` apply to `result` only (a page with no matching items keeps `next_page`); file answers ignore paging headers. | **Hot (Daemon IPC or Async Direct)** |
+| `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--where <cond>]... [--pretty \| --compact] [--log] [--staged]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` (or one comma-separated string) as well as `--fields`, per-item `"where": ["path=v", ...]` (or one condition as a string; another type is an error naming the item) as well as `--where` (the flags apply to items without their own; a bad condition fails the batch before any call, naming the item), and per-item `"out": "<path>"` like `call --out`, but not `-`). An item whose answer is a page has `next_page` next to its `result` (see `call`), and an item with an argument, `--where` or `--fields` note has it as `note` there (several joined with `; `). `args` may also be written `arguments`. `latency_ms` is rounded to 0.01 ms. `id` is optional (default: the item's position from 0); unknown item keys and duplicate ids are refused before any call; when any item failed, the command exits with status 2 after printing every result. With `--staged`, every item calls a staged manual. Without `--file`, the array is read from stdin when `--stdin` is given or stdin is not a terminal (a pipe or file; nothing read is an error). | **Hot (Daemon IPC or Async Direct)** |
+| `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds), the setup is the default one (not a separate setup, section 3) and `UTCP_SOCKET_PATH` is not set (for `start` and `restart`, also no `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run, the daemon's `version` and its `features` (request fields older daemons ignore, currently `where` and `search_staged`; a daemon before 0.2.4 sends neither and shows as `0.2.3 or older`), with a `WARNING` line when the version differs from the CLI's. | Management |
 | `utcp daemon servers [--json]` | Lists the local (stdio) MCP servers of registered manuals: state, PID, uptime, restart count, program name. Errors when no daemon is running (in direct mode each call starts and stops its own server). | Management (Daemon IPC) |
 | `utcp daemon stop-server <manual>` | Stops a manual's local MCP server now; waiting calls fail at once and the next call starts it again. Errors for unknown manuals and manuals without a local server. | Management (Daemon IPC) |
 | `utcp daemon restart-server <manual>` | Stops a manual's local MCP server and starts it again now, printing the new PID (or the start error). | Management (Daemon IPC) |
@@ -620,18 +707,18 @@ bypass the daemon and force standalone execution.
 | `utcp import-mcp [<name>] (--command <program> [--arg <a>...] [-e KEY=VALUE...] \| --url <url> [-H <k:v>...]) [-o <path>] [--register [--hint <text>]]` | Discovers tools via MCP `initialize` + `tools/list` (60 s timeout) and writes a lazy `.utcp.json` manual (`mcp` outbound client). `--command` is the program only; each `--arg` is one argument (values may start with `-`). `${VAR}` placeholders in `-e`/`-H` are resolved for discovery from the shell, `.env` and the secrets command but saved as placeholders; discovery errors name unset ones. The name defaults to the URL host (`mcp.context7.com` -> `context7`) or the launched package (`npx -y @upstash/context7-mcp` -> `context7`). | Cold |
 | `utcp register <name> [<source>] [--cache \| --no-cache] [--base-url <url>] [-H <k:v>] [--hint <text>]` | Registers a manual into `.utcp_config.json`, caches `manuals/<name>.utcp.json`, and rebuilds `search_index.bin`. Without `<source>`, re-registers a deregistered manual offline from its saved copy (`--hint` is still allowed). `--hint` sets the few words shown next to the name in the skill description; without it an existing hint is kept. Prints a `Hint` line (or how to add one). | Cold |
 | `utcp stage <name> <source> [--base-url <url>] [-H <k:v>] [--hint <text>]` | Like `register`, into the staging area (`manuals/staged/`); the active manuals, index and skills are untouched, and the daemon reloads so `--staged` calls work. Prints `Staged`, `Replaces`, `Hint`, `Secrets` and `Next` lines. | Cold |
-| `utcp diff [<name>] [--json]` | Compares staged manuals with the manuals they replace: `new manual, N tools`, or counts plus `+` added, `-` removed and `~` changed tool names, and a hint change. Ends with a `Next` list: see the tools (`utcp list <manual> --staged`), test, promote, discard. | Cold (Sync) |
-| `utcp promote [<name>]` | Makes staged manuals (all when omitted) active, keeping the replaced registration for `rollback`; rebuilds the index, reloads the daemon, rewrites the installed global skills. | Cold (Sync) |
-| `utcp discard [<name>]` | Drops staged manuals (all when omitted). | Cold (Sync) |
+| `utcp diff [<name>... \| <manual>.<tool>...] [--json]` | With `<manual>.<tool>` names, shows each tool's changed parts, old against new (section 5). Otherwise compares staged manuals with the manuals they replace: `new manual, N tools`, or counts plus `+` added, `-` removed and `~` changed tools (`~ tool: what; what`, section 5), and a hint change. `--json` gives `changed` as `[{"tool", "what": [...]}]`. Ends with a `Next` list: see the tools (`utcp list <manual> --staged`), check they are found (`utcp search --staged`), test, promote, discard; the promote and discard lines name exactly the manuals shown, a shared `<prefix>_` as `'<prefix>_*'` when that selects no other staged manual (`utcp promote 'azdo_*' zoo`); and one change (`utcp diff <manual>.<tool>`). | Cold (Sync) |
+| `utcp promote <name>...` / `--all` | Makes staged manuals (names or `prefix*` patterns, or all with `--all`) active, keeping the replaced registration for `rollback`; rebuilds the index, reloads the daemon, rewrites the installed global skills. | Cold (Sync) |
+| `utcp discard <name>...` / `--all` | Drops staged manuals (names or `prefix*` patterns, or all with `--all`). | Cold (Sync) |
 | `utcp rollback <name>` | Swaps the active manual with the version the last `promote` replaced (twice undoes it); rebuilds, reloads, rewrites skills. | Cold (Sync) |
 | `utcp set-hint <name> (<text> \| --clear)` | Sets or clears a registered or deregistered manual's hint (whitespace collapsed, at most 60 characters, no control characters). For an active manual it also rebuilds the search index (hint words are searchable), tells the daemon to reload, and rewrites the installed global skill copies. | Cold |
 | `utcp get-hint [<name>]` | Prints one manual's hint (or how to add one), or every registered manual with its hint (`-` when none). | Cold (Sync) |
 | `utcp deregister <name> [--purge-cache]` | Removes a manual from search and calls, keeping its settings and saved copy for `utcp register <name>`; `--purge-cache` deletes both for good, with any staged copy and previous version. Rebuilds index. | Cold |
-| `utcp refresh [<name>]` | Re-fetches and updates cached `.utcp.json` manuals from their recorded `source_url`, or for `import-mcp` manuals asks the MCP server again (recovered from the saved manual, placeholders resolved as at import), and rebuilds `search_index.bin`. | Cold |
+| `utcp refresh <name>...` / `--all` | Re-fetches (names or `prefix*` patterns) and updates cached `.utcp.json` manuals from their recorded `source_url`, or for `import-mcp` manuals asks the MCP server again (recovered from the saved manual, placeholders resolved as at import), and rebuilds `search_index.bin`. | Cold |
 | `utcp log <on \| off \| status \| clear>` | Explicitly enables/disables opt-in disk activity logging (`logging.enabled` sentinel) or clears `activity.jsonl` / `.bak`. | Cold (Sync) |
-| `utcp log recent [--limit 20] [--failed] [--json]` | Shows recent calls, newest first, with the full redacted error text of failures. Reads the daemon's in-memory ring (last 500 calls, works with logging off); without a daemon it reads the log files. | Hot (Daemon IPC) |
+| `utcp log recent [--limit 20] [--failed] [--json]` | Shows recent calls, newest first, with the full redacted error text of failures, in local time to the second (`--json` keeps the stored RFC 3339 UTC timestamps). Reads the daemon's in-memory ring (last 500 calls, works with logging off); without a daemon it reads the log files. | Hot (Daemon IPC) |
 | `utcp media <status \| clear>` | Inspects or clears the bounded media spool (`$XDG_RUNTIME_DIR/utcp-media` on Linux, `%TEMP%\utcp-media` on Windows). | Cold (Sync) |
-| `utcp doctor [--json]` | Checks daemon status, config paths, index freshness, the number of staged manuals, credential status (`SET` vs. `MISSING`, with the source: `secrets command`, `caller shell`, `daemon environment`, or `environment` without a daemon; one line per secret listing every manual that uses it, staged ones marked), the secrets command (always shown: its last run, or `not set`), the `.env` file (always shown, with whether it exists), an invalid `settings.toml`, the settings file and any setting in it with no effect (with a hint such as a commented section header), the upload and download limits, the downloads folder and where it comes from, logging state, and IDE skills. With the daemon running, the credentials and secrets command are the daemon's (what calls use). | Cold (Sync) |
+| `utcp doctor [--json]` | Checks daemon status (with the daemon's version, `daemon_version` in `--json`, and a warning when it differs from the CLI's), config paths, index freshness, the number of staged manuals, credential status (`SET` vs. `MISSING`, with the source: `secrets command`, `caller shell`, `daemon environment`, or `environment` without a daemon; one line per secret listing every manual that uses it, staged ones marked), the secrets command (always shown: its last run, or `not set`), the `.env` file (always shown, with whether it exists), an invalid `settings.toml`, the settings file and any setting in it with no effect (with a hint such as a commented section header), the upload and download limits, the downloads folder and where it comes from, logging state, and IDE skills (in a separate setup, which compares the skills with its own manuals, an `OUTDATED` line gets a note that `sync-ides` there would replace skills another setup wrote). With the daemon running, the credentials and secrets command are the daemon's (what calls use). | Cold (Sync) |
 | `utcp sync-ides [--global] [--workspace <dir>] [--status] [--print-skill]` | Installs or repairs the `utcp-tools` and `utcp-admin` skills (plus `utcp-admin/operating.md`) across Zed, VS Code, Copilot CLI, Antigravity CLI, and Hermes without requiring Windows Admin symlink privileges. `--print-skill` writes the rendered `utcp-tools` skill to stdout (release archives and ebuilds). | Cold (Sync) |
 | `utcp ui` | Launches the interactive `ratatui` companion Terminal UI (does not auto-enable logging). | Interactive |
 
@@ -824,6 +911,13 @@ manuals by name. A name such as `github` explains itself; `context7` does not. E
 `registered manuals: context7 (library and framework docs), d2 (diagrams from text), github`. Manuals without a hint
 show the bare name. Hints cost a few tokens per manual in every session, so they stay short.
 
+Manuals named `<prefix>_<rest>` that share a prefix with another manual become one label, so a family of manuals
+costs its common words once: `azdo_* (Azure DevOps, org ni: admin (permissions, connections, hooks), git (repos and
+PRs), ...)` instead of nine hints each ending in `org ni`. The words every member's hint starts with, and the words
+every hint ends with, go before the colon; each member keeps the rest of its hint. Shared words are used only when
+every member has a hint; otherwise each member shows its own hint (or none). `utcp sync-ides --print-skill` shows
+the result.
+
 The description also says that these tools are not in the agent's own tool list or MCP servers and that the `utcp`
 CLI reaches them, and that the skill applies whenever a request names one of the manuals. Without that, a VS Code
 Copilot agent asked to "make an echo call to mocktest" (an imported MCP server) searched its own tools for a
@@ -912,14 +1006,16 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
   utcp schema <manual.tool>
   ```
 
-- **List all registered manuals/tools (compact summary):**
+- **List the manuals (name, tool count, hint), or one manual's tools:**
 
   ```sh
   utcp list
+  utcp list <manual>
   ```
 
-- **Staged manuals** (added with `utcp stage` for testing, not yet promoted) are not in `search` or `list`.
-  Reach them only when the user asks you to test one, with `--staged` on `list`, `schema`, `call` and `batch`:
+- **Staged manuals** (added with `utcp stage` for testing, not yet promoted) are not in `search`, and `list`
+  shows them under Staged. Reach them only when the user asks you to test one, with `--staged` on `search`, `list`,
+  `schema`, `call` and `batch`:
 
   ```sh
   utcp list --staged
@@ -952,12 +1048,25 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
   `--fields key1,nested.key2` (for example, `--fields sha,commit.message,commit.author,html_url`) to strip unneeded
   boilerplate keys while keeping full fidelity when omitted. Dotted paths pass through lists (`assets.name`), and
   for a wrapped list such as `{"total_count": N, "workflow_runs": [...]}` you can name the item keys directly
-  (`--fields id,name,conclusion`).
+  (`--fields id,name,conclusion`), also next to top-level keys (`--fields total_count,name`). A key that itself has
+  dots is one name (`fields.System.State` on an Azure DevOps work item). A path that matches nothing gets a note
+  listing the keys there.
+- **Keep only matching list items (`--where`):** use the tool's own filter arguments first (see `schema`), then
+  `--where 'path=a|b'` (equals `a` or `b`), `~=` (contains) or `^=` (starts with); `!=`, `!~=`, `!^=` keep the
+  others. `>`, `>=`, `<`, `<=` compare numbers and dates (`'completed_at>=2026-11-24'`); a date alone means that
+  whole day in UTC, with `=` too. Quote the condition. Case is ignored; a missing field is `null`
+  (`pull_request!=null` keeps the items that have one); name a field inside an object (`user.login=octocat`); `\|`
+  is a `|` inside a value. Repeat `--where` for more conditions; all must hold. Start the path with the list to
+  filter when the answer has several (`'records.result=failed|canceled'`). Through a list inside each item
+  (`labels.name=bug`), an item matches when any element does. `count` and `total_count` still count the unfiltered
+  list, and `--where` runs before `--fields`. When nothing matches, a note (`note` in `batch`) lists the values the
+  field has: fix the value rather than conclude there are none. When the answer has no list to filter (one object),
+  the call still succeeds: you get the whole answer and a note saying why, so don't call again.
 - **Long lists come in pages:** when a list has more, utcp prints `{"result": <answer>, "next_page": {...}}`. For
   the next page, call the same tool again with your arguments plus the ones in `next_page` (such as
-  `{"page": "2"}` or `{"continuationToken": "..."}`). The last page prints the answer alone. `--fields` and `--out`
-  apply to `result`; in `batch`, `next_page` is next to the item's `result`. Fetch more pages only when you need
-  them, and say so when you stop early.
+  `{"page": "2"}` or `{"continuationToken": "..."}`). The last page prints the answer alone. `--where`, `--fields`
+  and `--out` apply to `result`, so a page with no matching items still has `next_page`; in `batch`, `next_page` is
+  next to the item's `result`. Fetch more pages only when you need them, and say so when you stop early.
 - **Images and Binary Media:** If a tool writes an image or binary payload to a file path on disk (for example,
   `"type": "media_file"` with a `"path"`), pass that file path to your multimodal file-reading/vision tool only when
   visual inspection is needed.
@@ -967,9 +1076,11 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
   the user's Downloads folder (`a.zip` becomes `a (1).zip` if it exists; nothing is overwritten). To choose the
   place, pass `--out <path>` (overwrites, like `curl -o`; a folder keeps the server's file name), or `--out -` to get
   the raw bytes on stdout for a pipe. Open the file only if you need its content.
-- **Answers too large to print:** a JSON or text answer over 10 MB is saved to a file the same way, with a `note`.
-  Read the parts you need (for example with `jq`), or call again with `--fields` to get less. That folder is
-  emptied after a day, so use `--out` for a file you want to keep.
+- **Answers too large to print:** a JSON or text answer over 10 MB is saved to utcp's cache folder
+  (`~/.cache/utcp/downloads/`; on Windows `%LOCALAPPDATA%\utcp\cache\downloads\`), not to Downloads, and the call
+  prints the file reference above, with its `path`, and a `note`. That folder is emptied after a day, so use `--out`
+  for a file you want to keep. Read the parts you need (for example with `jq`), or call again with `--where` or
+  `--fields` to get less.
 - **Uploading a file:** a tool that uploads takes the file in its body argument (see `schema`) as
   `{"file": "<path>"}`; add `"offset"` and `"length"` (bytes) to send one part. A relative path is relative to your
   working folder, and utcp reads the file with your permissions.
@@ -979,8 +1090,10 @@ progressive disclosure workflow (`search` -> `schema` -> `call`):
 
 ## 3. Execute Multiple Calls in Parallel (`batch`)
 
-Each item in `batch` also accepts an optional `"fields": ["key1", "nested.key2"]` array, and `"out": "<path>"` to
-save that item's answer to a file:
+Each item has `tool` and `args`, and optionally `id` (default: its position, from 0), `"fields": ["key1",
+"nested.key2"]`, `"where": ["path=value"]` and `"out": "<path>"` to save that item's answer to a file. Other keys are
+refused. `--fields` and `--where` on `batch` apply to the items without their own. Every item's answer or `error` is
+printed; when any item failed, `utcp` then exits with status 2:
 
 ```sh
 utcp batch --stdin <<'EOF'
@@ -991,106 +1104,17 @@ utcp batch --stdin <<'EOF'
 EOF
 ```
 
-## 4. Register, Import, Refresh & Manage Daemon
+## 4. When a Call Fails
 
-Add a new API or MCP server only when the user asks for it. `import` and `import-mcp` print `Manual`, `Tools` and a
-`Secrets` line naming the variables the manual needs; `register` prints `Registered '<name>' (N tools, ...)` and, if
-it needs secrets, a `Required credentials` line.
-
-- **Register an OpenAPI 2.0/3.x spec (JSON/YAML) or a UTCP manual** (`-H` headers are stored and sent on every
-  call; `--base-url` overrides the spec's server URL):
-
-  ```sh
-  utcp register <name> <url_or_file_path> --hint '<few words>' [-H 'Authorization: Bearer ${API_TOKEN}'] [--base-url <url>]
-  ```
-
-- **Or stage it first** (same arguments as `register`) to review and test it before agents see it: `diff` shows what
-  changes, `call --staged` tests it, `promote` makes it active (`discard` drops it, `rollback` undoes a promote):
-
-  ```sh
-  utcp stage <name> <url_or_file_path> --hint '<few words>'
-  utcp diff [<name>]
-  utcp promote [<name>]
-  ```
-
-- **Import an MCP server** (Model Context Protocol). `import-mcp` asks the server once for its tool list and saves
-  it as a manual; afterwards its tools are used like any other (`search` -> `schema` -> `call`). The name is
-  optional (inferred from the URL host or package, e.g. `context7`).
-
-  ```sh
-  # Remote server (HTTP URL); auth goes in -H headers
-  utcp import-mcp <name> --url https://mcp.example.com/mcp -H 'Authorization: Bearer ${EXAMPLE_TOKEN}' --register --hint '<few words>'
-  # Local server started by a command: --command is the program ONLY; repeat --arg once per argument
-  utcp import-mcp <name> --command npx --arg -y --arg @scope/some-mcp-server -e 'API_KEY=${SOME_API_KEY}' --register --hint '<few words>'
-  ```
-
-  - Never put the whole command line in `--command` (`--command "npx -y pkg"` fails); split it into `--arg`s.
-  - Take the URL or command from the server's own README (its Claude Desktop / Cursor `mcpServers` JSON maps
-    directly: `command` -> `--command`, each `args` entry -> `--arg`, each `env` entry -> `-e KEY=...`).
-  - Discovery waits up to 60 s (first `npx`/`uvx` runs download the package).
-- **Hints:** always pass `--hint` with a few words (60 characters at most) saying what the manual is for, such as
-  `--hint 'library and framework docs'`. The hint appears next to the manual's name in this skill's description,
-  which is how agents find the right manual when its name alone (such as `context7`) says nothing. Add or fix a hint
-  later, or check the current ones:
-
-  ```sh
-  utcp set-hint <name> '<few words>'
-  utcp get-hint [<name>]
-  ```
-
-- **Secrets:** always write `${VAR}` placeholders in `-H` / `-e` (single-quoted so your shell keeps them), never
-  literal tokens: the manual stores the placeholder and the value is resolved at call time. Ask the user to put the
-  value in `~/.config/utcp/.env` as `VAR=value`, or where their secrets command (`[secrets]` in `settings.toml`) reads it
-  from, or to export it in the shell; then run `utcp daemon reload-env`. Do not ask the user to paste secret
-  values into the chat, and never run the secrets command yourself (it prints the values). If discovery fails, the
-  error names any unset placeholder.
-- **Verify an import:**
-
-  ```sh
-  utcp list <name>
-  utcp search "<keywords>"
-  ```
-
-- **Write a standalone `.utcp.json` without registering** (to review or share; `register <name> <file>` later):
-
-  ```sh
-  utcp import <url_or_file_path> -o <output.utcp.json> [--name <name>]
-  utcp import-mcp <name> --url <url> -o <output.utcp.json>
-  ```
-
-- **Refresh one or all registered manuals** (from their source URL/file; `import-mcp` manuals ask their MCP server
-  again):
-
-  ```sh
-  utcp refresh [<name>]
-  ```
-
-- **Check status (`~/.config/utcp/.env`, `$XDG_RUNTIME_DIR/utcp.sock`, where each secret comes from) or make a running daemon pick up
-  changed secrets (this shell's variables, `.env`, the secrets command):**
-
-  ```sh
-  utcp doctor
-  utcp daemon reload-env
-  ```
-
-- **When calls fail, see why:** recent calls, newest first, with the full error of each failure (works with
-  logging off). A rate-limited API says when to retry: wait that long instead of retrying at once.
-
-  ```sh
-  utcp log recent --failed
-  ```
-
-- **Local MCP servers** (manuals imported with `import-mcp --command`) run inside the daemon, started on first use
-  and shared by every agent on this machine. If one hangs (calls time out) or misbehaves, check it and restart it.
-  A restart or stop makes calls waiting on that server fail at once ("was stopped on request"), including other
-  agents' calls. `stop-server` only stops it until the next call; to keep a server off, ask the user before running
-  `utcp deregister <name>`.
-
-  ```sh
-  utcp daemon servers                # state, PID, uptime, restart count
-  utcp daemon restart-server <name>  # stop it and start it again now
-  utcp daemon stop-server <name>     # stop it now; the next call starts it again
-  ```
+- **Nothing was sent:** an error that says so (a required argument missing, an argument or body field name the
+  tool doesn't have, a wrong type or value, or a secret placeholder that isn't set) is about your call, not the API.
+  Fix the arguments from `utcp schema <manual.tool>`; an unset placeholder is for the user to set (see
+  the utcp-admin skill). A `note` that keys were "sent as given, but not in the tool's schema" means the API may
+  ignore them: if the result shows no change, check those keys.
+- **The API said no:** the error has its status and answer. A rate-limited API says when to retry: wait that long
+  instead of retrying at once. `utcp log recent --failed` lists recent failed calls with their full errors.
+- **Adding or changing manuals, hints and secrets, or the daemon and its local MCP servers** (a hung server, calls
+  that time out): use the utcp-admin skill.
 ````
 
 *(On Windows, Sections 2 and 3 render PowerShell `@' ... '@ | utcp.exe ... --args-stdin` syntax instead of `<<'EOF'`.)*

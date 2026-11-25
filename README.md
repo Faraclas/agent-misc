@@ -13,16 +13,19 @@ A fast, cross-platform (Linux & Windows), direct **Universal Tool Calling Protoc
 
 - **Zero-MCP Context Bloat:** Discovers and invokes REST APIs, WebSockets, GraphQL, SSE, local CLIs, OpenAPI specs, and
   even wrapped third-party MCP endpoints (`utcp import-mcp`) lazily on demand (`search` -> `schema` -> `call`), plus
-  auto-compact JSON output, generic `--fields` response projection, next-page arguments for paged lists, and a
-  self-cleaning media spool.
+  auto-compact JSON output, generic `--fields` response projection and `--where` list filters, next-page arguments
+  for paged lists, and a self-cleaning media spool.
 - **Dual-Mode Execution (Standalone Direct + Optional Local Daemon):** Runs standalone out of the box with `bincode`
   page-cache lookups (`< 1 ms`), or connects to a single per-user `utcp daemon` over a `0600` Unix socket / Windows
   Named Pipe (`< 0.2 ms`) for in-memory catalogs, warm `rustls` HTTP/2 connection pools, live `reload-env` sync (the
   daemon keeps only the env vars registered manuals use), and contention-free opt-in activity logging.
 - **Secrets Stay Where You Keep Them:** manuals store `${VAR}` placeholders only; an optional secrets command prints
   the values from a shell file, `pass` or a keyring, so the daemon has them at login without copying them anywhere.
-- **Staging:** `utcp stage` adds a manual without agents seeing it; `diff`, `call --staged`, then `promote` (or
-  `discard`), and `rollback` to the version a promote replaced.
+- **Staging:** `utcp stage` adds a manual without agents seeing it; `diff` (what changed in each tool),
+  `search --staged` and `call --staged`, then `promote <name>` (or `discard`), and `rollback` to the version a promote
+  replaced.
+- **Checks Before Sending:** unset `${VAR}`s, missing or unknown arguments, wrong types and values outside a tool's list
+  are refused before the call goes out, so a typo never comes back as a misleading 401 or 404.
 - **Cross-Client Agent Skills (`utcp sync-ides`):** Renders platform-native skills across Zed, VS Code, Copilot CLI,
   Antigravity CLI (`agy`), Hermes, and workspace `.agents/skills/`: `utcp-tools` for calling tools (listing
   registered manuals, each with an optional few-word hint such as `context7 (library and framework docs)`) and
@@ -36,7 +39,7 @@ Install: `dev-util/utcp` from [`adaptive-overlay`](https://github.com/Faraclas/a
 Linux and Windows archives on the Releases page (tags `utcp-rs-v*`); see the
 [installation section](./utcp-rs/README.md#installation).
 
-Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.14`),
+Docs: [operating guide](./utcp-rs/docs/operating.md), [specification](./utcp-rs/docs/utcp-rs-spec.md) (`v1.15`),
 [issue log](./utcp-rs/issues/README.md) (upstream `rs-utcp` bugs and Windows fixes),
 [contributor rules](./utcp-rs/AGENTS.md).
 
@@ -59,7 +62,7 @@ server.
   drops the writes. `generate` prints what was left out and why, and the PAT permissions for every tool and for
   reads only.
 - **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
-  what changes, `read-test` calls every read tool through utcp, and `utcp promote` makes them active.
+  what changes, `read-test` calls every read tool through utcp, and `utcp promote 'azdo_*'` makes them active.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows. Versions follow the REST
   API: `7.1.x` for API 7.1.
 

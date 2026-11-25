@@ -65,6 +65,9 @@ pub struct ToolSummary {
     pub inputs: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outputs: Option<serde_json::Value>,
+    /// From a staged manual (`utcp search --staged`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,127 +148,40 @@ impl SearchIndex {
                 tags: t.tags.clone(),
                 inputs: None,
                 outputs: None,
+                staged: false,
             })
             .collect()
+    }
+
+    /// [`Self::search`] over the tools agents would have after promoting every staged manual: the
+    /// `staged` index's tools (marked `staged`) and this index's tools of manuals not staged.
+    pub fn search_with_staged(
+        &self,
+        staged: &SearchIndex,
+        query: &str,
+        limit: usize,
+        include_schemas: bool,
+    ) -> Vec<ToolSummary> {
+        let staged_manuals: std::collections::HashSet<&str> = staged
+            .tools
+            .iter()
+            .map(|t| t.manual_name.as_str())
+            .collect();
+        let tools: Vec<(&IndexedTool, bool)> = self
+            .tools
+            .iter()
+            .filter(|t| !staged_manuals.contains(t.manual_name.as_str()))
+            .map(|t| (t, false))
+            .chain(staged.tools.iter().map(|t| (t, true)))
+            .collect();
+        rank(&tools, query, limit, include_schemas)
     }
 
     /// Ranked keyword/tag search returning compact 1-line summaries by default,
     /// or full JSON schemas when `include_schemas == true`.
     pub fn search(&self, query: &str, limit: usize, include_schemas: bool) -> Vec<ToolSummary> {
-        let q_trim = query.trim().to_ascii_lowercase();
-        if q_trim.is_empty() {
-            return self
-                .tools
-                .iter()
-                .take(limit)
-                .map(|t| Self::to_summary(t, include_schemas))
-                .collect();
-        }
-
-        // If the query is a single qualified `<manual>.<tool_prefix>` token (no whitespace),
-        // scope strictly to `<manual>` so short tool words like `id` never match unrelated manuals!
-        if !q_trim.chars().any(char::is_whitespace) {
-            if let Some((manual_part, tool_part)) = q_trim.split_once('.') {
-                if !manual_part.is_empty() {
-                    let mut scoped: Vec<(i64, &IndexedTool)> = self
-                        .tools
-                        .iter()
-                        .filter(|t| t.manual_name.eq_ignore_ascii_case(manual_part))
-                        .filter_map(|tool| {
-                            let tname = tool.tool_name.to_ascii_lowercase();
-                            if tool_part.is_empty() {
-                                return Some((100, tool));
-                            }
-                            if tname == tool_part {
-                                Some((1000, tool))
-                            } else if tname.starts_with(tool_part) {
-                                Some((500, tool))
-                            } else if tname.contains(tool_part) {
-                                Some((250, tool))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    scoped.sort_by(|a, b| {
-                        b.0.cmp(&a.0)
-                            .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
-                    });
-                    return scoped
-                        .into_iter()
-                        .take(limit)
-                        .map(|(_, t)| Self::to_summary(t, include_schemas))
-                        .collect();
-                }
-            }
-        }
-
-        let terms: Vec<&str> = q_trim
-            .split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-')
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut scored: Vec<(i64, &IndexedTool)> = self
-            .tools
-            .iter()
-            .filter_map(|tool| {
-                let mut score = 0i64;
-                let qname_lower = tool.qualified_name.to_ascii_lowercase();
-                let tname_lower = tool.tool_name.to_ascii_lowercase();
-
-                if qname_lower == q_trim || tname_lower == q_trim {
-                    score += 1000;
-                } else if q_trim.len() >= 3 && qname_lower.contains(&q_trim) {
-                    score += 400;
-                } else if q_trim.len() >= 3 && tool.search_blob.contains(&q_trim) {
-                    score += 200;
-                }
-
-                for term in &terms {
-                    if tname_lower == *term {
-                        score += 150;
-                    } else if term.len() <= 2 {
-                        // Short 1-2 char tokens (like "id", "pr", "d2") must match whole word tokens,
-                        // never substrings inside unrelated words like "val[id]ate"!
-                        if tool
-                            .search_blob
-                            .split(|c: char| !c.is_ascii_alphanumeric())
-                            .any(|w| w == *term)
-                        {
-                            score += 60;
-                        }
-                    } else if qname_lower.contains(term) {
-                        score += 80;
-                    } else if tool
-                        .tags
-                        .iter()
-                        .any(|tag| tag.to_ascii_lowercase().contains(term))
-                    {
-                        score += 60;
-                    } else if tool.search_blob.contains(term) {
-                        score += 25;
-                    }
-                }
-
-                if score > 0 {
-                    Some((score, tool))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
-        });
-
-        scored
-            .into_iter()
-            .take(limit)
-            .map(|(_, t)| Self::to_summary(t, include_schemas))
-            .collect()
+        let tools: Vec<(&IndexedTool, bool)> = self.tools.iter().map(|t| (t, false)).collect();
+        rank(&tools, query, limit, include_schemas)
     }
 
     /// Retrieve exact JSON input/output schema for a single tool (`<manual>.<tool>` or unambiguous `<tool>`).
@@ -303,7 +219,7 @@ impl SearchIndex {
         })
     }
 
-    fn to_summary(t: &IndexedTool, include_schemas: bool) -> ToolSummary {
+    fn to_summary(t: &IndexedTool, staged: bool, include_schemas: bool) -> ToolSummary {
         let (inputs, outputs) = if include_schemas {
             (
                 serde_json::from_str(&t.input_schema_json).ok(),
@@ -320,8 +236,129 @@ impl SearchIndex {
             tags: t.tags.clone(),
             inputs,
             outputs,
+            staged,
         }
     }
+}
+
+/// Score `tools` (each with whether it is staged) against `query`; see [`SearchIndex::search`].
+fn rank(
+    tools: &[(&IndexedTool, bool)],
+    query: &str,
+    limit: usize,
+    include_schemas: bool,
+) -> Vec<ToolSummary> {
+    let q_trim = query.trim().to_ascii_lowercase();
+    if q_trim.is_empty() {
+        return tools
+            .iter()
+            .take(limit)
+            .map(|&(t, staged)| SearchIndex::to_summary(t, staged, include_schemas))
+            .collect();
+    }
+
+    // If the query is a single qualified `<manual>.<tool_prefix>` token (no whitespace),
+    // scope strictly to `<manual>` so short tool words like `id` never match unrelated manuals!
+    if !q_trim.chars().any(char::is_whitespace) {
+        if let Some((manual_part, tool_part)) = q_trim.split_once('.') {
+            if !manual_part.is_empty() {
+                let mut scoped: Vec<(i64, &IndexedTool, bool)> = tools
+                    .iter()
+                    .filter(|(t, _)| t.manual_name.eq_ignore_ascii_case(manual_part))
+                    .filter_map(|&(tool, staged)| {
+                        let tname = tool.tool_name.to_ascii_lowercase();
+                        if tool_part.is_empty() {
+                            return Some((100, tool, staged));
+                        }
+                        if tname == tool_part {
+                            Some((1000, tool, staged))
+                        } else if tname.starts_with(tool_part) {
+                            Some((500, tool, staged))
+                        } else if tname.contains(tool_part) {
+                            Some((250, tool, staged))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                scoped.sort_by(|a, b| {
+                    b.0.cmp(&a.0)
+                        .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
+                });
+                return scoped
+                    .into_iter()
+                    .take(limit)
+                    .map(|(_, t, staged)| SearchIndex::to_summary(t, staged, include_schemas))
+                    .collect();
+            }
+        }
+    }
+
+    let terms: Vec<&str> = q_trim
+        .split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut scored: Vec<(i64, &IndexedTool, bool)> = tools
+        .iter()
+        .filter_map(|&(tool, staged)| {
+            let mut score = 0i64;
+            let qname_lower = tool.qualified_name.to_ascii_lowercase();
+            let tname_lower = tool.tool_name.to_ascii_lowercase();
+
+            if qname_lower == q_trim || tname_lower == q_trim {
+                score += 1000;
+            } else if q_trim.len() >= 3 && qname_lower.contains(&q_trim) {
+                score += 400;
+            } else if q_trim.len() >= 3 && tool.search_blob.contains(&q_trim) {
+                score += 200;
+            }
+
+            for term in &terms {
+                if tname_lower == *term {
+                    score += 150;
+                } else if term.len() <= 2 {
+                    // Short 1-2 char tokens (like "id", "pr", "d2") must match whole word tokens,
+                    // never substrings inside unrelated words like "val[id]ate"!
+                    if tool
+                        .search_blob
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|w| w == *term)
+                    {
+                        score += 60;
+                    }
+                } else if qname_lower.contains(term) {
+                    score += 80;
+                } else if tool
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_ascii_lowercase().contains(term))
+                {
+                    score += 60;
+                } else if tool.search_blob.contains(term) {
+                    score += 25;
+                }
+            }
+
+            if score > 0 {
+                Some((score, tool, staged))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
+    });
+
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, t, staged)| SearchIndex::to_summary(t, staged, include_schemas))
+        .collect()
 }
 
 #[cfg(test)]
@@ -346,6 +383,47 @@ mod tests {
             output_schema_json: r#"{"type":"object"}"#.to_string(),
             search_blob: blob,
         }
+    }
+
+    fn index_of(tools: Vec<IndexedTool>) -> SearchIndex {
+        SearchIndex {
+            tools,
+            ..SearchIndex::default()
+        }
+    }
+
+    /// `search --staged` answers "what will agents find after promote": a staged manual replaces its
+    /// active version, other active manuals stay, and staged results are marked.
+    #[test]
+    fn search_with_staged_replaces_the_active_version_and_marks_staged_tools() {
+        let active = index_of(vec![
+            sample_tool("gh", "list_issues", "List issues (old text)"),
+            sample_tool("other", "issues_report", "Report on issues"),
+        ]);
+        let staged = index_of(vec![
+            sample_tool("gh", "list_issues", "List issues for a repository"),
+            sample_tool("gh", "get_issue", "Get one issue"),
+        ]);
+        let hits = active.search_with_staged(&staged, "issue", 10, false);
+        let names: Vec<(&str, bool, &str)> = hits
+            .iter()
+            .map(|t| (t.name.as_str(), t.staged, t.description.as_str()))
+            .collect();
+        assert!(names.contains(&("gh.list_issues", true, "List issues for a repository")));
+        assert!(names.contains(&("gh.get_issue", true, "Get one issue")));
+        assert!(names.contains(&("other.issues_report", false, "Report on issues")));
+        assert_eq!(
+            hits.len(),
+            3,
+            "the active gh.list_issues is replaced: {names:?}"
+        );
+        let json = serde_json::to_value(&hits).unwrap();
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t.get("staged").is_none()));
+        assert!(active.search("issues", 10, false).iter().all(|t| !t.staged));
     }
 
     #[test]

@@ -61,10 +61,62 @@ use utcp_core::skills::{
     sync_ide_skills,
 };
 use utcp_core::staging::{
-    diff_staged, discard_staged, list_staged, promote_staged, rollback_manual, stage_manual,
-    ManualDiff, Replaces,
+    diff_staged, diff_staged_tool, discard_staged, list_staged, promote_staged, rollback_manual,
+    stage_manual, ManualDiff, Replaces, ToolDiff, ToolStatus,
 };
 use utcp_core::transfer::{DownloadFolderSource, OutTarget};
+
+/// `promote`, `discard` and `refresh` change what every agent sees, so they never act on every
+/// manual by default: the caller names them (or a prefix such as `azdo_*`), or passes `--all`.
+fn require_target(paths: &UtcpPaths, cmd: &str, names: &[String], all: bool) -> Result<()> {
+    if !names.is_empty() || all {
+        return Ok(());
+    }
+    let registry = UtcpRegistryConfig::load(paths)?;
+    let (what, names): (&str, Vec<&String>) = match cmd {
+        "refresh" => ("registered", registry.manuals.keys().collect()),
+        _ => ("staged", registry.staged.keys().collect()),
+    };
+    let names = if names.is_empty() {
+        format!("nothing is {what}")
+    } else {
+        format!(
+            "{what}: {}",
+            names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    anyhow::bail!(
+        "Name the manuals: utcp {cmd} <name>... (a name or a prefix such as 'azdo_*'), or pass --all \
+         for every {what} manual ({names})."
+    )
+}
+
+/// The shortest `promote`/`discard` arguments that select exactly `names` out of `staged`: manuals
+/// named `<prefix>_<rest>` become one quoted `'<prefix>_*'` when two or more share the prefix and
+/// it selects no other staged manual (the skill description groups manuals the same way).
+fn name_patterns(names: &[String], staged: &[String]) -> Vec<String> {
+    let prefix_of = |n: &str| n.split_once('_').map(|(p, _)| format!("{p}_"));
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let pattern = prefix_of(name).filter(|p| {
+            let picked =
+                |list: &[String]| list.iter().filter(|n| n.starts_with(p.as_str())).count();
+            picked(names) > 1 && picked(staged) == picked(names)
+        });
+        let arg = match pattern {
+            Some(p) => format!("'{p}*'"),
+            None => name.clone(),
+        };
+        if !out.contains(&arg) {
+            out.push(arg);
+        }
+    }
+    out
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -88,16 +140,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Fast summary of all registered tools, or of one manual's tools (`utcp list <manual>`)
+    /// The manuals (name, tool count, hint), one manual's tools (`utcp list <manual>`), or all tools
     List {
-        /// Only this manual's tools
+        /// This manual's tools. Without it, the manuals: name, tool count and hint
         manual: Option<String>,
         /// Output raw JSON array
         #[arg(long)]
         json: bool,
-        /// List the tools of the staged manuals (`utcp stage`) instead of the active ones
+        /// The staged manuals (`utcp stage`) instead of the active ones
         #[arg(long)]
         staged: bool,
+        /// Every tool of every manual instead of the manuals (long: thousands of lines)
+        #[arg(long, conflicts_with = "manual")]
+        tools: bool,
     },
     /// Ranked keyword/tag search returning compact 1-line summaries by default
     Search {
@@ -112,6 +167,9 @@ enum Commands {
         /// Output raw JSON array
         #[arg(long)]
         json: bool,
+        /// Search as if every staged manual were promoted; their tools are marked [staged]
+        #[arg(long)]
+        staged: bool,
     },
     /// Print the exact JSON input/output schema for a single tool on demand
     Schema {
@@ -134,9 +192,23 @@ enum Commands {
         #[arg(long)]
         args_file: Option<PathBuf>,
         /// Optional comma-separated fields to project from JSON response (e.g. `sha,commit.message,html_url`).
-        /// Dotted paths pass through arrays (`workflow_runs.id`); item keys alone select from a wrapped list.
+        /// Dotted paths pass through arrays (`workflow_runs.id`); each path is resolved on its own, so a
+        /// top-level key and item keys of a wrapped list can be mixed (`name,total_count`); a key that
+        /// itself has dots is matched whole (`fields.System.State`). A path that matches nothing
+        /// gets a note on stderr listing the keys there.
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
+        /// Keep only the list items that match (repeatable; all must hold), before `--fields`:
+        /// `path=a|b` (equals one), `path~=a|b` (contains one), `path^=a|b` (starts with one); `!` before
+        /// the operator keeps the others; case is ignored; `\|` is a `|` in a value; a missing field is
+        /// `null`; `=` compares numbers as numbers. `path>v`, `>=`, `<`, `<=` compare numbers or ISO dates
+        /// (a date alone means that whole day in UTC, with `=` and `!=` too). Quote the condition. A path
+        /// starting with a top-level array filters that array (`records.result=failed`); otherwise the
+        /// answer's `value`/`items`/`results`/`data` list, or its only list of objects. When a condition
+        /// keeps none of a list's items, a note on stderr shows the values the field has. When the answer
+        /// has no list to filter (one object, text), the call still succeeds: the whole answer and a note.
+        #[arg(long = "where", value_name = "PATH=VALUES")]
+        filters: Vec<String>,
         /// Force pretty-printed multi-line JSON output
         #[arg(short, long, conflicts_with = "compact")]
         pretty: bool,
@@ -160,7 +232,7 @@ enum Commands {
     },
     /// Execute multiple tool calls concurrently over a shared connection pool
     Batch {
-        /// Read batch JSON array from stdin
+        /// Read batch JSON array from stdin (also read without it when stdin is a pipe or file)
         #[arg(long)]
         stdin: bool,
         /// Read batch JSON array from file
@@ -169,9 +241,14 @@ enum Commands {
         /// Maximum concurrent calls
         #[arg(long, default_value_t = 8)]
         concurrency: usize,
-        /// Optional default comma-separated fields applied to items without their own `fields`
+        /// Optional default comma-separated fields applied to items without their own `"fields"` (a list,
+        /// or one comma-separated string)
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
+        /// Default `--where` conditions (repeatable) for items without their own `"where"` (a list of
+        /// conditions, or one condition as a string)
+        #[arg(long = "where", value_name = "PATH=VALUES")]
+        filters: Vec<String>,
         /// Force pretty-printed multi-line JSON output
         #[arg(short, long, conflicts_with = "compact")]
         pretty: bool,
@@ -284,24 +361,34 @@ enum Commands {
         #[arg(long)]
         hint: Option<String>,
     },
-    /// Compare staged manuals with the active ones they would replace: tools added, removed and changed
+    /// Compare staged manuals with the active ones they would replace: tools added, removed and changed.
+    /// With `<manual>.<tool>`, that tool's old and new version of each part that changed
     Diff {
-        /// Staged manual name (all staged manuals when omitted)
-        name: Option<String>,
+        /// Staged manual names, prefixes such as 'azdo_*' (all staged manuals when omitted), or
+        /// `<manual>.<tool>` names
+        names: Vec<String>,
         /// Output raw JSON
         #[arg(long)]
         json: bool,
     },
-    /// Make staged manuals active (rebuilds search, refreshes the skills, reloads the daemon). The version
-    /// each replaces is kept for `utcp rollback`
+    /// Make staged manuals active (rebuilds search, refreshes the skills, reloads the daemon). The
+    /// version each replaces is kept for `utcp rollback`
     Promote {
-        /// Staged manual name (all staged manuals when omitted)
-        name: Option<String>,
+        /// Staged manual names, or prefixes such as 'azdo_*' (quote them for the shell)
+        #[arg(conflicts_with = "all")]
+        names: Vec<String>,
+        /// Promote every staged manual
+        #[arg(long)]
+        all: bool,
     },
     /// Drop staged manuals without making them active
     Discard {
-        /// Staged manual name (all staged manuals when omitted)
-        name: Option<String>,
+        /// Staged manual names, or prefixes such as 'azdo_*' (quote them for the shell)
+        #[arg(conflicts_with = "all")]
+        names: Vec<String>,
+        /// Drop every staged manual
+        #[arg(long)]
+        all: bool,
     },
     /// Make the version a `utcp promote` replaced active again. Run it twice to undo it
     Rollback {
@@ -336,10 +423,14 @@ enum Commands {
         #[arg(long)]
         purge_cache: bool,
     },
-    /// Re-fetch one or all registered manuals from their source URL and rebuild `search_index.bin`
+    /// Re-fetch registered manuals from their source URLs and rebuild `search_index.bin`
     Refresh {
-        /// Optional manual name (refreshes all if omitted)
-        name: Option<String>,
+        /// Manual names, or prefixes such as 'azdo_*' (quote them for the shell)
+        #[arg(conflicts_with = "all")]
+        names: Vec<String>,
+        /// Refresh every registered manual
+        #[arg(long)]
+        all: bool,
     },
     /// Control opt-in disk activity logging (`activity.jsonl` + `.bak`)
     Log {
@@ -477,9 +568,71 @@ fn main() {
         if stdout_closed() {
             return;
         }
+        if let Some(failed) = err.downcast_ref::<BatchItemsFailed>() {
+            eprintln!("utcp: {failed}");
+            std::process::exit(2);
+        }
         eprintln!("Error: {:#}", err);
         std::process::exit(1);
     }
+}
+
+/// Some items of a `utcp batch` failed. Their results (with `error`) are already printed; `main`
+/// exits with 2 so a script sees it without reading every item.
+#[derive(Debug)]
+struct BatchItemsFailed {
+    failed: Vec<String>,
+    total: usize,
+}
+
+impl std::fmt::Display for BatchItemsFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of {} batch items failed (ids: {}); see their \"error\"",
+            self.failed.len(),
+            self.total,
+            self.failed.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for BatchItemsFailed {}
+
+/// Prints a batch's results, then fails with [`BatchItemsFailed`] when any item did.
+/// A failed item's `error` gets the hint `call` would give (a staged manual, similar tool names).
+fn print_batch_results(
+    mut results: Vec<utcp_core::catalog::BatchResultItem>,
+    paths: &UtcpPaths,
+    staged: bool,
+    pretty: bool,
+    compact: bool,
+    caller: &str,
+) -> Result<()> {
+    if results.iter().any(|r| !r.ok) {
+        if let Ok(registry) = UtcpRegistryConfig::load(paths) {
+            for r in results.iter_mut().filter(|r| !r.ok) {
+                let hint = target_hint(paths, &registry, &r.tool, staged, "call");
+                if let (Some(error), Some(hint)) = (r.error.as_mut(), hint) {
+                    *error = append_hint(error, &hint);
+                }
+            }
+        }
+    }
+    print_json_output(&results, pretty, compact, caller)?;
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| !r.ok)
+        .map(|r| r.id.clone())
+        .collect();
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(BatchItemsFailed {
+        failed,
+        total: results.len(),
+    }
+    .into())
 }
 
 /// A direct-mode command stopped by a signal. `main` exits with `128 + signal`, like a shell.
@@ -567,7 +720,11 @@ fn run_cli() -> Result<()> {
             manual,
             json,
             staged,
+            tools: all_tools,
         } => {
+            if manual.is_none() && !all_tools {
+                return print_manual_summaries(&paths, staged, json);
+            }
             let started = Instant::now();
             let caller = detect_caller();
 
@@ -617,11 +774,19 @@ fn run_cli() -> Result<()> {
             limit,
             schemas,
             json,
+            staged,
         } => {
             let started = Instant::now();
             let caller = detect_caller();
 
             if !cli.direct {
+                if staged {
+                    utcp_core::ipc::require_daemon_feature(
+                        &paths,
+                        "search_staged",
+                        "search --staged",
+                    )?;
+                }
                 let req = IpcRequest {
                     caller: caller.clone(),
                     force_log: false,
@@ -629,6 +794,7 @@ fn run_cli() -> Result<()> {
                         query: query.clone(),
                         limit,
                         include_schemas: schemas,
+                        staged,
                     },
                 };
                 if let Some(resp) = try_send_ipc_sync(&paths, &req)? {
@@ -645,7 +811,7 @@ fn run_cli() -> Result<()> {
                 }
             }
 
-            let tools = search_tools_sync(&paths, &query, limit, schemas)?;
+            let tools = search_tools_sync(&paths, &query, limit, schemas, staged)?;
             maybe_log_direct(
                 &paths,
                 &caller,
@@ -708,6 +874,7 @@ fn run_cli() -> Result<()> {
             args_stdin,
             args_file,
             fields,
+            filters,
             pretty,
             compact,
             dry_run,
@@ -724,6 +891,7 @@ fn run_cli() -> Result<()> {
                 }
             }
             let args = parse_call_args(json_args, args_stdin, args_file)?;
+            utcp_core::catalog::parse_where(&filters)?;
             let out = out.as_deref().map(OutTarget::parse);
             let started = Instant::now();
             let caller = detect_caller();
@@ -734,6 +902,9 @@ fn run_cli() -> Result<()> {
             };
 
             if !cli.direct {
+                if !filters.is_empty() && !dry_run {
+                    utcp_core::ipc::require_daemon_feature(&paths, "where", "--where")?;
+                }
                 let req = IpcRequest {
                     caller: caller.clone(),
                     force_log: log,
@@ -742,6 +913,7 @@ fn run_cli() -> Result<()> {
                         args: args.clone(),
                         dry_run,
                         fields: fields_opt.clone(),
+                        filters: filters.clone(),
                         caller_env: manual_caller_env(&paths),
                         staged,
                     },
@@ -774,7 +946,11 @@ fn run_cli() -> Result<()> {
                     &target,
                     args,
                     dry_run,
-                    fields_opt.as_deref(),
+                    utcp_core::catalog::AnswerShape {
+                        filters: &filters,
+                        fields: fields_opt.as_deref(),
+                        note: None,
+                    },
                     staged,
                     out.as_ref(),
                 ),
@@ -817,6 +993,7 @@ fn run_cli() -> Result<()> {
             file,
             concurrency,
             fields,
+            filters,
             pretty,
             compact,
             log,
@@ -829,6 +1006,17 @@ fn run_cli() -> Result<()> {
                         item.fields = Some(fields.clone());
                     }
                 }
+            }
+            if !filters.is_empty() {
+                for item in &mut items {
+                    if item.filters.is_empty() {
+                        item.filters = filters.clone();
+                    }
+                }
+            }
+            for item in &items {
+                utcp_core::catalog::parse_where(&item.filters)
+                    .map_err(|e| anyhow!("batch item '{}': {e:#}", item.id))?;
             }
             let mut item_outs = HashMap::new();
             for (i, item) in items.iter().enumerate() {
@@ -851,6 +1039,9 @@ fn run_cli() -> Result<()> {
             let count = items.len();
 
             if !cli.direct {
+                if items.iter().any(|item| !item.filters.is_empty()) {
+                    utcp_core::ipc::require_daemon_feature(&paths, "where", "--where")?;
+                }
                 let req = IpcRequest {
                     caller: caller.clone(),
                     force_log: log,
@@ -867,7 +1058,7 @@ fn run_cli() -> Result<()> {
                     return match resp {
                         IpcResponse::Ok {
                             data: IpcPayload::BatchResults(results),
-                        } => print_json_output(&results, pretty, compact, &caller),
+                        } => print_batch_results(results, &paths, staged, pretty, compact, &caller),
                         IpcResponse::Error { message } => Err(anyhow!(message)),
                         _ => Err(anyhow!("Unexpected IPC response payload")),
                     };
@@ -896,7 +1087,7 @@ fn run_cli() -> Result<()> {
                 log,
                 detail,
             );
-            print_json_output(&results, pretty, compact, &caller)
+            print_batch_results(results, &paths, staged, pretty, compact, &caller)
         }
 
         Commands::Daemon { action } => match action {
@@ -927,10 +1118,11 @@ fn run_cli() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&info)?);
                     } else {
                         println!(
-                            "Status       : RUNNING\nPID          : {}\nSocket       : {}\nUptime       : {}s\nManuals      : {}\nTools        : {}\nServed       : {}\nEnv Vars     : {} (used by manuals)\nsystemd user : {}\nMedia Spool  : {} ({} files, {} bytes)\nLogging      : {}",
+                            "Status       : RUNNING\nVersion      : {}\nPID          : {}\nSocket       : {}\nUptime       : {}\nManuals      : {}\nTools        : {}\nServed       : {}\nEnv Vars     : {} (used by manuals)\nsystemd user : {}\nMedia Spool  : {} ({} files, {} bytes)\nLogging      : {}",
+                            daemon_version_label(&info.version),
                             info.pid,
                             info.socket_endpoint,
-                            info.uptime_secs,
+                            format_uptime(info.uptime_secs),
                             info.manual_count,
                             info.tool_count,
                             info.requests_served,
@@ -949,6 +1141,9 @@ fn run_cli() -> Result<()> {
                                     s.provided.len()
                                 ),
                             }
+                        }
+                        if let Some(warning) = daemon_version_warning(&info.version) {
+                            println!("WARNING      : {warning}");
                         }
                     }
                 } else if json {
@@ -1276,8 +1471,31 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
-        Commands::Diff { name, json } => {
-            let diffs = diff_staged(&paths, name.as_deref())?;
+        Commands::Diff { names, json } => {
+            let tools: Vec<(&str, &str)> = names.iter().filter_map(|n| n.split_once('.')).collect();
+            if !tools.is_empty() {
+                if tools.len() != names.len() {
+                    return Err(anyhow!(
+                        "diff takes either manual names or <manual>.<tool> names, not both"
+                    ));
+                }
+                let diffs = tools
+                    .iter()
+                    .map(|(m, t)| diff_staged_tool(&paths, m, t))
+                    .collect::<Result<Vec<_>>>()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&diffs)?);
+                } else {
+                    for (i, d) in diffs.iter().enumerate() {
+                        if i > 0 {
+                            println!();
+                        }
+                        print_tool_diff(d);
+                    }
+                }
+                return Ok(());
+            }
+            let diffs = diff_staged(&paths, &names)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&diffs)?);
                 return Ok(());
@@ -1294,15 +1512,28 @@ fn run_cli() -> Result<()> {
             println!(
                 "\nNext: test any of the staged manuals, then either promote or discard them."
             );
-            println!("- See the tools: utcp list <manual> --staged");
-            println!("- Test:          utcp call --staged <manual>.<tool> '<json args>'");
-            println!("- Promote:       utcp promote");
-            println!("- Discard:       utcp discard");
+            let names: Vec<String> = diffs.iter().map(|d| d.name.clone()).collect();
+            let staged: Vec<String> = UtcpRegistryConfig::load(&paths)?
+                .staged
+                .into_keys()
+                .collect();
+            let manual = match names.as_slice() {
+                [one] => one.clone(),
+                _ => "<manual>".to_string(),
+            };
+            let targets = name_patterns(&names, &staged).join(" ");
+            println!("- See the tools: utcp list {manual} --staged");
+            println!("- One change:    utcp diff {manual}.<tool>");
+            println!("- Findable?:     utcp search --staged '<what an agent would ask>'");
+            println!("- Test:          utcp call --staged {manual}.<tool> '<json args>'");
+            println!("- Promote:       utcp promote {targets}");
+            println!("- Discard:       utcp discard {targets}");
             Ok(())
         }
 
-        Commands::Promote { name } => {
-            let promoted = promote_staged(&paths, name.as_deref())?;
+        Commands::Promote { names, all } => {
+            require_target(&paths, "promote", &names, all)?;
+            let promoted = promote_staged(&paths, &names)?;
             if promoted.is_empty() {
                 println!("Nothing is staged.");
                 return Ok(());
@@ -1330,8 +1561,9 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
-        Commands::Discard { name } => {
-            let dropped = discard_staged(&paths, name.as_deref())?;
+        Commands::Discard { names, all } => {
+            require_target(&paths, "discard", &names, all)?;
+            let dropped = discard_staged(&paths, &names)?;
             if dropped.is_empty() {
                 println!("Nothing is staged.");
                 return Ok(());
@@ -1437,9 +1669,10 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
-        Commands::Refresh { name } => {
+        Commands::Refresh { names, all } => {
+            require_target(&paths, "refresh", &names, all)?;
             let rt = build_tokio_runtime()?;
-            let summaries = block_on_interruptible(&rt, refresh_manuals(&paths, name.as_deref()))??;
+            let summaries = block_on_interruptible(&rt, refresh_manuals(&paths, &names))??;
             notify_daemon_reload(&paths);
             for s in summaries {
                 println!(
@@ -1528,6 +1761,7 @@ fn run_cli() -> Result<()> {
             if let Some(info) = &d_info {
                 report.credentials = info.credentials.clone();
                 report.secrets_command = info.secrets_command.clone();
+                report.daemon_version = Some(info.version.clone());
             }
             let media_spool = inspect_media_spool(&paths);
             let cwd = std::env::current_dir().ok();
@@ -1549,11 +1783,22 @@ fn run_cli() -> Result<()> {
             println!(
                 "Execution Mode    : {}",
                 if let Some(pid) = report.daemon_pid {
-                    format!("DAEMON RUNNING (PID {})", pid)
+                    format!(
+                        "DAEMON RUNNING (PID {}, utcp {})",
+                        pid,
+                        daemon_version_label(report.daemon_version.as_deref().unwrap_or(""))
+                    )
                 } else {
                     "STANDALONE DIRECT MODE (daemon stopped)".to_string()
                 }
             );
+            if let Some(warning) = report
+                .daemon_version
+                .as_deref()
+                .and_then(daemon_version_warning)
+            {
+                println!("Daemon Version    : WARNING: {warning}");
+            }
             println!("Socket Endpoint   : {}", report.socket_endpoint);
             println!("Registry Config   : {}", report.config_file);
             println!("Cache Directory   : {}", report.cache_dir);
@@ -1581,7 +1826,7 @@ fn run_cli() -> Result<()> {
                 "Staged Manuals    : {}",
                 match report.staged_count {
                     0 => "none".to_string(),
-                    n => format!("{n} (review: utcp diff; activate: utcp promote)"),
+                    n => format!("{n} (review and promote: utcp diff)"),
                 }
             );
             println!(
@@ -1664,12 +1909,19 @@ fn run_cli() -> Result<()> {
             }
 
             println!("\nAgent Skills (utcp-tools + utcp-admin in each skills folder):");
+            let outdated = skills.iter().any(|s| s.exists && !s.up_to_date);
             for s in skills {
                 println!(
                     "  {} {} -> {}",
                     skill_tag(&s, color_enabled()),
                     s.client,
                     s.path
+                );
+            }
+            if outdated && paths.separate_setup {
+                println!(
+                    "  (This is a separate setup, compared with its own manuals: skills synced from \
+                     another setup show OUTDATED, and `utcp sync-ides` here would replace them.)"
                 );
             }
             Ok(())
@@ -1994,12 +2246,255 @@ fn with_staged_hint(
         .ok()
         .and_then(|r| target_hint(paths, &r, target, staged, verb))
     {
-        Some(hint) => anyhow!("{:#}\n{}", err, hint),
+        Some(hint) => anyhow!(append_hint(&format!("{err:#}"), &hint)),
         None => err,
     }
 }
 
+/// `error` and `hint` on separate lines, leaving out the hint's first sentence when `error`
+/// already says it (`Manual 'x' is staged, not active yet` + `'x' is staged, not active yet. Add ...`).
+fn append_hint(error: &str, hint: &str) -> String {
+    let hint = match hint.split_once(". ") {
+        Some((first, rest)) if error.contains(first) => rest,
+        _ => hint,
+    };
+    format!("{error}\n{hint}")
+}
+
 /// `utcp diff`: one staged manual against the manual it replaces. The name is blue in a terminal.
+/// `utcp diff <manual>.<tool>`: each part that changed, old (`-`) above new (`+`).
+fn print_tool_diff(d: &ToolDiff) {
+    let color = color_enabled();
+    let name = paint(&format!("{}.{}", d.manual, d.tool), BLUE, color);
+    let against = match d.replaces {
+        Replaces::Nothing => "",
+        Replaces::Active => " against the active manual",
+        Replaces::Deregistered => " against the deregistered manual",
+    };
+    match d.status {
+        ToolStatus::Added => println!(
+            "{name}: new in the staged manual; see it with: utcp schema --staged {}.{}",
+            d.manual, d.tool
+        ),
+        ToolStatus::Removed => println!(
+            "{name}: the staged manual drops it; see it with: utcp schema {}.{}",
+            d.manual, d.tool
+        ),
+        ToolStatus::Unchanged => println!("{name}: unchanged{against}"),
+        ToolStatus::Changed => {
+            let n = d.parts.len();
+            println!(
+                "{name}: {n} part{} changed{against}",
+                if n == 1 { "" } else { "s" }
+            );
+            let shown = |v: &serde_json::Value| match v {
+                serde_json::Value::Null => "(none)".to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            };
+            for p in &d.parts {
+                let (old, new) = (shown(&p.old), shown(&p.new));
+                let long = |s: &str| s.chars().count() > SUMMARY_CHARS || s.contains('\n');
+                if !p.old.is_null() && !p.new.is_null() && (long(&old) || long(&new)) {
+                    println!("{} (word diff: [-old-]{{+new+}}):", p.part);
+                    for line in render_word_diff(&word_diff(&old, &new), color).lines() {
+                        println!("  {line}");
+                    }
+                    continue;
+                }
+                println!("{}:", p.part);
+                for (sign, text) in [("-", old), ("+", new)] {
+                    if text.is_empty() {
+                        println!("  {sign} \"\"");
+                    }
+                    for (i, line) in text.lines().enumerate() {
+                        let lead = if i == 0 { sign } else { " " };
+                        println!("  {lead} {line}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A piece of a word diff: text both sides have, or text only the old or the new one has.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Span {
+    Same,
+    Removed,
+    Added,
+}
+
+/// Tokens for a word diff: runs of letters, digits and `_`, runs of whitespace, and single other
+/// characters, so a changed word or punctuation mark shows alone.
+fn diff_tokens(s: &str) -> Vec<&str> {
+    let kind = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    let mut last = None;
+    for (i, c) in s.char_indices() {
+        let k = kind(c);
+        if i > start && (last != Some(k) || k == 2) {
+            tokens.push(&s[start..i]);
+            start = i;
+        }
+        last = Some(k);
+    }
+    if start < s.len() {
+        tokens.push(&s[start..]);
+    }
+    tokens
+}
+
+/// Largest token product compared word by word; a bigger change shows as all old, then all new.
+const WORD_DIFF_MAX_CELLS: usize = 1_000_000;
+
+/// `old` against `new` as spans of same, removed and added text. In each changed stretch the removed
+/// text comes first, and a space between two changes joins them, so `[-two three-]{+four five+}`
+/// reads as one change.
+fn word_diff(old: &str, new: &str) -> Vec<(Span, String)> {
+    let (a, b) = (diff_tokens(old), diff_tokens(new));
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (am, bm) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    let mut ops: Vec<(Span, &str)> = a[..prefix].iter().map(|t| (Span::Same, *t)).collect();
+    let (n, m) = (am.len(), bm.len());
+    if (n + 1) * (m + 1) > WORD_DIFF_MAX_CELLS {
+        ops.extend(am.iter().map(|t| (Span::Removed, *t)));
+        ops.extend(bm.iter().map(|t| (Span::Added, *t)));
+    } else {
+        // lcs[i][j]: the longest common run of am[i..] and bm[j..].
+        let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i * (m + 1) + j] = if am[i] == bm[j] {
+                    lcs[(i + 1) * (m + 1) + j + 1] + 1
+                } else {
+                    lcs[(i + 1) * (m + 1) + j].max(lcs[i * (m + 1) + j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && am[i] == bm[j] {
+                ops.push((Span::Same, am[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if j == m || i < n && lcs[(i + 1) * (m + 1) + j] >= lcs[i * (m + 1) + j + 1] {
+                ops.push((Span::Removed, am[i]));
+                i += 1;
+            } else {
+                ops.push((Span::Added, bm[j]));
+                j += 1;
+            }
+        }
+    }
+    ops.extend(a[a.len() - suffix..].iter().map(|t| (Span::Same, *t)));
+    // Whitespace alone between two changes belongs to both.
+    let changed = |k: usize| ops.get(k).is_some_and(|(s, _)| *s != Span::Same);
+    let joins: Vec<usize> = (1..ops.len())
+        .filter(|&k| {
+            ops[k].0 == Span::Same && ops[k].1.trim().is_empty() && changed(k - 1) && changed(k + 1)
+        })
+        .collect();
+    let mut spans: Vec<(Span, String)> = Vec::new();
+    let (mut removed, mut added) = (String::new(), String::new());
+    for (k, (span, text)) in ops.iter().enumerate() {
+        match span {
+            Span::Same if joins.contains(&k) => {
+                removed.push_str(text);
+                added.push_str(text);
+            }
+            Span::Same => {
+                for (s, t) in [(Span::Removed, &mut removed), (Span::Added, &mut added)] {
+                    if !t.is_empty() {
+                        spans.push((s, std::mem::take(t)));
+                    }
+                }
+                match spans.last_mut() {
+                    Some((Span::Same, t)) => t.push_str(text),
+                    _ => spans.push((Span::Same, text.to_string())),
+                }
+            }
+            Span::Removed => removed.push_str(text),
+            Span::Added => added.push_str(text),
+        }
+    }
+    for (s, t) in [(Span::Removed, removed), (Span::Added, added)] {
+        if !t.is_empty() {
+            spans.push((s, t));
+        }
+    }
+    spans
+}
+
+/// Characters of unchanged text kept next to a change; the rest of a long unchanged stretch is `...`.
+const WORD_DIFF_CONTEXT: usize = 60;
+
+/// A word diff as one text: `[-removed-]` (red in a terminal), `{+added+}` (green), and unchanged
+/// text cut to [`WORD_DIFF_CONTEXT`] characters on each side of a change.
+fn render_word_diff(spans: &[(Span, String)], color: bool) -> String {
+    let last = spans.len().saturating_sub(1);
+    spans
+        .iter()
+        .enumerate()
+        .map(|(k, (span, text))| match span {
+            Span::Same => elide_same(text, k > 0, k < last),
+            Span::Removed => paint(&format!("[-{text}-]"), "31", color),
+            Span::Added => paint(&format!("{{+{text}+}}"), GREEN, color),
+        })
+        .collect()
+}
+
+/// Unchanged text, keeping its start when a change comes before it and its end when one comes after,
+/// each up to [`WORD_DIFF_CONTEXT`] characters ending at a word, with `...` for what is left out.
+fn elide_same(text: &str, after_change: bool, before_change: bool) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let keep = WORD_DIFF_CONTEXT * (after_change as usize + before_change as usize);
+    if chars.len() <= keep + 5 {
+        return text.to_string();
+    }
+    let head = if after_change {
+        let mut end = WORD_DIFF_CONTEXT;
+        while end > 0 && !chars[end].is_whitespace() && !chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+        chars[..end]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+            + " "
+    } else {
+        String::new()
+    };
+    let tail = if before_change {
+        let mut start = chars.len() - WORD_DIFF_CONTEXT;
+        while start < chars.len()
+            && !chars[start].is_whitespace()
+            && !chars[start - 1].is_whitespace()
+        {
+            start += 1;
+        }
+        " ".to_string() + chars[start..].iter().collect::<String>().trim_start()
+    } else {
+        String::new()
+    };
+    format!("{head}...{tail}")
+}
+
 fn print_manual_diff(d: &ManualDiff) {
     let name = paint(&d.name, BLUE, color_enabled());
     match d.replaces {
@@ -2026,8 +2521,8 @@ fn print_manual_diff(d: &ManualDiff) {
             for t in &d.removed {
                 println!("  - {}", t);
             }
-            for t in &d.changed {
-                println!("  ~ {}", t);
+            for c in &d.changed {
+                println!("  ~ {}: {}", c.tool, c.what.join("; "));
             }
         }
     }
@@ -2125,6 +2620,27 @@ fn format_uptime(secs: u64) -> String {
 /// `utcp log recent`: the daemon's in-memory call list (works with logging off), else the log files.
 /// `daemon status` line for a stopped daemon that left `daemon.log`: where it is and when it was last
 /// written, so a daemon that failed or crashed while detached can be looked into.
+/// The running daemon's version as `daemon status` and `doctor` show it.
+fn daemon_version_label(version: &str) -> &str {
+    if version.is_empty() {
+        "0.2.3 or older"
+    } else {
+        version
+    }
+}
+
+/// A daemon running another version than this CLI (for example after installing a new utcp)
+/// lacks or differs in features until it is restarted.
+fn daemon_version_warning(version: &str) -> Option<String> {
+    let cli = env!("CARGO_PKG_VERSION");
+    (version != cli).then(|| {
+        format!(
+            "the daemon runs utcp {}, this utcp is {cli}; restart it (`utcp daemon restart`) to run {cli}",
+            daemon_version_label(version)
+        )
+    })
+}
+
 fn daemon_log_status_line(paths: &UtcpPaths) -> Option<String> {
     let file = utcp_core::daemon_log::daemon_log_file(paths);
     let modified = std::fs::metadata(&file).ok()?.modified().ok()?;
@@ -2168,10 +2684,13 @@ fn print_recent_activity(paths: &UtcpPaths, limit: usize, failed: bool, json: bo
         println!("No recent {}calls.", if failed { "failed " } else { "" });
         return Ok(());
     }
+    // Local time to the second; `--json` keeps the stored RFC 3339 UTC timestamps.
+    let today = chrono::Local::now().date_naive();
     for e in &entries {
+        let (_, time) = tui::local_activity_time(&e.timestamp, &chrono::Local, today);
         println!(
             "{}  {:<4} {:>8.1} ms  {:<8} {} {}",
-            e.timestamp,
+            time,
             if e.ok { "ok" } else { "FAIL" },
             e.latency_ms,
             e.caller,
@@ -2197,23 +2716,174 @@ fn print_tool_summaries(tools: &[ToolSummary], as_json: bool, with_schemas: bool
         return Ok(());
     }
     let color = color_enabled();
+    let width = tool_name_width(tools);
     for t in tools {
-        println!("{}", tool_line(t, color));
+        println!("{}", tool_line(t, width, color));
+    }
+    Ok(())
+}
+
+/// Longest name a `list`/`search` row pads to; a longer name keeps its two spaces and pushes its
+/// own description right, instead of pushing every row.
+const TOOL_NAME_MAX_WIDTH: usize = 60;
+
+/// The column the descriptions start in: the longest tool name shown, up to
+/// [`TOOL_NAME_MAX_WIDTH`].
+fn tool_name_width(tools: &[ToolSummary]) -> usize {
+    tools
+        .iter()
+        .map(|t| t.name.chars().count())
+        .filter(|&n| n <= TOOL_NAME_MAX_WIDTH)
+        .max()
+        .unwrap_or(0)
+}
+
+/// One `utcp list` row per manual: active ones, then staged ones (only those with `--staged`).
+#[derive(serde::Serialize)]
+struct ManualSummary {
+    name: String,
+    tools: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
+    staged: bool,
+}
+
+/// `utcp list` without a manual: what is there to call, in a few lines. Tool counts come from the
+/// search index, so this reads two small files and never asks the daemon.
+fn print_manual_summaries(paths: &UtcpPaths, staged_only: bool, as_json: bool) -> Result<()> {
+    let registry = UtcpRegistryConfig::load(paths)?;
+    let count = |staged: bool| -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for t in list_tools_sync(paths, None, staged).unwrap_or_default() {
+            *counts.entry(t.manual).or_insert(0) += 1;
+        }
+        counts
+    };
+    let mut rows = Vec::new();
+    for (staged, manuals) in [(false, &registry.manuals), (true, &registry.staged)] {
+        if staged_only && !staged || staged && manuals.is_empty() {
+            continue;
+        }
+        let counts = count(staged);
+        rows.extend(manuals.iter().map(|(name, e)| ManualSummary {
+            name: name.clone(),
+            tools: counts.get(name).copied().unwrap_or(0),
+            hint: e.hint.clone(),
+            staged,
+        }));
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        let empty = if staged_only {
+            "Nothing is staged."
+        } else {
+            "No manuals are registered. Add one with: utcp register <name> <url_or_file_path>"
+        };
+        println!("{empty}");
+        return Ok(());
+    }
+    let width = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let color = color_enabled();
+    let mut heading = None;
+    for r in &rows {
+        let section = if r.staged {
+            "Staged (not active; see the tools with: utcp list <manual> --staged)"
+        } else {
+            "Manuals (see the tools with: utcp list <manual>)"
+        };
+        if heading != Some(section) {
+            if heading.is_some() {
+                println!();
+            }
+            println!("{section}:");
+            heading = Some(section);
+        }
+        let pad = width - r.name.chars().count();
+        let tools = format!("{} tool{}", r.tools, if r.tools == 1 { "" } else { "s" });
+        let hint = r
+            .hint
+            .as_deref()
+            .map(|h| format!("  {h}"))
+            .unwrap_or_default();
+        println!(
+            "* {}{:pad$}  {tools:>10}{hint}",
+            paint(&r.name, BLUE, color),
+            ""
+        );
     }
     Ok(())
 }
 
 /// One `list`/`search` row: a bullet, so a long description that wraps is not mistaken for a new
-/// tool, then the tool name (blue in a terminal), protocol and the description's first line.
-fn tool_line(t: &ToolSummary, color: bool) -> String {
-    let pad = 36usize.saturating_sub(t.name.chars().count());
+/// tool, then the tool name (blue in a terminal) padded to `width`, the protocol when it is not
+/// HTTP, `[staged]` for a staged tool, and the description's first sentence.
+fn tool_line(t: &ToolSummary, width: usize, color: bool) -> String {
+    let pad = width.saturating_sub(t.name.chars().count());
+    let protocol = if t.protocol.eq_ignore_ascii_case("http") {
+        String::new()
+    } else {
+        format!("[{}] ", t.protocol)
+    };
     format!(
-        "* {}{:pad$} [{:<9}] {}",
+        "* {}{:pad$}  {protocol}{}{}",
         paint(&t.name, BLUE, color),
         "",
-        t.protocol,
-        first_line(&t.description)
+        if t.staged { "[staged] " } else { "" },
+        summary_line(&t.description)
     )
+    .trim_end()
+    .to_string()
+}
+
+/// Longest description a `list`/`search` row shows, in characters; `utcp schema` has the rest.
+const SUMMARY_CHARS: usize = 120;
+
+/// A description's first sentence (of its first non-empty line), cut at a word near
+/// [`SUMMARY_CHARS`] with `...` when longer.
+fn summary_line(text: &str) -> String {
+    let line = first_line(text);
+    let sentence = line
+        .char_indices()
+        .find(|&(i, c)| c == '.' && ends_sentence(line, i))
+        .map_or(line, |(i, _)| &line[..=i]);
+    if sentence.chars().count() <= SUMMARY_CHARS {
+        return sentence.to_string();
+    }
+    let cut: String = sentence.chars().take(SUMMARY_CHARS).collect();
+    let cut = match cut.rfind(' ') {
+        Some(i) if i > SUMMARY_CHARS / 2 => &cut[..i],
+        _ => &cut,
+    };
+    format!("{}...", cut.trim_end_matches([',', ';', ':', ' ']))
+}
+
+/// Abbreviations whose `.` does not end a sentence.
+const ABBREVIATIONS: [&str; 5] = ["e.g.", "i.e.", "cf.", "vs.", "etc."];
+
+/// Whether the `.` at byte `dot` of `line` ends a sentence: a space follows it, the word it ends is
+/// not an abbreviation such as `e.g.`, and the text after it does not go on in lower case.
+fn ends_sentence(line: &str, dot: usize) -> bool {
+    let rest = &line[dot + 1..];
+    if !rest.starts_with(' ') {
+        return false;
+    }
+    if rest.trim_start().starts_with(|c: char| c.is_lowercase()) {
+        return false;
+    }
+    let word = line[..=dot]
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    !ABBREVIATIONS.contains(&word.as_str())
 }
 
 const BLUE: &str = "34";
@@ -2314,17 +2984,40 @@ fn parse_batch_items(
     let raw = if let Some(path) = from_file {
         std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read batch file {}", path.display()))?
-    } else if from_stdin {
+    } else if from_stdin || !std::io::stdin().is_terminal() {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("Failed to read batch JSON from stdin")?;
+        if buf.trim().is_empty() && !from_stdin {
+            return Err(anyhow!(
+                "`utcp batch` read nothing: pipe the JSON array in, or pass --file <path>"
+            ));
+        }
         buf
     } else {
-        return Err(anyhow!("Pass --stdin or --file <path> to `utcp batch`"));
+        return Err(anyhow!(
+            "Pass the batch JSON array on stdin (`utcp batch < items.json`) or with --file <path>"
+        ));
     };
 
-    serde_json::from_str(raw.trim()).context("Batch input must be a JSON array of {id, tool, args}")
+    let mut items: Vec<BatchRequestItem> = serde_json::from_str(raw.trim()).context(
+        "Batch input must be a JSON array of {\"tool\", \"args\"?, \"id\"?, \"fields\"?, \"where\"?, \"out\"?} objects",
+    )?;
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (i, item) in items.iter_mut().enumerate() {
+        if item.id.trim().is_empty() {
+            item.id = i.to_string();
+        }
+        if let Some(first) = seen.insert(item.id.clone(), i) {
+            return Err(anyhow!(
+                "batch items {first} and {i} have the same id '{}'; give each item its own id (or none: \
+                 it defaults to the item's position)",
+                item.id
+            ));
+        }
+    }
+    Ok(items)
 }
 
 fn parse_header_flags(raw_headers: &[String]) -> Result<BTreeMap<String, String>> {
@@ -2358,7 +3051,8 @@ fn describe_limit(mb: Option<u64>, key: &str) -> String {
     }
 }
 
-/// A call's answer: nothing more when `--out -` already wrote a file's bytes to stdout.
+/// A call's answer: nothing more when `--out -` already wrote a file's bytes to stdout. A `--where`
+/// note goes to stderr; stdout is the answer as it would be without it.
 fn print_call_output(
     val: &Value,
     out: Option<&OutTarget>,
@@ -2366,6 +3060,11 @@ fn print_call_output(
     compact: bool,
     caller: &str,
 ) -> Result<()> {
+    let mut shaped = utcp_core::transfer::ShapedAnswer::from_value(val.clone());
+    if let Some(note) = shaped.note.take() {
+        eprintln!("note: {note}");
+    }
+    let val = &shaped.into_value();
     let streamed_to_stdout = out == Some(&OutTarget::Stdout)
         && val.get("type").and_then(Value::as_str) == Some("file")
         && val.get("path").and_then(Value::as_str) == Some("-");
@@ -2429,11 +3128,56 @@ fn maybe_log_direct(
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_lines, first_line, format_uptime, paint, skill_tag, tool_line, BLUE, GREEN,
+        append_hint, credential_lines, diff_tokens, first_line, format_uptime, name_patterns,
+        paint, render_word_diff, skill_tag, summary_line, tool_line, tool_name_width, word_diff,
+        Span, BLUE, GREEN,
     };
     use utcp_core::catalog::CredentialStatus;
     use utcp_core::index::ToolSummary;
     use utcp_core::skills::IdeSkillTargetStatus;
+
+    #[test]
+    fn name_patterns_group_a_prefix_only_when_it_selects_nothing_else() {
+        let v = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let staged = v(&[
+            "azdo_core",
+            "azdo_git",
+            "github_repos",
+            "github_users",
+            "zoo",
+        ]);
+        assert_eq!(
+            name_patterns(&staged, &staged),
+            v(&["'azdo_*'", "'github_*'", "zoo"])
+        );
+        assert_eq!(
+            name_patterns(&v(&["azdo_core", "azdo_git"]), &staged),
+            v(&["'azdo_*'"])
+        );
+        // One github_* manual out of two: the pattern would pick the other one too.
+        assert_eq!(
+            name_patterns(&v(&["azdo_git", "github_users"]), &staged),
+            v(&["azdo_git", "github_users"])
+        );
+    }
+
+    #[test]
+    fn a_hint_does_not_repeat_what_the_error_says() {
+        assert_eq!(
+            append_hint(
+                "Manual 'g' is staged, not active yet",
+                "'g' is staged, not active yet. Add --staged: utcp call --staged g.t"
+            ),
+            "Manual 'g' is staged, not active yet\nAdd --staged: utcp call --staged g.t"
+        );
+        assert_eq!(
+            append_hint(
+                "Tool 'g.t' not found",
+                "'g' has no tool named 't'. See all of its tools"
+            ),
+            "Tool 'g.t' not found\n'g' has no tool named 't'. See all of its tools"
+        );
+    }
 
     #[test]
     fn doctor_lists_each_credential_once_with_its_manuals() {
@@ -2481,18 +3225,88 @@ mod tests {
             tags: Vec::new(),
             inputs: None,
             outputs: None,
+            staged: false,
         };
-        let plain = tool_line(&tool, false);
-        assert_eq!(
-            plain,
-            format!("* {:<36} [http     ] Fetch a user.", "pets.get_user")
-        );
-        let colored = tool_line(&tool, true);
+        let plain = tool_line(&tool, 20, false);
+        assert_eq!(plain, format!("* {:<20}  Fetch a user.", "pets.get_user"));
+        let colored = tool_line(&tool, 20, true);
         assert_eq!(
             colored,
             plain.replace("pets.get_user", &paint("pets.get_user", BLUE, true))
         );
         assert_eq!(paint("x", BLUE, true), "\x1b[34mx\x1b[0m");
+        let other = ToolSummary {
+            name: "docs.query_documentation_for_a_library".into(),
+            protocol: "mcp".into(),
+            staged: true,
+            ..tool
+        };
+        assert_eq!(
+            tool_line(&other, 20, false),
+            "* docs.query_documentation_for_a_library  [mcp] [staged] Fetch a user.",
+            "a name longer than the column keeps two spaces"
+        );
+        let short = ToolSummary {
+            name: "a.b".into(),
+            ..other.clone()
+        };
+        let huge = ToolSummary {
+            name: "x".repeat(70),
+            ..other.clone()
+        };
+        assert_eq!(tool_name_width(&[other, short.clone()]), 38);
+        assert_eq!(
+            tool_name_width(&[huge, short]),
+            3,
+            "very long names don't set it"
+        );
+    }
+
+    #[test]
+    fn word_diffs_show_only_what_changed_in_long_text() {
+        let spans = word_diff("Get one run by id.", "Get one build by id.");
+        assert_eq!(
+            spans,
+            [
+                (Span::Same, "Get one ".to_string()),
+                (Span::Removed, "run".to_string()),
+                (Span::Added, "build".to_string()),
+                (Span::Same, " by id.".to_string()),
+            ]
+        );
+        assert_eq!(
+            render_word_diff(&spans, false),
+            "Get one [-run-]{+build+} by id."
+        );
+        assert_eq!(
+            render_word_diff(&word_diff("a one two b", "a three four b"), false),
+            "a [-one two-]{+three four+} b",
+            "a space between two changes joins them"
+        );
+        assert_eq!(
+            render_word_diff(&word_diff("List runs.", "List runs, newest first."), false),
+            "List runs{+, newest first+}."
+        );
+        let filler = "word ".repeat(40);
+        let shown = render_word_diff(
+            &word_diff(
+                &format!("{filler}old {filler}end"),
+                &format!("{filler}new {filler}end"),
+            ),
+            false,
+        );
+        assert!(
+            shown.starts_with("... word ")
+                && shown.contains("word [-old-]{+new+} word")
+                && shown.ends_with("word ..."),
+            "{shown}"
+        );
+        assert!(
+            shown.chars().count() < 200,
+            "long unchanged text is cut: {shown}"
+        );
+        assert_eq!(diff_tokens("a_b, c"), ["a_b", ",", " ", "c"]);
+        assert_eq!(render_word_diff(&word_diff("x", "x\ny"), false), "x{+\ny+}");
     }
 
     #[test]
@@ -2528,5 +3342,38 @@ mod tests {
         );
         assert_eq!(first_line("one line"), "one line");
         assert_eq!(first_line(" \n "), "");
+    }
+
+    #[test]
+    fn text_summaries_keep_the_first_sentence_and_at_most_120_characters() {
+        assert_eq!(
+            summary_line("Get a run. Use it when you have the id."),
+            "Get a run."
+        );
+        assert_eq!(summary_line("Version 7.1.x of it"), "Version 7.1.x of it");
+        assert_eq!(
+            summary_line("Get items, e.g. runs. More."),
+            "Get items, e.g. runs."
+        );
+        assert_eq!(
+            summary_line("List repos (i.e. Git ones). More."),
+            "List repos (i.e. Git ones)."
+        );
+        assert_eq!(
+            summary_line("Builds, tests, etc. for a run. More."),
+            "Builds, tests, etc. for a run."
+        );
+        assert_eq!(summary_line("Compare A vs. B. More."), "Compare A vs. B.");
+        assert_eq!(
+            summary_line("Uses the v2 API. see the docs. Then more."),
+            "Uses the v2 API. see the docs.",
+            "a lower-case word goes on the sentence"
+        );
+        assert_eq!(summary_line("Ends here. "), "Ends here.");
+        let long = format!("{} tail", "word ".repeat(30));
+        let s = summary_line(&long);
+        assert!(s.ends_with("word...") && s.chars().count() <= 123, "{s}");
+        let unbroken = "x".repeat(200);
+        assert_eq!(summary_line(&unbroken), format!("{}...", "x".repeat(120)));
     }
 }

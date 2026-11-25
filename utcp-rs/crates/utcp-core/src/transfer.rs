@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::paths::{UtcpPaths, UtcpSettings};
 
-/// A JSON or text answer larger than this (after `--fields`) is saved to a file instead of printed.
+/// A JSON or text answer larger than this (after `--where` and `--fields`) is saved to a file instead of printed.
 pub const LARGE_ANSWER_BYTES: usize = 10 * 1024 * 1024;
 /// How long files stay in utcp's own downloads folder (`<cache>/downloads`).
 pub const CACHE_DOWNLOADS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -109,25 +109,75 @@ pub enum CallOutput {
 /// A page of a longer list as `utcp call` prints it: the answer under `result`, the arguments for
 /// the next page under `next_page`.
 pub fn page_value(result: Value, next_page: Value) -> Value {
-    serde_json::json!({ "result": result, "next_page": next_page })
+    ShapedAnswer {
+        result,
+        next_page: Some(next_page),
+        note: None,
+    }
+    .into_value()
 }
 
-/// The answer and next-page arguments of a value built by [`page_value`]; any other value back as `Err`.
-pub fn split_page(value: Value) -> std::result::Result<(Value, Value), Value> {
-    let is_page = value.as_object().is_some_and(|map| {
-        map.len() == 2
-            && map.contains_key("result")
-            && map.get("next_page").is_some_and(Value::is_object)
-    });
-    if !is_page {
-        return Err(value);
+/// An answer with what travels beside it from the daemon (or Direct Mode) to the printer: the
+/// arguments for the next page, and the note `--where` leaves when a condition kept none of a
+/// list's items. With neither, the value is the bare answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapedAnswer {
+    pub result: Value,
+    pub next_page: Option<Value>,
+    pub note: Option<String>,
+}
+
+impl ShapedAnswer {
+    pub fn bare(result: Value) -> Self {
+        Self {
+            result,
+            next_page: None,
+            note: None,
+        }
     }
-    let Value::Object(mut map) = value else {
-        unreachable!()
-    };
-    let result = map.remove("result").unwrap_or(Value::Null);
-    let next_page = map.remove("next_page").unwrap_or(Value::Null);
-    Ok((result, next_page))
+
+    /// `{"result", "next_page"?, "note"?}`, or the bare answer when neither extra is set.
+    pub fn into_value(self) -> Value {
+        if self.next_page.is_none() && self.note.is_none() {
+            return self.result;
+        }
+        let mut map = serde_json::Map::new();
+        map.insert("result".into(), self.result);
+        if let Some(next_page) = self.next_page {
+            map.insert("next_page".into(), next_page);
+        }
+        if let Some(note) = self.note {
+            map.insert("note".into(), Value::String(note));
+        }
+        Value::Object(map)
+    }
+
+    /// The parts of a value built by [`ShapedAnswer::into_value`]; any other value is a bare answer.
+    pub fn from_value(value: Value) -> Self {
+        let is_shaped = value.as_object().is_some_and(|map| {
+            map.len() >= 2
+                && map.contains_key("result")
+                && map.iter().all(|(k, v)| match k.as_str() {
+                    "result" => true,
+                    "next_page" => v.is_object(),
+                    "note" => v.is_string(),
+                    _ => false,
+                })
+        });
+        let Value::Object(mut map) = value else {
+            return Self::bare(value);
+        };
+        if !is_shaped {
+            return Self::bare(Value::Object(map));
+        }
+        Self {
+            result: map.remove("result").unwrap_or(Value::Null),
+            next_page: map.remove("next_page"),
+            note: map
+                .remove("note")
+                .and_then(|v| v.as_str().map(str::to_string)),
+        }
+    }
 }
 
 impl FileDownload {
@@ -766,7 +816,7 @@ impl DownloadSink {
         if self.meta.kind == FileKind::LargeAnswer {
             let mut note = format!(
                 "The answer is {}, too large to print, so utcp saved it to this file. Read parts of it \
-                 (for example with jq), or call again with --fields to get less.",
+                 (for example with jq), or call again with --where or --fields to get less.",
                 human_size(self.written)
             );
             if let Some(dir) = &self.cache_dir {
@@ -822,12 +872,12 @@ pub fn save_bytes(
 }
 
 /// Direct mode: turn a call's output into what the caller prints. A file answer is streamed to its
-/// place; a JSON answer gets `fields`, then goes to `out` when given, or to a file when it is too
-/// large to print.
+/// place; a JSON answer gets `shape` (`--where`, then `--fields`), then goes to `out` when given, or
+/// to a file when it is too large to print.
 pub async fn finish_output_locally(
     output: CallOutput,
     tool: &str,
-    fields: Option<&[String]>,
+    shape: crate::catalog::AnswerShape<'_>,
     out: Option<&OutTarget>,
     paths: &UtcpPaths,
     limits: &Limits,
@@ -840,24 +890,43 @@ pub async fn finish_output_locally(
                 let chunk = chunk.context("the download broke off")?;
                 sink.write(&chunk)?;
             }
-            sink.finish()
+            Ok(ShapedAnswer {
+                result: sink.finish()?,
+                next_page: None,
+                note: shape.file_note(),
+            }
+            .into_value())
         }
-        CallOutput::Json(value) => {
-            let value = match fields {
-                Some(f) if !f.is_empty() => crate::catalog::project_json_fields(value, f),
-                _ => value,
-            };
-            json_to_place(value, out, tool, paths, limits)
-        }
+        CallOutput::Json(value) => shaped_to_place(value, None, shape, out, tool, paths, limits),
         CallOutput::Page { value, next_page } => {
-            let value = match fields {
-                Some(f) if !f.is_empty() => crate::catalog::project_json_fields(value, f),
-                _ => value,
-            };
-            let result = json_to_place(value, out, tool, paths, limits)?;
-            Ok(page_value(result, next_page))
+            shaped_to_place(value, Some(next_page), shape, out, tool, paths, limits)
         }
     }
+}
+
+/// A JSON answer shaped by `shape` and put in its place; the next-page arguments and any `--where`
+/// note stay beside it.
+fn shaped_to_place(
+    value: Value,
+    next_page: Option<Value>,
+    shape: crate::catalog::AnswerShape<'_>,
+    out: Option<&OutTarget>,
+    tool: &str,
+    paths: &UtcpPaths,
+    limits: &Limits,
+) -> Result<Value> {
+    let (value, note) = shape.apply(value);
+    let (result, kept_note) = json_to_place_or_keep(value, out, tool, paths, limits);
+    let note = match (note, kept_note) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    };
+    Ok(ShapedAnswer {
+        result,
+        next_page,
+        note,
+    }
+    .into_value())
 }
 
 /// A JSON answer: to `out` when it names a file, to a file when it is too large to print, else as is.
@@ -868,9 +937,43 @@ pub fn json_to_place(
     paths: &UtcpPaths,
     limits: &Limits,
 ) -> Result<Value> {
-    match out {
+    place_json(value, out, tool, paths, limits).map_err(|(_, e)| e)
+}
+
+/// [`json_to_place`] for an answer the call already got: when it can't be saved, it is kept as is,
+/// with a note why, so the answer of a call that was sent (perhaps a write) is never lost.
+pub fn json_to_place_or_keep(
+    value: Value,
+    out: Option<&OutTarget>,
+    tool: &str,
+    paths: &UtcpPaths,
+    limits: &Limits,
+) -> (Value, Option<String>) {
+    match place_json(value, out, tool, paths, limits) {
+        Ok(value) => (value, None),
+        Err((value, e)) => (
+            value,
+            Some(format!(
+                "the call succeeded, but its answer could not be saved, so it is shown here: {e:#}"
+            )),
+        ),
+    }
+}
+
+/// [`json_to_place`], giving the answer back with the error when it can't be saved.
+fn place_json(
+    value: Value,
+    out: Option<&OutTarget>,
+    tool: &str,
+    paths: &UtcpPaths,
+    limits: &Limits,
+) -> std::result::Result<Value, (Value, anyhow::Error)> {
+    let saved = match out {
         Some(target @ OutTarget::Path(_)) => {
-            let data = serde_json::to_vec_pretty(&value)?;
+            let data = match serde_json::to_vec_pretty(&value) {
+                Ok(data) => data,
+                Err(e) => return Err((value, e.into())),
+            };
             let meta = json_file_meta(FileKind::Download, tool, data.len());
             // A JSON answer is never subject to the download limit.
             save_bytes(meta, &data, Some(target), paths, &Limits::none())
@@ -880,9 +983,10 @@ pub fn json_to_place(
                 let meta = json_file_meta(FileKind::LargeAnswer, tool, data.len());
                 save_bytes(meta, &data, None, paths, limits)
             }
-            None => Ok(value),
+            None => return Ok(value),
         },
-    }
+    };
+    saved.map_err(|e| (value, e))
 }
 
 #[cfg(test)]
@@ -909,25 +1013,44 @@ mod tests {
     }
 
     #[test]
-    fn pages_split_back_into_answer_and_next_page_arguments() {
+    fn pages_and_notes_split_back_into_their_parts() {
         use serde_json::json;
         let page = page_value(json!([1, 2]), json!({"page": "2"}));
         assert_eq!(page, json!({"result": [1, 2], "next_page": {"page": "2"}}));
         assert_eq!(
-            split_page(page).unwrap(),
-            (json!([1, 2]), json!({"page": "2"}))
+            ShapedAnswer::from_value(page),
+            ShapedAnswer {
+                result: json!([1, 2]),
+                next_page: Some(json!({"page": "2"})),
+                note: None
+            }
         );
+        let noted = ShapedAnswer {
+            result: json!([]),
+            next_page: None,
+            note: Some("kept none".into()),
+        };
+        let value = noted.clone().into_value();
+        assert_eq!(value, json!({"result": [], "note": "kept none"}));
+        assert_eq!(ShapedAnswer::from_value(value), noted);
+        let both = json!({"result": [], "next_page": {"page": "2"}, "note": "n"});
+        assert_eq!(ShapedAnswer::from_value(both.clone()).into_value(), both);
+        assert_eq!(ShapedAnswer::bare(json!(1)).into_value(), json!(1));
         // Anything else is an ordinary answer, returned unchanged.
         for other in [
             json!({"result": 1}),
             json!({"result": 1, "next_page": "2"}),
             json!({"result": 1, "next_page": null}),
+            json!({"result": 1, "note": 3}),
             json!({"result": 1, "next_page": {}, "count": 3}),
             json!({"value": 1, "next_page": {}}),
             json!([{"result": 1, "next_page": {}}]),
             json!("result"),
         ] {
-            assert_eq!(split_page(other.clone()), Err(other));
+            assert_eq!(
+                ShapedAnswer::from_value(other.clone()),
+                ShapedAnswer::bare(other)
+            );
         }
     }
 

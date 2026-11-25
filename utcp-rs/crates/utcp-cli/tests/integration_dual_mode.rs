@@ -676,7 +676,7 @@ async fn deregister_reregister_and_purge_round_trip() {
 
     run_ok(&env, &["register", "pets", &spec_url, "-H", "X-Team:blue"]);
     assert!(saved.exists());
-    assert!(run_ok(&env, &["list"]).contains("pets."));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets."));
 
     // 1. Deregister: gone from list/search, but entry and saved copy are kept.
     let out = run_ok(&env, &["deregister", "pets"]);
@@ -684,7 +684,7 @@ async fn deregister_reregister_and_purge_round_trip() {
         out.contains("utcp register pets"),
         "restore hint missing: {out}"
     );
-    assert!(!run_ok(&env, &["list"]).contains("pets."));
+    assert!(!run_ok(&env, &["list", "--tools"]).contains("pets."));
     assert!(!run_ok(&env, &["search", "user"]).contains("pets."));
     let cfg = read_config(&env);
     assert!(cfg["manuals"].get("pets").is_none());
@@ -704,7 +704,7 @@ async fn deregister_reregister_and_purge_round_trip() {
         out.contains("Re-registered 'pets' from its saved copy"),
         "{out}"
     );
-    assert!(run_ok(&env, &["list"]).contains("pets."));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets."));
     let cfg = read_config(&env);
     assert_eq!(cfg["manuals"]["pets"]["source_url"], spec_url.as_str());
     assert_eq!(cfg["manuals"]["pets"]["headers"]["X-Team"], "blue");
@@ -737,14 +737,14 @@ async fn deregister_reregister_and_purge_round_trip() {
             stray.to_str().unwrap(),
         ],
     );
-    assert!(!run_ok(&env, &["list"]).contains("stray."));
+    assert!(!run_ok(&env, &["list", "--tools"]).contains("stray."));
     let err = run_err(&env, &["register", "nope"]);
     assert!(err.contains("available: stray"), "{err}");
     run_ok(&env, &["register", "stray"]);
-    assert!(run_ok(&env, &["list"]).contains("stray."));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("stray."));
     run_ok(&env, &["deregister", "stray", "--purge-cache"]);
     assert!(!stray.exists());
-    assert!(!run_ok(&env, &["list"]).contains("stray."));
+    assert!(!run_ok(&env, &["list", "--tools"]).contains("stray."));
 }
 
 /// The `description` line of the installed Zed skill (`~/.agents/skills`) in the isolated HOME.
@@ -1231,6 +1231,39 @@ async fn auto_compact_pretty_fields_projection_and_dynamic_skill_refresh() {
     assert_eq!(batch_str.lines().count(), 1);
     let batch_val: Value = serde_json::from_str(batch_str.trim()).unwrap();
     assert_eq!(batch_val[0]["result"], json!({"user_id": "dave"}));
+
+    // Piped input is read without `--stdin`; an empty pipe is an error, not an empty batch.
+    let mut piped = env
+        .cmd()
+        .args(["batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    piped
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"[{"tool": "alpha.get_user", "args": {"user_id": "erin"}, "fields": "user_id"}]"#,
+        )
+        .unwrap();
+    let piped_out = piped.wait_with_output().unwrap();
+    assert!(piped_out.status.success());
+    let piped_val: Value = serde_json::from_slice(&piped_out.stdout).unwrap();
+    assert_eq!(piped_val[0]["result"], json!({"user_id": "erin"}));
+    let empty = env
+        .cmd()
+        .args(["batch"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!empty.status.success());
+    assert!(
+        String::from_utf8_lossy(&empty.stderr).contains("read nothing"),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
 
     let _ = env.cmd().args(["daemon", "stop"]).output().unwrap();
 }
@@ -2390,10 +2423,12 @@ async fn stage_diff_promote_rollback_and_discard() {
         .path()
         .join("cache/manuals/staged/pets.utcp.json")
         .exists());
-    assert!(!run_ok(&env, &["list"]).contains("pets."));
+    assert!(!run_ok(&env, &["list", "--tools"]).contains("pets."));
     assert!(!run_ok(&env, &["search", "user"]).contains("pets."));
-    assert!(run_ok(&env, &["list", "--staged"]).contains("pets.get_user"));
+    assert!(run_ok(&env, &["list", "--staged", "--tools"]).contains("pets.get_user"));
     assert!(run_ok(&env, &["list", "pets", "--staged"]).contains("pets.get_user"));
+    let out = run_ok(&env, &["search", "--staged", "user"]);
+    assert!(out.contains("[staged] Fetch user"), "{out}");
     let err = run_err(&env, &["list", "pets"]);
     assert!(err.contains("utcp list pets --staged"), "{err}");
     let err = run_err(&env, &["list", "nope"]);
@@ -2441,15 +2476,38 @@ async fn stage_diff_promote_rollback_and_discard() {
     assert!(out.contains("pets: new manual, 2 tools"), "{out}");
     assert!(out.contains("hint: pet store"), "{out}");
     assert!(
-        out.contains("- See the tools: utcp list <manual> --staged"),
+        out.contains("- See the tools: utcp list pets --staged"),
         "{out}"
     );
-    assert!(out.contains("- Promote:       utcp promote"), "{out}");
+    assert!(
+        out.contains("- Promote:       utcp promote pets\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("- Discard:       utcp discard pets\n"),
+        "{out}"
+    );
+    // Promote, discard and refresh never act on everything by accident.
+    for cmd in ["promote", "discard", "refresh"] {
+        let err = run_err(&env, &[cmd]);
+        assert!(err.contains("--all"), "{cmd}: {err}");
+    }
+    assert!(run_err(&env, &["promote", "pets", "--all"]).contains("cannot be used with"));
 
     // 2. The daemon loads staged manuals and asks the secrets command for their names too.
     run_ok(&env, &["daemon", "start"]);
-    assert!(run_ok(&env, &["list", "--staged"]).contains("pets.get_user"));
-    assert!(!run_ok(&env, &["list"]).contains("pets."));
+    assert!(run_ok(&env, &["list", "--staged", "--tools"]).contains("pets.get_user"));
+    assert!(!run_ok(&env, &["list", "--tools"]).contains("pets."));
+    let out = run_ok(&env, &["search", "--staged", "user", "--json"]);
+    assert!(out.contains("\"staged\": true"), "{out}");
+    assert!(!run_ok(&env, &["search", "user"]).contains("pets."));
+    let out = run_ok(&env, &["list"]);
+    assert!(
+        out.contains(
+            "Staged (not active; see the tools with: utcp list <manual> --staged):\n* pets"
+        ),
+        "{out}"
+    );
     let err = run_err(&env, &["list", "pets"]);
     assert!(err.contains("utcp list pets --staged"), "{err}");
     let err = run_err(&env, &["call", "pets.get_user", "{}"]);
@@ -2464,11 +2522,31 @@ async fn stage_diff_promote_rollback_and_discard() {
     assert_eq!(credential(&doctor, "pets")["is_set"], true);
 
     // 3. Promote: active in the daemon, search and skills; the staged copy is gone.
-    let out = run_ok(&env, &["promote"]);
+    let out = run_ok(&env, &["promote", "--all"]);
     assert!(out.contains("Promoted 'pets' (2 tools, new)"), "{out}");
-    assert!(run_ok(&env, &["list"]).contains("pets.get_user"));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.get_user"));
     assert!(installed_skill_description(&env).contains("pets (pet store)"));
-    assert!(run_ok(&env, &["list", "--staged"]).contains("No matching tools"));
+    assert!(run_ok(&env, &["list", "--staged", "--tools"]).contains("No matching tools"));
+    // Without a manual, `list` names the manuals, with their tool counts and hints.
+    let out = run_ok(&env, &["list"]);
+    assert!(
+        out.contains("Manuals (see the tools with: utcp list <manual>):")
+            && out.contains("2 tools  pet store")
+            && !out.contains("get_user")
+            && !out.contains("Staged"),
+        "{out}"
+    );
+    let rows: Value = serde_json::from_str(&run_ok(&env, &["list", "--json"])).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .contains(&json!({"name": "pets", "tools": 2, "hint": "pet store", "staged": false})),
+        "{rows}"
+    );
+    assert_eq!(
+        run_ok(&env, &["list", "--staged"]).trim(),
+        "Nothing is staged."
+    );
     let err = run_err(&env, &["call", "--staged", "pets.get_user", "{}"]);
     assert!(
         err.contains("Leave out --staged: utcp call pets.get_user"),
@@ -2492,15 +2570,22 @@ async fn stage_diff_promote_rollback_and_discard() {
         ),
         "{out}"
     );
-    for line in ["  + new_tool", "  - old_tool", "  ~ get_user"] {
+    for line in [
+        "  + new_tool",
+        "  - old_tool",
+        "  ~ get_user: description\n",
+    ] {
         assert!(out.contains(line), "{line}: {out}");
     }
     let diff: Value = serde_json::from_str(&run_ok(&env, &["diff", "--json"])).unwrap();
     assert_eq!(diff[0]["replaces"], "active");
-    assert_eq!(diff[0]["changed"], json!(["get_user"]));
+    assert_eq!(
+        diff[0]["changed"],
+        json!([{"tool": "get_user", "what": ["description"]}])
+    );
     let out = run_ok(&env, &["promote", "pets"]);
     assert!(out.contains("undo with: utcp rollback pets"), "{out}");
-    let list = run_ok(&env, &["list"]);
+    let list = run_ok(&env, &["list", "--tools"]);
     assert!(
         list.contains("pets.new_tool") && !list.contains("pets.old_tool"),
         "{list}"
@@ -2510,18 +2595,59 @@ async fn stage_diff_promote_rollback_and_discard() {
     // 5. Rollback swaps back; a second rollback undoes the first.
     let out = run_ok(&env, &["rollback", "pets"]);
     assert!(out.contains("again to undo"), "{out}");
-    assert!(run_ok(&env, &["list"]).contains("pets.old_tool"));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.old_tool"));
     run_ok(&env, &["rollback", "pets"]);
-    assert!(run_ok(&env, &["list"]).contains("pets.new_tool"));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.new_tool"));
     assert!(run_err(&env, &["rollback", "nope"]).contains("No previous version of 'nope'"));
 
     // 6. Discard, and errors for names that are not staged.
     run_ok(&env, &["stage", "pets", &v1]);
-    assert!(run_ok(&env, &["discard"]).contains("Discarded the staged copy of: pets"));
-    assert!(run_ok(&env, &["discard"]).contains("Nothing is staged."));
-    assert!(run_ok(&env, &["promote"]).contains("Nothing is staged."));
+    assert!(run_ok(&env, &["discard", "pets"]).contains("Discarded the staged copy of: pets"));
+    assert!(run_ok(&env, &["discard", "--all"]).contains("Nothing is staged."));
+    assert!(run_ok(&env, &["promote", "--all"]).contains("Nothing is staged."));
     assert!(run_err(&env, &["promote", "nope"]).contains("'nope' is not staged"));
-    assert!(run_ok(&env, &["list"]).contains("pets.new_tool"));
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.new_tool"));
+
+    // 6b. Several names and prefix patterns; the diff footer prints the ones to type.
+    for name in ["shop_cart", "shop_orders", "zoo"] {
+        run_ok(&env, &["stage", name, &v1]);
+    }
+    let out = run_ok(&env, &["diff"]);
+    assert!(
+        out.contains("- Promote:       utcp promote 'shop_*' zoo\n"),
+        "{out}"
+    );
+    let out = run_ok(&env, &["diff", "shop_*"]);
+    assert!(
+        out.contains("shop_cart: new manual") && !out.contains("zoo:"),
+        "{out}"
+    );
+    let out = run_ok(&env, &["diff", "shop_cart", "zoo"]);
+    assert!(
+        out.contains("- Promote:       utcp promote shop_cart zoo\n"),
+        "{out}"
+    );
+    let err = run_err(&env, &["promote", "shop_*", "nope_*"]);
+    assert!(
+        err.contains("No staged manual matches 'nope_*' (staged: shop_cart, shop_orders, zoo)"),
+        "{err}"
+    );
+    assert!(run_err(&env, &["promote", "s*p_*"]).contains("only a trailing *"));
+    let out = run_ok(&env, &["promote", "shop_*", "shop_cart"]);
+    assert!(
+        out.contains("Promoted 'shop_cart'") && out.contains("Promoted 'shop_orders'"),
+        "{out}"
+    );
+    assert_eq!(out.matches("Promoted 'shop_cart'").count(), 1, "{out}");
+    assert!(run_ok(&env, &["list", "--staged"]).contains("zoo"));
+    let out = run_ok(&env, &["refresh", "shop_*", "pets"]);
+    assert_eq!(out.matches("Refreshed '").count(), 3, "{out}");
+    let err = run_err(&env, &["refresh", "zoo"]);
+    assert!(
+        err.contains("'zoo' is not registered (registered: pets, shop_cart"),
+        "{err}"
+    );
+    assert!(run_ok(&env, &["discard", "zoo"]).contains("Discarded the staged copy of: zoo"));
 
     // 7. Purge deletes the previous version and any staged copy too.
     run_ok(&env, &["stage", "pets", &v1]);
@@ -3250,4 +3376,425 @@ async fn paged_answers_name_the_arguments_for_the_next_page() {
             json!({"continuationToken": "tok2"})
         );
     }
+}
+
+/// Answers shaped like an Azure DevOps build timeline (a top-level `records` list beside other
+/// fields), an answer with two lists, and a single object.
+async fn spawn_where_api() -> String {
+    let timeline = || async {
+        Json(json!({
+            "id": "t1",
+            "records": [
+                {"name": "a", "type": "Task", "result": "failed", "issues": [{"type": "error"}]},
+                {"name": "b", "type": "Job", "result": "canceled", "issues": []},
+                {"name": "c", "type": "Task", "result": "succeeded"},
+                {"name": "d", "type": "Task", "result": null},
+            ],
+        }))
+    };
+    let app = Router::new()
+        .route("/timeline", get(timeline))
+        .route(
+            "/two",
+            get(|| async { Json(json!({"a": [{"x": 1}], "b": [{"x": 2}]})) }),
+        )
+        .route(
+            "/lines",
+            get(|| async { Json(json!({"count": 2, "value": ["ok", "error: x"]})) }),
+        )
+        .route(
+            "/one",
+            get(|| async { Json(json!({"id": 1, "name": "x"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{}", addr)
+}
+
+fn get_tool(name: &str, url: String) -> Value {
+    json!({"name": name, "description": name, "inputs": {"type": "object"},
+           "outputs": {"type": "object"},
+           "tool_call_template": {"call_template_type": "http", "http_method": "GET", "url": url}})
+}
+
+fn names(list: &Value) -> Vec<&str> {
+    list.as_array()
+        .unwrap_or_else(|| panic!("not a list: {list}"))
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect()
+}
+
+/// `--where` keeps the list items that match, before `--fields`, on `call` and `batch`, through the
+/// daemon and in direct mode. A page keeps its `next_page` even when nothing on it matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn where_keeps_the_matching_list_items() {
+    let env = IsolatedEnv::new();
+    let base = spawn_where_api().await;
+    let paged = spawn_paged_api().await;
+    let root = env.tmp.path().to_path_buf();
+    let manual = json!({
+        "manual_version": "1.0.0",
+        "utcp_version": "1.0.0",
+        "info": {"title": "w", "version": "1"},
+        "tools": [
+            get_tool("timeline", format!("{base}/timeline")),
+            get_tool("two", format!("{base}/two")),
+            get_tool("one", format!("{base}/one")),
+            get_tool("lines", format!("{base}/lines")),
+            get_tool("list_items", format!("{paged}/items")),
+        ],
+    });
+    let path = root.join("w.utcp.json");
+    std::fs::write(&path, manual.to_string()).unwrap();
+    run_ok(&env, &["register", "w", &path.display().to_string()]);
+
+    for (label, mode) in [("daemon", &[][..]), ("direct", &["--direct"][..])] {
+        if label == "daemon" {
+            run_ok(&env, &["daemon", "start"]);
+            let status: Value =
+                serde_json::from_str(&run_ok(&env, &["daemon", "status", "--json"])).unwrap();
+            assert_eq!(status["version"], env!("CARGO_PKG_VERSION"), "{status}");
+            assert_eq!(
+                status["features"],
+                json!(["where", "search_staged"]),
+                "{status}"
+            );
+            let text = run_ok(&env, &["daemon", "status"]);
+            assert!(
+                text.contains(&format!("Version      : {}", env!("CARGO_PKG_VERSION"))),
+                "{text}"
+            );
+            assert!(!text.contains("WARNING"), "{text}");
+        } else {
+            run_ok(&env, &["daemon", "stop"]);
+        }
+        let with_mode = |args: &[&str]| -> Vec<String> {
+            mode.iter()
+                .chain(args.iter())
+                .map(|s| s.to_string())
+                .collect()
+        };
+        let call = |args: &[&str]| -> Value {
+            let all = with_mode(&[&["call"][..], args].concat());
+            serde_json::from_str(&run_ok(
+                &env,
+                &all.iter().map(String::as_str).collect::<Vec<_>>(),
+            ))
+            .unwrap()
+        };
+        let call_err = |args: &[&str]| -> String {
+            let all = with_mode(&[&["call"][..], args].concat());
+            run_err(&env, &all.iter().map(String::as_str).collect::<Vec<_>>())
+        };
+
+        // The path names the top-level list (`records.`), or the answer's list is found for it;
+        // the rest of the answer stays.
+        for cond in ["records.result=failed|canceled", "result=failed| canceled"] {
+            let r = call(&["w.timeline", "--where", cond]);
+            assert_eq!(names(&r["records"]), ["a", "b"], "{label} {cond}: {r}");
+            assert_eq!(r["id"], "t1", "{label}: {r}");
+        }
+        // Every condition must hold; `!=` keeps items without the value (a null result too).
+        let r = call(&[
+            "w.timeline",
+            "--where",
+            "result!=succeeded",
+            "--where",
+            "type=Task",
+        ]);
+        assert_eq!(names(&r["records"]), ["a", "d"], "{label}: {r}");
+        let r = call(&["w.timeline", "--where", "result=null"]);
+        assert_eq!(names(&r["records"]), ["d"], "{label}: {r}");
+        // Through an array: any element may match.
+        let r = call(&["w.timeline", "--where", "records.issues.type=error"]);
+        assert_eq!(names(&r["records"]), ["a"], "{label}: {r}");
+        // Contains and starts with, ignoring case; `!` before the operator keeps the others.
+        let r = call(&["w.timeline", "--where", "result~=AIL|anc"]);
+        assert_eq!(names(&r["records"]), ["a", "b"], "{label}: {r}");
+        let r = call(&["w.timeline", "--where", "type!^=t"]);
+        assert_eq!(names(&r["records"]), ["b"], "{label}: {r}");
+        // Filtered first, then projected.
+        let r = call(&[
+            "w.timeline",
+            "--where",
+            "type=Job",
+            "--fields",
+            "records.name,records.result",
+        ]);
+        assert_eq!(
+            r,
+            json!({"records": [{"name": "b", "result": "canceled"}]}),
+            "{label}"
+        );
+
+        // A page: the filter applies to `result`; `next_page` stays, even on an empty page.
+        let r = call(&["w.list_items", r#"{"per_page": 2}"#, "--where", "name=b"]);
+        assert_eq!(
+            r,
+            json!({"result": [{"id": 2, "name": "b"}], "next_page": {"page": "2"}}),
+            "{label}"
+        );
+        // Keeping none of the items: stdout is the answer as it is, the note (with the values
+        // the field has) goes to stderr.
+        let all = with_mode(&[
+            "call",
+            "w.list_items",
+            r#"{"per_page": 2}"#,
+            "--where",
+            "name=zz",
+        ]);
+        let out = env
+            .cmd()
+            .args(all.iter().map(String::as_str))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{label}");
+        let r: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            r,
+            json!({"result": [], "next_page": {"page": "2"}}),
+            "{label}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(r#"note: --where 'name=zz' kept none of the 2 items in the answer (name here: "a", "b")"#),
+            "{label}: {stderr}"
+        );
+
+        // A condition that can't apply to the answer (known only once it came back, so the call
+        // was sent, perhaps a write): the answer, unfiltered, exit 0, and a note on stderr.
+        let call_noted = |args: &[&str]| -> (Value, String) {
+            let all = with_mode(&[&["call"][..], args].concat());
+            let out = env
+                .cmd()
+                .args(all.iter().map(String::as_str))
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(out.status.success(), "{label} {args:?}: {stderr}");
+            (serde_json::from_slice(&out.stdout).unwrap(), stderr)
+        };
+        let not_applied = "note: the call succeeded; --where was not applied";
+        let (r, e) = call_noted(&["w.two", "--where", "x=1"]);
+        assert!(r["a"].is_array() && r["b"].is_array(), "{label}: {r}");
+        assert!(
+            e.contains(not_applied) && e.contains("several lists (a, b)") && e.contains("a.x"),
+            "{label}: {e}"
+        );
+        let (r, e) = call_noted(&["w.one", "--where", "name=x"]);
+        assert!(r.is_object(), "{label}: {r}");
+        assert!(
+            e.contains(not_applied) && e.contains("one object, not a list"),
+            "{label}: {e}"
+        );
+        let (r, e) = call_noted(&["w.timeline", "--where", "id=t1", "--fields", "id"]);
+        assert_eq!(r, json!({"id": "t1"}), "{label}: --fields still applies");
+        assert!(
+            e.contains(not_applied)
+                && e.contains("id is a field of the answer itself")
+                && e.contains("records"),
+            "{label}: {e}"
+        );
+        let (_, e) = call_noted(&["w.lines", "--where", "value~=error"]);
+        assert!(e.contains("value is a list in the answer"), "{label}: {e}");
+        let (_, e) = call_noted(&["w.lines", "--where", "text~=error"]);
+        assert!(e.contains("list of plain values"), "{label}: {e}");
+        // Errors in the condition itself stop the call before anything is sent.
+        let e = call_err(&["w.timeline", "--where", "result~=fail|"]);
+        assert!(e.contains("empty value"), "{label}: {e}");
+        let e = call_err(&["w.timeline", "--where", "result"]);
+        assert!(e.contains("has no operator"), "{label}: {e}");
+        let e = call_err(&["w.timeline", "--where", "=failed"]);
+        assert!(e.contains("names no field"), "{label}: {e}");
+
+        // Batch: an item's own "where", else the default `--where`.
+        let batch = json!([
+            {"id": "own", "tool": "w.timeline", "where": ["result=failed"]},
+            {"id": "default", "tool": "w.timeline"},
+            {"id": "page", "tool": "w.list_items", "args": {"per_page": 2}, "where": ["id=1"]},
+            {"id": "none", "tool": "w.timeline", "where": ["result=failure"]},
+        ]);
+        let file = root.join("where-batch.json");
+        std::fs::write(&file, batch.to_string()).unwrap();
+        let file = file.display().to_string();
+        let all = with_mode(&["batch", "--file", &file, "--where", "type=Job"]);
+        let results: Value = serde_json::from_str(&run_ok(
+            &env,
+            &all.iter().map(String::as_str).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        assert_eq!(
+            names(&results[0]["result"]["records"]),
+            ["a"],
+            "{label}: {results}"
+        );
+        assert_eq!(
+            names(&results[1]["result"]["records"]),
+            ["b"],
+            "{label}: {results}"
+        );
+        assert_eq!(results[2]["result"], json!([{"id": 1, "name": "a"}]));
+        assert_eq!(results[2]["next_page"], json!({"page": "2"}), "{label}");
+        assert!(results[2].get("note").is_none(), "{label}: {results}");
+        assert_eq!(results[3]["result"]["records"], json!([]), "{label}");
+        let note = results[3]["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("kept none of the 4 items in records") && note.contains(r#""failed""#),
+            "{label}: {results}"
+        );
+
+        // A bad condition stops the batch before anything is called, naming the item.
+        std::fs::write(
+            &file,
+            json!([{"id": "bad", "tool": "w.timeline", "where": ["oops"]}]).to_string(),
+        )
+        .unwrap();
+        let all = with_mode(&["batch", "--file", &file]);
+        let e = run_err(&env, &all.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(
+            e.contains("batch item 'bad'") && e.contains("oops"),
+            "{label}: {e}"
+        );
+
+        // Batch input: unknown keys are refused, ids default to the position and must be unique,
+        // and a failed item makes the exit code 2 (the results are still printed).
+        let run_batch = |items: Value| {
+            std::fs::write(&file, items.to_string()).unwrap();
+            env.cmd()
+                .args(with_mode(&["batch", "--file", &file]))
+                .output()
+                .unwrap()
+        };
+        let out = run_batch(json!([{"tool": "w.timeline", "feilds": ["id"]}]));
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.code() == Some(1) && e.contains("unknown field `feilds`"),
+            "{label}: {e}"
+        );
+        let out = run_batch(json!([
+            {"tool": "w.timeline", "arguments": {}, "fields": ["nmae"]},
+            {"tool": "w.one"},
+        ]));
+        assert!(out.status.success(), "{label}: {out:?}");
+        let results: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(results[0]["id"], "0", "{label}: {results}");
+        assert_eq!(results[1]["id"], "1", "{label}: {results}");
+        assert!(
+            results[0]["note"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("--fields 'nmae' matched nothing (keys here:")),
+            "{label}: {results}"
+        );
+        // "where" and "fields" also take one string, as on the command line.
+        let out = run_batch(json!([
+            {"tool": "w.timeline", "where": "records.result=failed", "fields": "records.name,records.result"},
+        ]));
+        assert!(out.status.success(), "{label}: {out:?}");
+        let results: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            results[0]["result"],
+            json!({"records": [{"name": "a", "result": "failed"}]}),
+            "{label}: {results}"
+        );
+        let out = run_batch(json!([{"tool": "w.timeline", "where": 5}]));
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.code() == Some(1)
+                && e.contains("\"where\" takes a condition or a list of them"),
+            "{label}: {e}"
+        );
+        let out = run_batch(json!([
+            {"id": "a", "tool": "w.timeline"},
+            {"id": "a", "tool": "w.one"},
+        ]));
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            e.contains("batch items 0 and 1 have the same id 'a'"),
+            "{label}: {e}"
+        );
+        let out = run_batch(json!([
+            {"id": "good", "tool": "w.timeline"},
+            {"id": "bad", "tool": "w.nope"},
+        ]));
+        assert_eq!(out.status.code(), Some(2), "{label}: {out:?}");
+        let results: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(results[1]["ok"], false, "{label}: {results}");
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            e.contains("1 of 2 batch items failed (ids: bad)"),
+            "{label}: {e}"
+        );
+    }
+}
+
+/// A daemon from before `--where` would answer as if no filter had been given, so the CLI refuses
+/// (nothing is called) and says to restart it. `daemon status` names the old version.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn where_refuses_a_daemon_that_does_not_know_it() {
+    let env = IsolatedEnv::new();
+    let base = spawn_where_api().await;
+    let manual = json!({
+        "manual_version": "1.0.0",
+        "utcp_version": "1.0.0",
+        "info": {"title": "w", "version": "1"},
+        "tools": [get_tool("timeline", format!("{base}/timeline"))],
+    });
+    let path = env.tmp.path().join("w.utcp.json");
+    std::fs::write(&path, manual.to_string()).unwrap();
+    run_ok(&env, &["register", "w", &path.display().to_string()]);
+
+    // What a 0.2.3 daemon answers to Status: this build's answer without `version` and `features`.
+    run_ok(&env, &["daemon", "start"]);
+    let mut old: Value =
+        serde_json::from_str(&run_ok(&env, &["daemon", "status", "--json"])).unwrap();
+    run_ok(&env, &["daemon", "stop"]);
+    let obj = old.as_object_mut().unwrap();
+    obj.remove("version");
+    obj.remove("features");
+    let reply = json!({"status": "ok", "data": {"kind": "daemon_status", "value": old}});
+    let _ = std::fs::remove_file(env.tmp.path().join("utcp-test.sock"));
+    let server = capture_ipc_requests(&env, vec![reply.clone(), reply.clone(), reply]);
+
+    let e = run_err(&env, &["call", "w.timeline", "--where", "result=failed"]);
+    assert!(
+        e.contains("0.2.3 or older")
+            && e.contains("nothing was called")
+            && e.contains("utcp daemon restart"),
+        "{e}"
+    );
+    let file = env.tmp.path().join("b.json");
+    std::fs::write(
+        &file,
+        json!([{"id": "a", "tool": "w.timeline"}]).to_string(),
+    )
+    .unwrap();
+    let e = run_err(
+        &env,
+        &[
+            "batch",
+            "--file",
+            &file.display().to_string(),
+            "--where",
+            "type=Job",
+        ],
+    );
+    assert!(e.contains("does not know --where"), "{e}");
+    let text = run_ok(&env, &["daemon", "status"]);
+    assert!(
+        text.contains("Version      : 0.2.3 or older") && text.contains("WARNING"),
+        "{text}"
+    );
+
+    let seen = server.join().unwrap();
+    let kinds: Vec<_> = seen.iter().map(|r| r["command"]["type"].clone()).collect();
+    assert_eq!(
+        kinds,
+        ["status", "status", "status"],
+        "no call reached the daemon"
+    );
 }

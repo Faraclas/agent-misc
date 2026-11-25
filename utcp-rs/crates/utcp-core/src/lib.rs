@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod arguments;
 pub mod auth;
 pub mod call_templates;
 pub mod caller;

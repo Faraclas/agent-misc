@@ -173,19 +173,34 @@ for example one made by a generator such as `azdo-manuals`, or a new version of 
 
 ```sh
 utcp stage <name> <url_or_file_path> --hint '<few words>'   # same source, --base-url and -H as register
-utcp diff [<name>]                        # new manual, or what changes: tools added (+), removed (-), changed (~)
-utcp list [<name>] --staged               # the staged manuals' tools (or one manual's)
+utcp diff [<name>...]                     # new manual, or what changes: tools added (+), removed (-), changed (~)
+utcp diff <manual>.<tool>...              # one changed tool: old (-) against new (+) for each part that changed
+utcp list [<name>] --staged               # the staged manuals (or one manual's tools)
+utcp search --staged '<keywords>'         # will agents find it? active and staged manuals together
 utcp call --staged <manual.tool> '<json>' # call one (also schema --staged, batch --staged)
-utcp promote [<name>]                     # make it active; without a name, everything staged
-utcp discard [<name>]                     # drop it instead
+utcp promote <name>...                    # make them active (--all: everything staged)
+utcp discard <name>...                    # drop them instead (--all: everything staged)
 utcp rollback <name>                      # back to the version the last promote replaced; again to undo
 ```
 
-- A staged manual is not in `search`, `list` or the skills, and plain `call` does not reach it. `call --staged`
-  works through the daemon (or `--direct`) with the same secrets as active manuals: the secrets command is also asked
-  for the names staged manuals read, and `utcp doctor` lists their secrets, marked `(staged)`.
+- `diff` says what changed in each changed tool: `~ get_user: description; inputs added: since`. To review a
+  change, `utcp diff github_repos.get_content` prints each changed part of that tool (`description`, `input <name>`,
+  `method`, `url`, `auth`, `headers`) with the old value after `-` and the new one after `+` (`--json`: a list of
+  `{manual, tool, status, parts: [{part, old, new}]}`). A long value (over 120 characters, or several lines, such as
+  most descriptions) shows as one word diff instead, `[-removed-]{+added+}` (red and green in a terminal), with the
+  unchanged text far from a change cut to `...`. Secrets never show: `${VAR}` placeholders stay, other header and
+  auth values print as `***`. Names are either manuals or `<manual>.<tool>`, not both. `search --staged` ranks a
+  staged manual against the active ones (it replaces its own active version) and marks its results `[staged]`, so
+  you can check that the questions agents ask still find the right tool.
+- Without `--staged`, a staged manual is not in `search` or the skills, `call` does not reach it, and `list` shows it
+  only under Staged.
+  `call --staged` works through the daemon (or `--direct`) with the same secrets as active manuals: the secrets
+  command is also asked for the names staged manuals read, and `utcp doctor` lists their secrets, marked `(staged)`.
 - There is one staging area, with at most one staged copy per name; staging a name again replaces its staged copy.
   `doctor` shows how many manuals are staged.
+- `diff`, `promote`, `discard` and `refresh` take several names, and a name ending in `*` takes every manual it
+  starts: `utcp promote 'azdo_*'` (quote it for the shell). A name or pattern that matches nothing is an error and
+  nothing changes. `diff` ends with the promote and discard commands for exactly the manuals it showed.
 - `promote` is the only step that changes what agents see: it rebuilds search, reloads the daemon and rewrites the
   installed skills. It keeps the version it replaced (one per name), which `rollback` brings back.
 - Without `--hint`, a staged manual keeps the hint of the manual it replaces.
@@ -283,8 +298,10 @@ it never opens your files.
   deleted if the transfer fails. Each batch item can have its own `"out"`.
 - **Uploads.** A tool that uploads takes `{"file": "<path>"}` in its body argument, optionally with `"offset"` and
   `"length"` in bytes to send one part (chunked uploads). A relative path is relative to the caller's folder.
-- **Answers too large to print.** A JSON or text answer over 10 MB (after `--fields`) is saved to
+- **Answers too large to print.** A JSON or text answer over 10 MB (after `--where` and `--fields`) is saved to
   `~/.cache/utcp/downloads/` and the call prints its reference with a `note`. Files there are deleted after a day.
+  With `--out`, a JSON answer goes to that file; if the file can't be written, the answer prints instead, with a
+  note, since the call itself succeeded and may have been a write.
 - **Limits.** `max_upload_mb` and `max_download_mb` (Settings, section 2). A refused transfer says it failed only
   because of the limit, names the setting and the file, and keeps nothing. JSON answers are never limited.
 - **Slow transfers.** A call fails only when the server sends nothing for 60 s (`did not answer for 60 s`, or `sent
@@ -301,13 +318,26 @@ it never opens your files.
     or PATCH, and a text body POST, PUT, PATCH or DELETE. Calling a tool that breaks these rules, or has another
     `body_type`, fails with an error that says to fix the manual, instead of sending the request without its body.
   - `"response_type": "file"` forces a file answer.
+  - A URL placeholder the tool's schema does not require (Azure DevOps `project` and `team`, a build's
+    `timelineId`) can be left out or passed as `""`: its whole path segment is then left out of the URL. A required
+    one may not be empty, since that would call another URL.
+  - A list of plain values for a query parameter is sent once, joined with commas (`"ids": [1, 2]` is `ids=1,2`),
+    also when the schema declares it a string, as Azure DevOps and GitHub declare their list filters
+    (`"definitions": [13766, 42]`).
+- Before sending, `call` and every `batch` item check the arguments against the tool's input schema, inside a JSON
+  body too, and say `Nothing was sent` when something is wrong (section 7). Where the fix is certain, they fix it
+  instead: an argument whose name differs only in case from the schema's (`Fields`) is renamed, a value from a
+  tool's list of values gets the list's spelling (`Closed` is `closed`), and `"30"` for a number or boolean input
+  is sent as `30`. A body key the schema doesn't declare and that is not a near-typo of one it does is sent anyway
+  (a body is often an answer read back, with keys the schema leaves out), and a note names it.
 
 ### Long Lists (Paging)
 
 APIs return long lists one page at a time and say in a response header that there is more. utcp prints such a page
 as `{"result": <answer>, "next_page": {...}}`; calling the same tool again with the same arguments plus the ones in
-`next_page` gets the next page. The last page prints the answer alone, as before. `--fields` and `--out` apply to
-`result`, and a batch item has `next_page` next to its `result`.
+`next_page` gets the next page. The last page prints the answer alone, as before. `--where`, `--fields` and `--out`
+apply to `result`, so a page whose items all fail `--where` still has `next_page` (and a note on stderr), and a
+batch item has `next_page` next to its `result`.
 
 | Header | `next_page` |
 | --- | --- |
@@ -317,11 +347,76 @@ as `{"result": <answer>, "next_page": {...}}`; calling the same tool again with 
 An API that pages another way (a token in the body, such as `nextLink`) is printed unchanged; its own answer says
 how to ask for more. File answers ignore paging headers.
 
+### Smaller JSON Answers (`--fields`, `--where`)
+
+`--fields a,b.c` keeps only those keys; dotted paths pass through lists. Each path is resolved on its own: one that
+names a top-level key keeps that key, and for a wrapped list such as `{"count": N, "value": [...]}` the item keys
+alone are enough, so `--fields count,id,name` keeps `count` and each item's `id` and `name`. A key that itself has
+dots, as in an Azure DevOps work item's `fields`, is one name: `--fields fields.System.State` and
+`--where 'fields.System.State=Active'` work (the longest key that matches wins). `--where` keeps only the list items
+that match, before `--fields`. Use the tool's own filter arguments first (see `schema`): they make the server send
+less, while `--where` filters what came back.
+
+```sh
+utcp call <tool> '{...}' --where 'records.result=failed|canceled' --fields records.name
+utcp call <tool> '{...}' --where 'state!=closed' --where 'labels.name=bug'   # every condition must hold
+utcp call <tool> '{...}' --where 'records.name~=sign' --where 'name!^=tmp-'
+utcp call <tool> '{...}' --where 'completed_at>=2026-11-24' --where 'run_attempt>1'
+```
+
+- `path=a|b` keeps the items whose `path` is `a` or `b`, `path~=a|b` those containing `a` or `b`, `path^=a|b`
+  those starting with one. A `!` before the operator (`!=`, `!~=`, `!^=`) keeps the others. Quote the condition,
+  since the shell reads `|`, `!`, `<` and `>`. Matching ignores case and compares text, so `null` and `true` work;
+  with `=`, numbers compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends).
+- `path>v`, `path>=v`, `path<v` and `path<=v` compare numbers or ISO dates, with one value: `'changes>=200'`,
+  `'completed_at<2026-11-24T10:00:00Z'` (a time without a zone is UTC). A date alone compares the field's day in UTC,
+  so `'closedDate<=2026-11-24'` includes that whole day, and `'completed_at=2026-11-24'` (or `!=`) means any time
+  on that day. Numbers sent as strings count. An item whose field is not
+  a number (or not a date) is left out, and a note counts those. There is no `!` for these: the opposite of `>` is
+  `<=`. For a range, give two conditions.
+- A missing field counts as `null`: `pull_request=null` keeps the items without one, `pull_request!=null` those
+  with one. An object never matches; name a field inside it (`user.login=octocat`).
+- `\|` is a `|` inside a value (`\\|` inside batch JSON). A comma is an ordinary character, so matrix job names
+  need no escape (`'name=test (ubuntu-latest, stable)'`). An empty value is refused for `~=` and `^=`, since it
+  would match everything (a stray `|`); `path=` matches the empty string. `==` and empty path parts
+  (`labels..name`) are errors.
+- The list: the root array; a top-level list the path starts with (`records.result`); the `value`, `items`,
+  `results` or `data` list; or the answer's only list of objects. An empty list counts only on an empty page, where
+  every other top-level value is plain (`{"total_count": 0, "workflow_runs": []}`); a repository's empty `topics`
+  does not make it a list.
+- When `--where` can't apply to the answer, the call still succeeds (exit 0): it was already sent, and may have been
+  a write, so calling again could repeat it. The whole answer prints unfiltered (`--fields` still applies), with a
+  note on stderr: `note: the call succeeded; --where was not applied, so no items were left out: <reason>`. The
+  reasons, whatever the data: a path that starts with another top-level field of the answer (`tag_name` on a
+  release), since that field is the answer's own, not its items'; a path that is only a list's name (`topics=rust`;
+  write `value.value=x` for the items' own `value` field); a list of plain values, such as log lines or `topics`;
+  an answer with several lists and no prefix, where the reason names the lists whose items have the path's first
+  field (`files.filename` on a compare); an answer with no list at all (one object); and an answer that is not JSON.
+  A file answer is saved as usual, with a note that `--where` and `--fields` were not applied. Mistakes in the
+  condition itself (`==`, a missing operator, `x>abc`) are errors before anything is sent.
+- A path through a list (`labels.name`) matches when any of its elements does; the inner list stays whole (trim it
+  with `--fields`). So `jobs.steps.conclusion=failure` keeps the jobs with any failed step, with all their steps.
+- Conditions on different lists each filter their own: `--where 'files.filename^=src/' --where 'commits.sha^=edc'`
+  on a compare keeps the matching files and the matching commits.
+- Everything else in the answer stays as the server sent it: a `count` or `total_count` still counts the
+  unfiltered items.
+- When a condition keeps none of a non-empty list, `call` prints a note on stderr naming the values that field has
+  on this page (at most 10), such as `note: --where 'conclusion=failed' kept none of the 4 items in jobs
+  (conclusion here: "success", "skipped")`. The answer on stdout is unchanged. A wrong value (`failed` where GitHub
+  says `failure`) then shows instead of reading as "there are none". A path that no item has at all (often a typo)
+  counts as `null` in each, and a note says so, since `!=` would otherwise keep everything quietly. A `--fields`
+  path that matches nothing gets a note too, listing the keys there (`--fields nmae`).
+- In `batch`, an item's `"where": ["path=value", ...]` (or one condition as a string) applies to it; `batch --where`
+  to the items without their own. `"fields"` takes a list or one comma-separated string. A note sits next to the
+  item's `result` as `note`, with any note about its arguments.
+- A daemon older than 0.2.4 does not know `--where`. The CLI then refuses before calling and says to restart the
+  daemon (section 5) or to call with `--direct`.
+
 ## 4. Changing and Removing Manuals
 
 ```sh
-utcp refresh [<name>]               # fetch the manual again from its source, or ask its MCP server again
-                                    # (picks up new endpoints or tools)
+utcp refresh <name>...              # fetch the manual again from its source, or ask its MCP server again
+                                    # (picks up new endpoints or tools; --all: every manual)
 utcp set-hint <name> '<few words>'  # add or change a hint; --clear removes it
 utcp get-hint [<name>]              # show hints
 utcp deregister <name>              # take it out of search and calls; settings, hint and saved copy are kept
@@ -343,7 +438,7 @@ connections, and each call to a command-started MCP server starts and stops that
 catalog in memory, keeps HTTP connections and MCP servers warm, and keeps the last 500 calls for `utcp log recent`.
 
 ```sh
-utcp daemon status        # running?, PID, manuals, calls served
+utcp daemon status        # running?, version, PID, uptime, manuals, calls served
 utcp daemon start         # start it in the background (through systemd when the unit is installed)
 utcp daemon stop
 utcp daemon restart       # needed after installing a new utcp binary
@@ -355,7 +450,8 @@ With the systemd unit, `systemctl --user restart utcp-daemon` does the same as `
 
 Changes to the registry, saved manuals, `settings.toml` and `.env` reach a running daemon on their own. Restart it
 only for a new `utcp` binary or to clear everything at once. A restart stops all of its MCP servers, so calls in
-progress fail.
+progress fail. After installing a new `utcp`, `utcp daemon status` and `utcp doctor` show a `WARNING` while the
+daemon still runs the old version.
 
 If the daemon fails to start or crashes, the reason is in `daemon.log` in the state folder (`~/.local/state/utcp/` on
 Linux, `%LOCALAPPDATA%\utcp\data\` on Windows; `utcp doctor` prints the folder). `utcp daemon start` shows what it
@@ -396,14 +492,21 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
    utcp log recent --limit 50 --json
    ```
 
-   Without a daemon, `log recent` reads the disk log, which exists only if logging was turned on.
+   Times are local, to the second; `--json` keeps the stored UTC timestamps. Without a daemon, `log recent` reads the
+   disk log, which exists only if logging was turned on.
 
 2. **Look up the error:**
 
    | Error says | Meaning | Fix |
    | :--- | :--- | :--- |
    | `rate limited by <host> (HTTP 429)` or `(HTTP 403)` ... `retry after N s` | The API's limit is used up. All agents using the same token share it. | Wait the time it names. Retrying sooner fails again. |
-   | `these placeholders were not set: NAME` | A `${NAME}` the manual needs has no value. | Give it a value (section 3, Secrets): `.env`, the secrets command, or export it and run `utcp daemon reload-env`. |
+   | `these placeholders were not set: NAME` ... `Nothing was sent` | A `${NAME}` the manual needs has no value, so the call was not sent. `--dry-run` shows it as `***UNSET:NAME***`. | Give it a value (section 3, Secrets): `.env`, the secrets command, or export it and run `utcp daemon reload-env`. |
+   | `missing required argument`, `unknown argument 'x' (did you mean 'y'?)`, `'body.x' is not a field here (did you mean 'y'?)`, `this tool takes no arguments`, a wrong type or a value not in the list ... `Nothing was sent` | The arguments, or the fields of a JSON body, don't fit the tool's input schema. All problems are listed at once. | Fix the call from `utcp schema <manual.tool>`. |
+   | `note: sent as given, but not in the tool's schema` ... | The call was sent, with body keys the schema doesn't declare (often read-only keys of an answer sent back, which do no harm). | If the result shows no change, check the keys it names. |
+   | `HTTP request failed with status <code>: <body>` | The API refused the call; the body is its own answer, on one line. | Read the API's message. A 404 on an existing resource is often a permission the token lacks. |
+   | `Manual 'x' is not registered` or `is staged, not active yet` | The manual is deregistered, or only staged. Direct mode refuses it like the daemon, even when an old saved copy is still in the cache. | `utcp list`; `utcp register x` brings a deregistered manual back, `--staged` calls a staged one. |
+   | `batch items ... have the same id`, `unknown field` in a batch item | The batch is refused before any call. | Give each item its own `id` (or none: the position is used); use `tool`, `args`, `id`, `fields`, `where`, `out`. |
+   | `utcp: k of n batch items failed` (exit status 2) | Some items failed; every result, with each failure's `error`, was printed. | Read the failed items' `error`. |
    | `Secrets command failed: ...` (`reload-env`, `doctor`, `daemon.log`) | The `[secrets]` command did not run cleanly; the daemon keeps the values of its last good run. | Run the command by hand to see its own error output (it prints secrets, so not where others can see), fix it, then `utcp daemon reload-env`. |
    | `Tool 'x.y' not found` | No such manual or tool is registered. | `utcp search` or `utcp list` for the right name. If `x` is staged, the error says so and gives the command with `--staged`. |
    | `The manual and the tool are joined by a dot` | `utcp call x y` put the tool where the JSON arguments go. | Run the command it suggests: `utcp call x.y` (with `--staged` if `x` is staged). |
@@ -421,7 +524,9 @@ example `npx -y @modelcontextprotocol/server-everything`) to see why.
 
 3. **Narrow it down:**
    - `utcp call <manual.tool> '<json>' --dry-run` shows the request it would send (URL, method, headers, query
-     parameters and body, with secrets redacted) without sending it.
+     parameters and body, with secrets redacted) without sending it. It runs the same argument checks, and its
+     output has a `note` when the call has one or when `--where` or `--fields` were given (they shape an answer,
+     and a dry run has none).
    - `utcp --direct call ...` skips the daemon. If that works and the normal call fails, the daemon has stale
      state: `utcp daemon reload-env` for secrets, `utcp daemon restart` for everything else.
    - `utcp doctor` shows `[MISSING]` for every secret a manual needs and cannot find, and where each `[SET]` one comes
@@ -452,7 +557,12 @@ workspace root appears to load in VS Code too, but the VS Code docs do not list 
 folders and lists a skill found in both only once.
 
 `utcp doctor` or `utcp sync-ides --status` shows each copy as `UP TO DATE`, `OUTDATED` or `NOT INSTALLED`. After
-installing a new `utcp`, run `utcp sync-ides --global` again so the skills match it.
+installing a new `utcp`, run `utcp sync-ides --global` again so the skills match it. A separate setup compares the
+skills with its own manuals, so `doctor` there shows your normal skills as `OUTDATED` and says so; don't run
+`sync-ides --global` there unless that setup should own them.
+
+The description groups manuals that share a `prefix_`: `azdo_* (Azure DevOps, org ni: admin (permissions), git (repos
+and PRs), ...)`, with the words all their hints share written once. `utcp sync-ides --print-skill` shows it.
 
 Each skills folder records which registry wrote it (`utcp-tools/.utcp-registry`). Only that registry's changes
 rewrite it, so registering in a separate setup (section 1) leaves your skills alone. `sync-ides` always writes and

@@ -32,6 +32,15 @@ const NO_TOTAL_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// How much of a failed call's answer goes into the error.
 const MAX_ERROR_BODY: usize = 64 * 1024;
 
+/// A failed call's answer on one line: JSON re-serialized compactly, anything else (HTML, plain
+/// text, JSON cut at `MAX_ERROR_BODY`) with each run of whitespace collapsed to one space.
+fn compact_error_body(body: &str) -> String {
+    match serde_json::from_str::<Value>(body) {
+        Ok(value) => value.to_string(),
+        Err(_) => body.split_whitespace().collect::<Vec<_>>().join(" "),
+    }
+}
+
 /// Transport for synchronous HTTP providers that expose JSON APIs.
 pub struct HttpClientTransport {
     pub client: Client,
@@ -192,20 +201,7 @@ impl ClientTransport for HttpClientTransport {
 
         // Handle URL path parameters (e.g., {id} in URL) cleanly without JSON-quoting strings
         let mut remaining_args = args;
-        let mut url = http_prov.url.clone();
-        let mut consumed_keys = Vec::new();
-        for (key, value) in &remaining_args {
-            let placeholder = format!("{{{}}}", key);
-            if url.contains(&placeholder) {
-                let raw_val = match value {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                let encoded = urlencoding::encode(&raw_val);
-                url = url.replace(&placeholder, &encoded);
-                consumed_keys.push(key.clone());
-            }
-        }
+        let (url, consumed_keys) = crate::arguments::fill_url(&http_prov.url, &remaining_args);
         for key in consumed_keys {
             remaining_args.remove(&key);
         }
@@ -302,15 +298,14 @@ impl ClientTransport for HttpClientTransport {
                 }
             }
             snippet.truncate(MAX_ERROR_BODY);
-            let snippet = String::from_utf8_lossy(&snippet);
-            let trimmed = snippet.trim();
-            if trimmed.is_empty() {
+            let snippet = compact_error_body(&String::from_utf8_lossy(&snippet));
+            if snippet.is_empty() {
                 return Err(anyhow!("HTTP request failed with status: {}", status));
             }
             return Err(anyhow!(
                 "HTTP request failed with status {}: {}",
                 status,
-                trimmed
+                snippet
             ));
         }
 
@@ -413,9 +408,14 @@ impl HttpClientTransport {
     }
 }
 
+/// A query parameter's text. A list of plain values is joined with commas, as GitHub and Azure
+/// DevOps read lists in a query (`ids=1,2`); JSON text (`[1,2]`) would be misread.
 fn query_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
+        Value::Array(items) if items.iter().all(|v| !v.is_array() && !v.is_object()) => {
+            items.iter().map(query_value).collect::<Vec<_>>().join(",")
+        }
         other => other.to_string(),
     }
 }
@@ -908,6 +908,21 @@ mod tests {
             .err()
             .expect("expected streaming error");
         assert!(err.to_string().contains("Streaming not supported"));
+    }
+
+    #[test]
+    fn error_bodies_are_printed_on_one_line() {
+        assert_eq!(
+            compact_error_body(
+                "{\n  \"message\": \"Bad credentials\",\n  \"status\": \"401\"\n}\n"
+            ),
+            r#"{"message":"Bad credentials","status":"401"}"#
+        );
+        assert_eq!(
+            compact_error_body("<html>\n  <body>Unicorn!</body>\n</html>"),
+            "<html> <body>Unicorn!</body> </html>"
+        );
+        assert_eq!(compact_error_body(" \n "), "");
     }
 
     #[tokio::test]
@@ -1492,5 +1507,13 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(zip, CallOutput::File(_)));
+    }
+
+    #[test]
+    fn a_list_in_the_query_is_joined_with_commas() {
+        assert_eq!(query_value(&json!(["a1", "b2"])), "a1,b2");
+        assert_eq!(query_value(&json!([1, 2, true])), "1,2,true");
+        assert_eq!(query_value(&json!("x")), "x");
+        assert_eq!(query_value(&json!([{"a": 1}])), r#"[{"a":1}]"#);
     }
 }

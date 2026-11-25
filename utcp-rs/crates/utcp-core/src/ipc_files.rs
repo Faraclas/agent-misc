@@ -31,8 +31,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::ipc::{IpcPayload, IpcResponse};
 use crate::paths::UtcpPaths;
 use crate::transfer::{
-    json_to_place, prepare_upload, CallerFiles, DownloadSink, FileDownload, FileMeta, Limits,
-    OutTarget, Upload, UploadSpec,
+    prepare_upload, CallerFiles, DownloadSink, FileDownload, FileMeta, Limits, OutTarget, Upload,
+    UploadSpec,
 };
 
 /// Top bit of a frame's length: a data frame.
@@ -493,31 +493,41 @@ impl ClientFiles {
         }
     }
 
-    /// A result as the caller prints it: a streamed file's reference, or a JSON answer saved to `out`.
-    /// A page of a longer list is placed by its answer; its next-page arguments stay beside it.
+    /// A result as the caller prints it: a streamed file's reference, or a JSON answer saved to `out`
+    /// (kept as is, with a note, when it can't be saved). A page of a longer list is placed by its
+    /// answer; its next-page arguments (and any `--where` note) stay beside it.
     fn place(
         &mut self,
         value: Value,
         out: Option<OutTarget>,
     ) -> std::result::Result<Value, String> {
-        let value = match crate::transfer::split_page(value) {
-            Ok((result, next_page)) => {
-                let result = self.place(result, out)?;
-                return Ok(crate::transfer::page_value(result, next_page));
+        let mut shaped = crate::transfer::ShapedAnswer::from_value(value);
+        let value = std::mem::take(&mut shaped.result);
+        shaped.result = if let Some(id) = stream_id(&value) {
+            self.finish_stream(id)?
+        } else {
+            match out {
+                Some(target @ OutTarget::Path(_)) => {
+                    let limits = self.limits().clone();
+                    let (value, note) = crate::transfer::json_to_place_or_keep(
+                        value,
+                        Some(&target),
+                        &self.tool,
+                        &self.paths,
+                        &limits,
+                    );
+                    if let Some(note) = note {
+                        shaped.note = Some(match shaped.note.take() {
+                            Some(first) => format!("{first}; {note}"),
+                            None => note,
+                        });
+                    }
+                    value
+                }
+                _ => value,
             }
-            Err(value) => value,
         };
-        if let Some(id) = stream_id(&value) {
-            return self.finish_stream(id);
-        }
-        match out {
-            Some(target @ OutTarget::Path(_)) => {
-                let limits = self.limits().clone();
-                json_to_place(value, Some(&target), &self.tool, &self.paths, &limits)
-                    .map_err(|e| format!("{e:#}"))
-            }
-            _ => Ok(value),
-        }
+        Ok(shaped.into_value())
     }
 
     fn resolve(&mut self, resp: IpcResponse) -> IpcResponse {

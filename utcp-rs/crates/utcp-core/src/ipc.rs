@@ -4,10 +4,10 @@ use crate::activity::{
 };
 use crate::catalog::{
     dry_run_tool_from_manual, execute_loaded_tool, load_daemon_startup_env_map,
-    load_or_build_index_sync, load_single_cached_manual, manual_env_var_names, project_json_fields,
-    query_systemd_user_unit_state, release_manual_connections, resolve_manual_and_tool,
-    resolve_secret_var, retain_allowed_env, BatchRequestItem, BatchResultItem, CachedUtcpManual,
-    CredentialStatus, SOURCE_CALLER_SHELL, SOURCE_DAEMON_ENV, SOURCE_SECRETS_COMMAND,
+    load_or_build_index_sync, manual_env_var_names, query_systemd_user_unit_state,
+    release_manual_connections, resolve_manual_and_tool, resolve_secret_var, retain_allowed_env,
+    AnswerShape, BatchRequestItem, BatchResultItem, CachedUtcpManual, CredentialStatus,
+    SOURCE_CALLER_SHELL, SOURCE_DAEMON_ENV, SOURCE_SECRETS_COMMAND,
 };
 #[cfg(feature = "mcp")]
 use crate::catalog::{manual_stdio_mcp_servers, ManualStdioServer};
@@ -71,6 +71,9 @@ pub enum IpcCommand {
         query: String,
         limit: usize,
         include_schemas: bool,
+        /// Search as if every staged manual were promoted (feature `search_staged`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staged: bool,
     },
     Schema {
         target: String,
@@ -83,6 +86,10 @@ pub enum IpcCommand {
         dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fields: Option<Vec<String>>,
+        /// `--where` conditions. A daemon without the `where` feature ignores them, so clients check
+        /// [`DaemonStatusInfo::features`] first.
+        #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
+        filters: Vec<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         caller_env: HashMap<String, String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -177,6 +184,35 @@ pub struct DaemonStatusInfo {
     /// The last run of `[secrets] command`; `None` when none is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets_command: Option<SecretsCommandStatus>,
+    /// The daemon's `utcp` version; empty from daemons before 0.2.4.
+    #[serde(default)]
+    pub version: String,
+    /// Request fields this daemon honors beyond the ones every daemon knows ([`DAEMON_FEATURES`]).
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+/// What this build's daemon honors that older daemons silently ignore: `where` (`--where`) and
+/// `search_staged` (`search --staged`).
+pub const DAEMON_FEATURES: &[&str] = &["where", "search_staged"];
+
+/// Refuses when the running daemon is too old to honor `feature`; it would answer as if the
+/// request lacked it. Ok when no daemon runs (the call then goes direct).
+pub fn require_daemon_feature(paths: &UtcpPaths, feature: &str, flag: &str) -> Result<()> {
+    match query_daemon_status_checked(paths)? {
+        Some(info) if !info.features.iter().any(|f| f == feature) => Err(anyhow!(
+            "The running utcp daemon ({}) is older than this utcp ({}) and does not know {flag}, so \
+             nothing was called. Call with `utcp --direct` meanwhile; the daemon runs this version \
+             once restarted (`utcp daemon restart`; an agent asks the user first).",
+            if info.version.is_empty() {
+                "0.2.3 or older".to_string()
+            } else {
+                info.version
+            },
+            env!("CARGO_PKG_VERSION")
+        )),
+        _ => Ok(()),
+    }
 }
 
 struct InMemoryCatalog {
@@ -300,9 +336,10 @@ fn load_in_memory_catalog(
     previous_secrets: &DaemonSecrets,
 ) -> Result<InMemoryCatalog> {
     let index = load_or_build_index_sync(paths)?;
+    let registry = crate::catalog::UtcpRegistryConfig::load(paths)?;
     let mut manuals = HashMap::with_capacity(index.manuals.len());
     for m in &index.manuals {
-        if let Ok(loaded) = load_single_cached_manual(paths, &m.name) {
+        if let Ok(loaded) = crate::catalog::load_registered_manual(paths, &registry, &m.name) {
             manuals.insert(m.name.clone(), loaded);
         }
     }
@@ -659,6 +696,8 @@ impl DaemonServerState {
                         credentials,
                         media_spool: inspect_media_spool(&self.paths),
                         secrets_command: guard.secrets.status.clone(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        features: DAEMON_FEATURES.iter().map(|f| f.to_string()).collect(),
                     })),
                 }
             }
@@ -716,10 +755,20 @@ impl DaemonServerState {
                 query,
                 limit,
                 include_schemas,
+                staged,
             } => {
                 let results = {
                     let guard = self.catalog.read().await;
-                    guard.index.search(&query, limit, include_schemas)
+                    if staged {
+                        guard.index.search_with_staged(
+                            &guard.staged_index,
+                            &query,
+                            limit,
+                            include_schemas,
+                        )
+                    } else {
+                        guard.index.search(&query, limit, include_schemas)
+                    }
                 };
                 self.record_activity(
                     ActivityEntry {
@@ -788,6 +837,7 @@ impl DaemonServerState {
                 args,
                 dry_run,
                 fields,
+                filters,
                 caller_env,
                 staged,
             } => {
@@ -819,7 +869,16 @@ impl DaemonServerState {
                 let outcome = match resolved {
                     Ok((manual, mname, tname, env_map)) => {
                         if dry_run {
-                            dry_run_tool_from_manual(&manual, &mname, &tname, &args, &env_map)
+                            dry_run_tool_from_manual(&manual, &mname, &tname, &args, &env_map).map(
+                                |(request, note)| {
+                                    AnswerShape {
+                                        filters: &filters,
+                                        fields: fields.as_deref(),
+                                        note: note.as_deref(),
+                                    }
+                                    .for_dry_run(request)
+                                },
+                            )
                         } else {
                             let files: &dyn CallerFiles = match &conn {
                                 Some(c) => c.as_ref(),
@@ -837,11 +896,15 @@ impl DaemonServerState {
                             )
                             .await
                             {
-                                Ok(output) => {
+                                Ok((output, note)) => {
                                     deliver(
                                         output,
                                         &tname,
-                                        fields.as_deref(),
+                                        AnswerShape {
+                                            filters: &filters,
+                                            fields: fields.as_deref(),
+                                            note: note.as_deref(),
+                                        },
                                         conn.as_deref(),
                                         None,
                                     )
@@ -934,6 +997,7 @@ impl DaemonServerState {
                             async move {
                                 let item_start = Instant::now();
                                 let item_fields = item.fields.clone();
+                                let item_filters = item.filters.clone();
                                 let res = async {
                                     let (mname, tname) =
                                         resolve_manual_and_tool(&item.tool, Some(index), paths)?;
@@ -944,7 +1008,7 @@ impl DaemonServerState {
                                         Some(c) => c.as_ref(),
                                         None => &NoFiles,
                                     };
-                                    let output = execute_loaded_tool(
+                                    let (output, note) = execute_loaded_tool(
                                         manual, &mname, &tname, item.args, env_map, &protocols,
                                         paths, files,
                                     )
@@ -952,7 +1016,11 @@ impl DaemonServerState {
                                     deliver(
                                         output,
                                         &tname,
-                                        item_fields.as_deref(),
+                                        AnswerShape {
+                                            filters: &item_filters,
+                                            fields: item_fields.as_deref(),
+                                            note: note.as_deref(),
+                                        },
                                         conn.as_deref(),
                                         Some(idx),
                                     )
@@ -1181,24 +1249,28 @@ fn server_info(
     }
 }
 
-/// A call's output as the daemon answers it: JSON with `fields` applied, or a file (or a JSON answer
-/// too large to print) streamed to the caller, who saves it. A page of a longer list keeps its
-/// next-page arguments beside the answer.
+/// A call's output as the daemon answers it: JSON shaped by `--where` and `--fields`, or a file (or a
+/// JSON answer too large to print) streamed to the caller, who saves it. A page of a longer list
+/// keeps its next-page arguments beside the answer.
 async fn deliver(
     output: CallOutput,
     tool: &str,
-    fields: Option<&[String]>,
+    shape: AnswerShape<'_>,
     conn: Option<&ConnFiles>,
     item: Option<usize>,
 ) -> Result<Value> {
     match output {
-        CallOutput::Json(value) => deliver_json(value, tool, fields, conn, item).await,
+        CallOutput::Json(value) => deliver_json(value, None, tool, shape, conn, item).await,
         CallOutput::Page { value, next_page } => {
-            let result = deliver_json(value, tool, fields, conn, item).await?;
-            Ok(crate::transfer::page_value(result, next_page))
+            deliver_json(value, Some(next_page), tool, shape, conn, item).await
         }
         CallOutput::File(file) => match conn {
-            Some(conn) => conn.pump(file, item).await,
+            Some(conn) => Ok(crate::transfer::ShapedAnswer {
+                result: conn.pump(file, item).await?,
+                next_page: None,
+                note: shape.file_note(),
+            }
+            .into_value()),
             None => Err(anyhow!(
                 "{tool} answered with a file, which only `utcp call` and `utcp batch` can save"
             )),
@@ -1206,24 +1278,31 @@ async fn deliver(
     }
 }
 
+/// A JSON answer shaped and sent: inline, or streamed when too large to print. Its next-page
+/// arguments and any `--where` note travel beside it.
 async fn deliver_json(
     value: Value,
+    next_page: Option<Value>,
     tool: &str,
-    fields: Option<&[String]>,
+    shape: AnswerShape<'_>,
     conn: Option<&ConnFiles>,
     item: Option<usize>,
 ) -> Result<Value> {
-    let value = match fields {
-        Some(f) if !f.is_empty() => project_json_fields(value, f),
-        _ => value,
-    };
-    match (conn, oversized_json(&value)) {
+    let (value, note) = shape.apply(value);
+    let result = match (conn, oversized_json(&value)) {
         (Some(conn), Some(bytes)) => {
             let meta = json_file_meta(FileKind::LargeAnswer, tool, bytes.len());
-            conn.pump(FileDownload::from_bytes(meta, bytes), item).await
+            conn.pump(FileDownload::from_bytes(meta, bytes), item)
+                .await?
         }
-        _ => Ok(value),
+        _ => value,
+    };
+    Ok(crate::transfer::ShapedAnswer {
+        result,
+        next_page,
+        note,
     }
+    .into_value())
 }
 
 async fn handle_async_stream<S>(stream: S, state: Arc<DaemonServerState>) -> Result<()>
