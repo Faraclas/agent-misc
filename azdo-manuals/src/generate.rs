@@ -185,6 +185,22 @@ fn scope_note(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether leaving out path parameter `name` keeps the route it belongs to. It does when the parameter is the end of the
+/// path, or a scope before the API root (`{project}/_apis/...`, `{project}/_packaging/...`). With a fixed segment after
+/// it (`changesets/{id}/changes`), the server would read that segment as the parameter, so it stays required.
+pub(crate) fn can_leave_out(path: &str, name: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    let Some(at) = segments.iter().position(|s| {
+        s.strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .is_some_and(|s| s.eq_ignore_ascii_case(name))
+    }) else {
+        return true;
+    };
+    let after = &segments[at + 1..];
+    after.iter().any(|s| s.starts_with('_')) || after.iter().all(|s| s.starts_with('{'))
+}
+
 fn param_schema(p: &Value) -> Value {
     let mut schema = Map::new();
     let mut ptype = p.get("type").cloned().unwrap_or_else(|| json!("string"));
@@ -588,9 +604,11 @@ fn build_tool(
                     n = real.to_string();
                 }
                 // A create has no version to match yet, so If-Match is never required. An optional path parameter
-                // (`x-ms-required: false`) is not required: utcp leaves its segment out when it is not passed.
-                let optional_path =
-                    w == "path" && p.get("x-ms-required") == Some(&Value::Bool(false));
+                // (`x-ms-required: false`) is not required: utcp leaves its segment out when it is not passed, unless
+                // that would make the URL another route.
+                let optional_path = w == "path"
+                    && p.get("x-ms-required") == Some(&Value::Bool(false))
+                    && can_leave_out(o.path, &n);
                 let mut schema = param_schema(p);
                 if let (true, Some(note)) = (optional_path, scope_note(&n)) {
                     let desc = str_of(&schema, "description");

@@ -20,8 +20,8 @@ use crate::archive::{self, Archive};
 use crate::cli::{help, help_alias, next_steps, permission_lines, scopes_markdown, which};
 use crate::config::{list_map, manual, nested, Config};
 use crate::generate::{
-    api_version_of, assign_names, base_name, covering_scopes, generate, minimal_scopes,
-    placeholders_named_as_inputs, Entry, Specs,
+    api_version_of, assign_names, base_name, can_leave_out, covering_scopes, generate,
+    minimal_scopes, placeholders_named_as_inputs, Entry, Specs,
 };
 use crate::http::{Request, Response, Transport};
 use crate::readtest::{self, ReadTest};
@@ -1459,6 +1459,39 @@ fn fill_chains_ids() {
     assert_eq!(Value::Object(args), json!({"kind": "round", "$top": 5}));
 }
 
+/// A path parameter with a list of values takes one of them, not an id from the URL chain (a classification node's
+/// `structureGroup` is `areas` or `iterations`; read-test used to pass the node's numeric id).
+#[test]
+fn fill_takes_a_listed_value_for_an_enum_parameter() {
+    let tool = json!({
+        "name": "get_node",
+        "inputs": {"type": "object", "required": ["project", "structureGroup"], "properties": {
+            "project": {"type": "string"},
+            "structureGroup": {"type": "string", "enum": ["areas", "iterations"]}}},
+        "tool_call_template": {"call_template_type": "http", "http_method": "GET",
+            "url": "https://h/o/{project}/_apis/wit/nodes/{structureGroup}?api-version=7.1"}
+    });
+    let mut seeds = Map::new();
+    seeds.insert("project".into(), json!("P"));
+    let mut test = ReadTest::new(
+        Utcp::shared(PathBuf::from("utcp")),
+        IndexMap::new(),
+        BTreeSet::new(),
+        seeds,
+    );
+    let list = readtest::normalize("https://h/o/{project}/_apis/wit/nodes");
+    test.items.insert(list.clone(), json!({"id": 243}));
+    let args = test.fill(&tool).unwrap();
+    assert_eq!(
+        Value::Object(args),
+        json!({"project": "P", "structureGroup": "areas"})
+    );
+    test.items
+        .insert(list, json!({"structureGroup": "Iterations"}));
+    let args = test.fill(&tool).unwrap();
+    assert_eq!(args["structureGroup"], json!("Iterations"));
+}
+
 // utcp load test
 
 fn find_utcp() -> Option<PathBuf> {
@@ -1637,4 +1670,27 @@ fn url_placeholders_take_the_inputs_spelling() {
         placeholders_named_as_inputs("https://h/{other}", &props),
         "https://h/{other}"
     );
+}
+
+/// An optional path parameter is left out only where that keeps the route: at the end, or as a scope before the API
+/// root. Before a fixed segment, the server would read that segment as the parameter.
+#[test]
+fn optional_path_parameters_are_left_out_only_where_the_route_stays() {
+    let p = "/{organization}/{project}/{team}/_apis/wit/wiql/{id}";
+    assert!(can_leave_out(p, "project"));
+    assert!(can_leave_out(p, "team"));
+    assert!(can_leave_out(p, "id"));
+    assert!(can_leave_out(
+        "/{organization}/{project}/_packaging/{feedId}/upack/packages/{packageName}/versions",
+        "project"
+    ));
+    assert!(can_leave_out("/{organization}/_apis/x/{a}/{b}", "a"));
+    assert!(!can_leave_out(
+        "/{organization}/_apis/tfvc/changesets/{id}/changes",
+        "id"
+    ));
+    assert!(!can_leave_out(
+        "/{organization}/_apis/tfvc/changesets/{Id}/workItems",
+        "id"
+    ));
 }

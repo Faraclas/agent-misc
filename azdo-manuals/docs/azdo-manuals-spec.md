@@ -1,6 +1,6 @@
 # azdo-manuals specification
 
-- **Version:** describes `azdo-manuals` 7.1.3 (REST API 7.1). Keep it in step with the code (see
+- **Version:** describes `azdo-manuals` 7.1.4 (REST API 7.1). Keep it in step with the code (see
   [`AGENTS.md`](../AGENTS.md), "Lockstep docs").
 - **Audience:** maintainers and agents changing the generator. Users start with the [README](../README.md) and the
   [operating guide](./operating.md).
@@ -266,7 +266,9 @@ tool per entity set, in the manual `azdo_analytics`:
 
 - Path parameters are required, except those marked `x-ms-required: false` (since 7.1.3): utcp 0.2.4 leaves the
   segment of one that is not passed out of the URL (`…/timeline/{timelineId}` -> `…/timeline`, the build's own
-  timeline). Before 7.1.3 they were required, and `team` in `wit` was dropped from the URL. An optional `project`
+  timeline). Before 7.1.3 they were required, and `team` in `wit` was dropped from the URL. Since 7.1.4 one stays
+  required when a fixed segment follows it before the API root (`changesets/{id}/changes`: without `id` the server
+  reads `changes` as the id); one at the end, or before `_apis` or `_packaging`, stays optional. An optional `project`
   or `team` gets what leaving it out means added to its description: the whole organization, or the project's
   default team (`scope_note`). Query and header parameters are required when the spec says so or
   `required_params` lists them.
@@ -444,7 +446,9 @@ has `tool`, `status` (`ok`, `mismatch`, `http NNN`, `error`, `not run`), `args`,
   2. the URL chain: the first item of the answer of the GET whose URL template is the part before this parameter
      (`.../pullrequests` for `.../pullrequests/{pullRequestId}`). `first_item` takes the first element of `value`,
      `items`, `results` or `comments`, else the object itself;
-  3. a general `SOURCES` rule (`param`).
+  3. a general `SOURCES` rule (`param`);
+  4. for a parameter with an `enum`, its first value. A URL-chain value counts only if it is one of the listed values
+     (case-insensitive), so `structureGroup` gets `areas`, not an id (since 7.1.4).
 - **`value_for`** picks the value from that item: the key with the parameter's own name; then, for a parameter ending
   in `refname`, `referenceName`; for one starting with `process`, `typeId`; then `id`, `name`, `descriptor`, `key`,
   `objectId`, `originId`. Keys compare case-insensitively; only non-empty strings, integers and booleans count.

@@ -411,9 +411,17 @@ impl ReadTest {
             })
             .unwrap_or_default();
         let template = template_of(tool);
+        let props = properties(tool);
         for m in PLACEHOLDER.captures_iter(&template) {
             let param = &m[1];
             let start = m.get(0).expect("group 0").start();
+            // A parameter with a list of values (`structureGroup`: areas, iterations) takes one of them, not an id
+            // found along the URL chain.
+            let allowed: Vec<&str> = props
+                .get(param)
+                .and_then(|s| s["enum"].as_array())
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
             // Seeds and this tool's own rule first, then the URL chain, then general rules.
             let mut value = self.source(name, param, false)?;
             if value.is_none() {
@@ -422,10 +430,17 @@ impl ReadTest {
                         .trim_end_matches('$')
                         .trim_end_matches('/'),
                 );
-                value = value_for(param, self.items.get(&prefix));
+                value = value_for(param, self.items.get(&prefix)).filter(|v| {
+                    allowed.is_empty()
+                        || v.as_str()
+                            .is_some_and(|s| allowed.iter().any(|a| a.eq_ignore_ascii_case(s)))
+                });
             }
             if value.is_none() {
                 value = self.source(name, param, true)?;
+            }
+            if value.is_none() {
+                value = allowed.first().map(|a| json!(a));
             }
             let Some(value) = value else {
                 // An optional path parameter is left out: utcp leaves its segment out (the default timeline, team...).
@@ -459,7 +474,6 @@ impl ReadTest {
             }
         }
         // Tool-specific sources also fill optional parameters (some tools need one of several).
-        let props = properties(tool);
         for (key, value) in SOURCES.iter() {
             let Some((tool_name, param)) = key.split_once('.') else {
                 continue;
