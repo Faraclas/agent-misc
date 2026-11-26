@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "get_content",
-      "description": "Get repository content. Gets the contents of a file.",
+      "description": "Get repository content. Gets the contents of a file. For a file's content as it is, instead of base64, use github_repos.get_raw_content.",
       "tags": [
         "github",
         "repos",
@@ -60,8 +60,60 @@
       }
     },
     {
+      "name": "get_raw_content",
+      "description": "Get a file's raw content. Prints a text file as it is, instead of base64 inside JSON as github_repos.get_content does; a JSON file prints as JSON, and a binary file is saved. GitHub sends no file name, so give one with --out (for example --out logo.png); otherwise the file is saved as get_raw_content.json whatever it holds. For a directory, prints its entries as github_repos.get_content does. Files up to 100 MB.",
+      "tags": [
+        "github",
+        "repos",
+        "contents"
+      ],
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "The account owner of the repository."
+          },
+          "repo": {
+            "type": "string",
+            "description": "The name of the repository."
+          },
+          "path": {
+            "type": "string",
+            "description": "The path of a file or directory in the repository, such as docs/README.md. Leave it out for the repository root."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The name of the commit/branch/tag."
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ]
+      },
+      "outputs": {
+        "description": "The file's content: text, JSON for a JSON file, or for a binary file utcp's file reference {\"type\": \"file\", \"path\", \"mime_type\", \"bytes\", \"filename\"}, whose mime_type is GitHub's application/vnd.github.raw+json, not the file's type. For a directory, the list of its entries."
+      },
+      "tool_call_template": {
+        "call_template_type": "http",
+        "http_method": "GET",
+        "url": "https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        "headers": {
+          "Accept": "application/vnd.github.raw+json",
+          "X-GitHub-Api-Version": "2026-03-10"
+        },
+        "auth": {
+          "auth_type": "api_key",
+          "var_name": "Authorization",
+          "api_key": "Bearer ${GITHUB_MANUALS_PAT}",
+          "location": "header"
+        }
+      }
+    },
+    {
       "name": "get_repo",
-      "description": "Get a repository.",
+      "description": "Get a repository. To read a file, use github_repos.get_content.",
       "tags": [
         "github",
         "repos"
@@ -123,13 +175,16 @@
             "description": "The name of the repository."
           },
           "release_id": {
-            "type": "integer"
+            "type": "integer",
+            "description": "The unique identifier of the release."
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "The asset's file name, such as app-linux.tar.gz."
           },
           "label": {
-            "type": "string"
+            "type": "string",
+            "description": "An alternate short description of the asset. Used in place of the filename."
           },
           "body": {
             "type": "object",
@@ -153,8 +208,7 @@
         ]
       },
       "outputs": {
-        "type": "object",
-        "description": "Response for successful upload"
+        "type": "object"
       },
       "tool_call_template": {
         "call_template_type": "http",

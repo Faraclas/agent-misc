@@ -11,12 +11,12 @@
     "github_repos": {
       "title": "GitHub repositories",
       "hint": "GitHub repos, files, branches, commits, git, releases",
-      "tools": 3,
-      "reads": 2,
+      "tools": 4,
+      "reads": 3,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 3075,
-      "approx_tokens": 768
+      "bytes": 4976,
+      "approx_tokens": 1244
     },
     "github_issues_pulls": {
       "title": "GitHub issues and pull requests",
@@ -25,8 +25,8 @@
       "reads": 2,
       "writes": 5,
       "untested_writes": 4,
-      "bytes": 7358,
-      "approx_tokens": 1839
+      "bytes": 7895,
+      "approx_tokens": 1973
     },
     "github_actions": {
       "title": "GitHub Actions, checks, deployments, packages and Pages",
@@ -35,8 +35,8 @@
       "reads": 1,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2158,
-      "approx_tokens": 539
+      "bytes": 2318,
+      "approx_tokens": 579
     },
     "github_security": {
       "title": "GitHub security",
@@ -45,8 +45,8 @@
       "reads": 2,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2753,
-      "approx_tokens": 688
+      "bytes": 3639,
+      "approx_tokens": 909
     },
     "github_copilot": {
       "title": "GitHub Copilot",
@@ -55,8 +55,8 @@
       "reads": 1,
       "writes": 0,
       "untested_writes": 0,
-      "bytes": 1138,
-      "approx_tokens": 284
+      "bytes": 1098,
+      "approx_tokens": 274
     },
     "github_search": {
       "title": "GitHub search",
@@ -65,8 +65,8 @@
       "reads": 1,
       "writes": 0,
       "untested_writes": 0,
-      "bytes": 820,
-      "approx_tokens": 205
+      "bytes": 1056,
+      "approx_tokens": 264
     },
     "github_users": {
       "title": "GitHub users, activity and account",
@@ -75,8 +75,8 @@
       "reads": 3,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2477,
-      "approx_tokens": 619
+      "bytes": 2548,
+      "approx_tokens": 637
     }
   },
   "left_out_summary": [
@@ -125,147 +125,176 @@
       "name": "get_content",
       "operation_id": "repos/get-content",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/contents/{path}"
+      "path": "/repos/{owner}/{repo}/contents/{path}",
+      "accept": "application/vnd.github+json"
+    },
+    {
+      "manual": "github_repos",
+      "name": "get_raw_content",
+      "operation_id": "repos/get-content",
+      "method": "GET",
+      "path": "/repos/{owner}/{repo}/contents/{path}",
+      "accept": "application/vnd.github.raw+json"
     },
     {
       "manual": "github_repos",
       "name": "get_repo",
       "operation_id": "repos/get",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}"
+      "path": "/repos/{owner}/{repo}",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_repos",
       "name": "upload_release_asset",
       "operation_id": "repos/upload-release-asset",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/releases/{release_id}/assets"
+      "path": "/repos/{owner}/{repo}/releases/{release_id}/assets",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "add_issue_labels",
       "operation_id": "issues/add-labels",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/issues/{issue_number}/labels"
+      "path": "/repos/{owner}/{repo}/issues/{issue_number}/labels",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "create_issue",
       "operation_id": "issues/create",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/issues"
+      "path": "/repos/{owner}/{repo}/issues",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "create_issue_comment",
       "operation_id": "issues/create-comment",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments"
+      "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "delete_issue_comment",
       "operation_id": "issues/delete-comment",
       "method": "DELETE",
-      "path": "/repos/{owner}/{repo}/issues/comments/{comment_id}"
+      "path": "/repos/{owner}/{repo}/issues/comments/{comment_id}",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "list_issue_assignees",
       "operation_id": "issues/list-assignees",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees"
+      "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "list_reactions_for_issue",
       "operation_id": "reactions/list-for-issue",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/issues/{issue_number}/reactions"
+      "path": "/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_issues_pulls",
       "name": "remove_issue_assignees",
       "operation_id": "issues/remove-assignees",
       "method": "DELETE",
-      "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees"
+      "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_actions",
       "name": "create_check_run",
       "operation_id": "checks/create",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/check-runs"
+      "path": "/repos/{owner}/{repo}/check-runs",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_actions",
       "name": "download_job_logs_for_workflow_run",
       "operation_id": "actions/download-job-logs-for-workflow-run",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+      "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_security",
       "name": "create_attestation",
       "operation_id": "repos/create-attestation",
       "method": "POST",
-      "path": "/repos/{owner}/{repo}/attestations"
+      "path": "/repos/{owner}/{repo}/attestations",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_security",
       "name": "get_code_scanning_alert",
       "operation_id": "code-scanning/get-alert",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}"
+      "path": "/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_security",
       "name": "get_dependabot_alert",
       "operation_id": "dependabot/get-alert",
       "method": "GET",
-      "path": "/repos/{owner}/{repo}/dependabot/alerts/{alert_number}"
+      "path": "/repos/{owner}/{repo}/dependabot/alerts/{alert_number}",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_copilot",
       "name": "list_agent_tasks_for_repo",
       "operation_id": "agent-tasks/list-tasks-for-repo",
       "method": "GET",
-      "path": "/agents/repos/{owner}/{repo}/tasks"
+      "path": "/agents/repos/{owner}/{repo}/tasks",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_search",
       "name": "search_code",
       "operation_id": "search/code",
       "method": "GET",
-      "path": "/search/code"
+      "path": "/search/code",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_users",
       "name": "get_authenticated_user",
       "operation_id": "users/get-authenticated",
       "method": "GET",
-      "path": "/user"
+      "path": "/user",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_users",
       "name": "get_org",
       "operation_id": "orgs/get",
       "method": "GET",
-      "path": "/orgs/{org}"
+      "path": "/orgs/{org}",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_users",
       "name": "get_zen",
       "operation_id": "meta/get-zen",
       "method": "GET",
-      "path": "/zen"
+      "path": "/zen",
+      "accept": "application/vnd.github+json"
     },
     {
       "manual": "github_users",
       "name": "render_markdown_raw",
       "operation_id": "markdown/render-raw",
       "method": "POST",
-      "path": "/markdown/raw"
+      "path": "/markdown/raw",
+      "accept": "application/vnd.github+json"
     }
   ]
 }

@@ -28,13 +28,15 @@
             "description": "The name of the repository."
           },
           "dry": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Check the bundle without storing it."
           },
           "body": {
             "type": "object",
             "properties": {
               "bundle": {
-                "type": "object"
+                "type": "object",
+                "description": "The attestation's Sigstore Bundle."
               }
             },
             "required": [
@@ -71,7 +73,7 @@
     },
     {
       "name": "get_code_scanning_alert",
-      "description": "Get a code scanning alert.",
+      "description": "Get a code scanning alert. The alert has a state. To get the Dependabot alert, see github_security.get_dependabot_alert.",
       "tags": [
         "github",
         "code-scanning"
@@ -88,7 +90,8 @@
             "description": "The name of the repository."
           },
           "alert_number": {
-            "type": "integer"
+            "type": "integer",
+            "description": "The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the number field in the response from the GET /repos/{owner}/{repo}/code-scanning/alerts operation."
           }
         },
         "required": [
@@ -118,7 +121,7 @@
     },
     {
       "name": "get_dependabot_alert",
-      "description": "Get a Dependabot alert.",
+      "description": "Get a Dependabot alert. Use the ref refs/heads/<branch name> for a branch, and put templates in the ISSUE_TEMPLATE folder. Branch names match \\A[a-z]+. To get the code scanning alert, use github_security.get_code_scanning_alert.",
       "tags": [
         "github",
         "dependabot",
@@ -136,7 +139,8 @@
             "description": "The name of the repository."
           },
           "alert_number": {
-            "type": "integer"
+            "type": "integer",
+            "description": "The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the number field in the response from the GET /repos/{owner}/{repo}/code-scanning/alerts operation."
           }
         },
         "required": [

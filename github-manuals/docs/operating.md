@@ -56,8 +56,14 @@ that the token lacks something:
   and still have `next_page`; `total_count` stays GitHub's count of the unfiltered list. When nothing matches, utcp
   prints a note with the values the field has: check the value before concluding there are none.
 - **Files:** log, archive and artifact downloads (`download_job_logs_for_workflow_run`, `download_zipball_archive`,
-  `download_artifact`, ...) save a file and print its path. `upload_release_asset` takes the file as
-  `"body": {"file": "<path>"}` and the asset name as `name`.
+  `download_artifact`, `download_release_asset`, `download_codeql_database`, ...) save a file and print its path; the
+  archives without `ref` are of the default branch. `get_content` gives a file base64-encoded inside JSON;
+  `get_raw_content` prints a text or JSON file as it is and saves a binary one; give a binary file its name with
+  `--out logo.png`, because GitHub sends none and utcp would save it as `get_raw_content.json`. `upload_release_asset`
+  takes the file as `"body": {"file": "<path>"}` and the asset name as `name`.
+- **Yes/no checks** (`check_repo_is_starred_by_authenticated_user`, `check_collaborator`,
+  `check_pull_request_merged`, ...): GitHub answers yes with no content, which utcp prints as `null`, and no with
+  404, which utcp reports as a failed call. A 404 there is the answer, not a mistake.
 - **Paths with slashes:** `path` (file contents) and `ref` (`heads/main`) may contain `/`; utcp encodes it as `%2F`,
   which GitHub accepts.
 - **Request bodies:** body fields are ordinary arguments. A few operations take their body whole as `body`
@@ -70,8 +76,7 @@ that the token lacks something:
 
 After installing a new github-manuals: `github-manuals generate --stage`, then `utcp diff 'github_*'` (renamed or
 removed tools are listed there and in the release notes), try a few tools, and `utcp promote 'github_*'`. A new
-release may pin a newer commit of the
-description; the first run downloads it once.
+release may pin a newer commit of the description; the first run downloads it once.
 
 ## Troubleshooting
 

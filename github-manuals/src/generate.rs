@@ -5,32 +5,52 @@
 //! the path parameters, as in GitHub's documentation (`create_issue` takes `owner`, `repo`, `title`, `body`). A body
 //! that is not an object, or that comes with query parameters, is passed whole as the argument `body` instead.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 
 use indexmap::IndexMap;
+use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use crate::config::{Config, PAT_VAR};
+use crate::config::{Config, Variant, PAT_VAR};
+use crate::links;
 use crate::names;
-use crate::text::{one_line, plain, tidy, truthy};
+use crate::text::{
+    end_sentence, fit, named_tools, normalize, one_line, plain, restates, sentences,
+    tidy_sentences, truthy, Sentence,
+};
 
 /// Starts the description of a write that has not yet worked in a live test against a throwaway repository.
 pub const UNTESTED: &str = "(untested)";
-/// Starts the description of every DELETE.
+/// Follows the summary of a DELETE that deletes something ("Delete a release"); see [`delete_note`].
 pub const DELETE_NOTE: &str = "Delete only what the user asked for or what you created.";
+/// Ends the description of every search: GitHub's limit, which next_page does not show.
+pub const SEARCH_NOTE: &str =
+    "A search finds at most 1,000 results in all, over all pages; narrow the query to \
+                               reach others.";
 /// The output of a tool that answers with a file.
 pub const FILE_ANSWER: &str = "A file. utcp saves it (to the Downloads folder, or the path given with --out) and \
                                prints {\"type\": \"file\", \"path\", \"mime_type\", \"bytes\", \"filename\"}.";
+/// Ends the output description of a tool that has a successful answer with no content next to one with content.
+pub const NULL_TOO: &str = "Can also be null (an answer with no content).";
+/// The output of a write whose successful answer has no content.
+pub const NO_CONTENT: &str = "No content: the call answers null when it worked.";
+/// Ends the description of a yes/no check: a GET whose successful answer has no content ("Check if a user is
+/// blocked"). GitHub answers no with 404, which utcp reports as a failed call.
+pub const YES_NO: &str = "The answer is null if so; if not, the call fails with 404 Not Found.";
+/// The output of a yes/no check; see [`YES_NO`].
+pub const YES_NO_ANSWER: &str = "Null means yes; no is a failed call with 404 Not Found.";
 pub const ACCEPT: &str = "application/vnd.github+json";
 const DEPRECATED: &str = "deprecated by GitHub";
 const READ_ONLY: &str = "write (--read-only)";
 /// utcp refuses a manual hint longer than this (`MAX_MANUAL_HINT_CHARS` in utcp-core).
 pub const UTCP_MAX_HINT_CHARS: usize = 60;
-const SCHEMA_DEPTH: usize = 3;
-const MAX_DESCRIPTION: usize = 800;
-const MAX_FIELD_DESCRIPTION: usize = 300;
+const SCHEMA_DEPTH: usize = 5;
+/// Longest tool and field descriptions; longer ones keep their first whole sentences (and every classic-token scope
+/// sentence).
+const MAX_DESCRIPTION: usize = 1200;
+const MAX_FIELD_DESCRIPTION: usize = 600;
 /// Where a description stops being about the operation: token-type boilerplate, and media types the fixed
 /// `Accept` header does not ask for.
 const DESCRIPTION_ENDS: [&str; 2] = [
@@ -100,7 +120,51 @@ fn deref<'a>(spec: &'a Value, mut node: &'a Value) -> Result<&'a Value> {
 }
 
 fn field_description(text: &str) -> String {
-    one_line(&tidy(&plain(text), ""), MAX_FIELD_DESCRIPTION)
+    end_sentence(&fit(
+        &tidy_sentences(&plain(text), ""),
+        MAX_FIELD_DESCRIPTION,
+    ))
+}
+
+/// When a `oneOf`/`anyOf` has no description of its own, the sentences its described branches start with move up to
+/// it: all of the only described branch's (`milestone`: a number, or a title), or those all of them share.
+fn hoist_description(out: &mut Map<String, Value>, key: &str) {
+    if out.contains_key("description") {
+        return;
+    }
+    let Some(Value::Array(branches)) = out.get_mut(key) else {
+        return;
+    };
+    let described: Vec<Vec<String>> = branches
+        .iter()
+        .filter_map(|b| b.get("description").and_then(Value::as_str))
+        .map(|d| sentences(d).into_iter().map(String::from).collect())
+        .collect();
+    let Some(first) = described.first() else {
+        return;
+    };
+    let shared = (0..first.len())
+        .take_while(|&i| described.iter().all(|d| d.get(i) == first.get(i)))
+        .count();
+    if shared == 0 {
+        return;
+    }
+    let hoisted = first[..shared].join(" ");
+    for b in branches.iter_mut() {
+        let Some(branch) = b.as_object_mut() else {
+            continue;
+        };
+        let Some(d) = branch.get("description").and_then(Value::as_str) else {
+            continue;
+        };
+        let rest = sentences(d)[shared..].join(" ");
+        if rest.is_empty() {
+            branch.remove("description");
+        } else {
+            branch.insert("description".into(), json!(rest));
+        }
+    }
+    out.insert("description".into(), json!(hoisted));
 }
 
 /// A JSON Schema for a tool's input from an OpenAPI schema: `$ref` and `allOf` inlined down to SCHEMA_DEPTH levels,
@@ -122,13 +186,17 @@ pub fn convert(
             out.insert("type".into(), t);
             let d = [
                 field_description(str_of(target, "description")),
-                field_description(str_of(target, "title")),
+                one_line(&plain(str_of(target, "title")), MAX_FIELD_DESCRIPTION),
                 name.clone(),
             ]
             .into_iter()
             .find(|d| !d.is_empty())
             .unwrap_or_default();
             out.insert("description".into(), json!(d));
+            // A map cut off here still takes keys of its own.
+            if truthy(target.get("additionalProperties")) {
+                out.insert("additionalProperties".into(), json!(true));
+            }
             return Ok(out);
         }
         let mut seen = seen.to_vec();
@@ -188,6 +256,7 @@ pub fn convert(
                 converted.push(Value::Object(convert(spec, v, depth + 1, seen)?));
             }
             out.insert(key.into(), Value::Array(converted));
+            hoist_description(&mut out, key);
         }
     }
     for (name, prop) in obj(schema.get("properties").unwrap_or(&Value::Null)) {
@@ -219,11 +288,18 @@ pub fn convert(
             );
         }
     }
-    if let Some(extra @ Value::Object(_)) = schema.get("additionalProperties") {
-        out.insert(
-            "additionalProperties".into(),
-            Value::Object(convert(spec, extra, depth + 1, seen)?),
-        );
+    match schema.get("additionalProperties") {
+        Some(extra @ Value::Object(_)) => {
+            out.insert(
+                "additionalProperties".into(),
+                Value::Object(convert(spec, extra, depth + 1, seen)?),
+            );
+        }
+        // `true` marks a free-form object (client_payload, workflow inputs), so it does not look empty.
+        Some(open @ Value::Bool(_)) => {
+            out.insert("additionalProperties".into(), open.clone());
+        }
+        _ => {}
     }
     Ok(out)
 }
@@ -351,41 +427,117 @@ fn answers_file(spec: &Value, op: &Value) -> Result<bool> {
     Ok(redirect)
 }
 
-fn outputs(spec: &Value, op: &Value) -> Result<Value> {
+/// What an answer's description says about the outcome or the status code rather than the content ("Task created
+/// successfully", "OK", "Response if merge was successful", "Response when getting a billing usage report"). utcp
+/// prints the answer, not its status code, so it says nothing an agent can use.
+static OUTCOME_ONLY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:(?:successful |status |empty )?response|ok|created|accepted)\.?$|\bsuccessfully\b|^(?:response )?(?:if|when|for)\b|\b(?:submitted|accepted) for (?:asynchronous )?processing\b",
+    )
+    .unwrap()
+});
+
+/// GitHub's description of a successful answer, for the tool's `outputs`: only what it says about the content, and
+/// nothing when the description is an [`OUTCOME_ONLY`] or restates `context` (the tool's summary and route).
+pub(crate) fn answer_description(text: &str, context: &str) -> String {
+    let text = field_description(text);
+    let text = text
+        .strip_prefix("Successful Response (")
+        .and_then(|t| t.strip_suffix(")."))
+        .map(|t| format!("{t}."))
+        .unwrap_or(text);
+    let text = match text.strip_prefix("Response including ") {
+        Some(rest) => format!("Includes {rest}"),
+        None => text,
+    };
+    if OUTCOME_ONLY.is_match(&text) || restates(context, &text) {
+        return String::new();
+    }
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
+/// When a tool that answers with content answers null instead, after GitHub's description of that answer
+/// ("Response if repository is empty" is "Null if repository is empty."), or [`NULL_TOO`] when it does not say.
+pub(crate) fn null_when(description: &str) -> String {
+    let text = field_description(description);
+    let text = text.trim_end_matches('.');
+    let text = text.strip_prefix("Response ").unwrap_or(text);
+    match text.split_once(' ') {
+        Some((word @ ("if" | "when"), rest)) if !rest.is_empty() => {
+            // "Response if repository is empty"
+            let rest = match rest.strip_prefix("repository ") {
+                Some(r) => format!("the repository {r}"),
+                None => rest.to_string(),
+            };
+            format!("Null {word} {rest}.")
+        }
+        _ => NULL_TOO.to_string(),
+    }
+}
+
+/// The type of a tool's answer and, when GitHub says something about its content, a description. Several successful
+/// answers that GitHub describes differently ("Reaction exists", "Reaction created") get none, because utcp does not
+/// show which one came. When one successful answer has content and another has none (a 204 next to a 200), the
+/// description says when the answer is null ([`null_when`]): utcp's `type` is one name, so it cannot say "object or
+/// null".
+pub(crate) fn outputs(spec: &Value, o: &Operation) -> Result<Value> {
+    let op = o.op;
     if answers_file(spec, op)? {
         return Ok(json!({"type": "object", "description": FILE_ANSWER}));
     }
-    for (_, r) in success_codes(op) {
+    let mut answers = Vec::new();
+    let mut empty = None;
+    // A redirect is followed by utcp, so it is never the answer.
+    for (_, r) in success_codes(op)
+        .into_iter()
+        .filter(|(c, _)| c.starts_with('2'))
+    {
         let r = deref(spec, r)?;
-        let Some(content) = r.get("content").and_then(Value::as_object) else {
-            continue;
-        };
-        // "Response" says nothing.
-        let description = match field_description(str_of(r, "description")) {
-            d if d == "Response" => String::new(),
-            d => d,
-        };
-        let mut out = Map::new();
-        match content.get("application/json") {
-            Some(media) => {
-                let schema = deref(spec, media.get("schema").unwrap_or(&Value::Null))?;
-                let t = match schema.get("type").and_then(Value::as_str) {
-                    Some(t) => t,
-                    None if schema.get("items").is_some() => "array",
-                    None => "object",
-                };
-                out.insert("type".into(), json!(t));
-            }
-            None => {
-                out.insert("type".into(), json!("string"));
-            }
+        match r.get("content").and_then(Value::as_object) {
+            Some(content) => answers.push((content, str_of(r, "description"))),
+            None => empty = Some(null_when(str_of(r, "description"))),
         }
-        if !description.is_empty() {
-            out.insert("description".into(), json!(description));
-        }
-        return Ok(Value::Object(out));
     }
-    Ok(json!({"type": "null", "description": "No content: the call answers null when it worked."}))
+    let Some((content, description)) = answers.first() else {
+        let description = if o.method == "GET" {
+            YES_NO_ANSWER
+        } else {
+            NO_CONTENT
+        };
+        return Ok(json!({"type": "null", "description": description}));
+    };
+    let mut out = Map::new();
+    match content.get("application/json") {
+        Some(media) => {
+            let schema = deref(spec, media.get("schema").unwrap_or(&Value::Null))?;
+            let t = match schema.get("type").and_then(Value::as_str) {
+                Some(t) => t,
+                None if schema.get("items").is_some() => "array",
+                None => "object",
+            };
+            out.insert("type".into(), json!(t));
+        }
+        None => {
+            out.insert("type".into(), json!("string"));
+        }
+    }
+    let alike = answers.iter().all(|(_, d)| d.trim() == description.trim());
+    let mut description = if alike {
+        answer_description(description, &format!("{} {}", summary(o), o.path))
+    } else {
+        String::new()
+    };
+    if let Some(null) = empty {
+        description = format!("{description} {null}").trim().to_string();
+    }
+    if !description.is_empty() {
+        out.insert("description".into(), json!(description));
+    }
+    Ok(Value::Object(out))
 }
 
 fn upload_schema() -> Value {
@@ -397,33 +549,111 @@ fn upload_schema() -> Value {
     })
 }
 
-fn tool_description(o: &Operation, untested: bool) -> String {
-    let summary = one_line(&plain(str_of(o.op, "summary")), MAX_DESCRIPTION);
+/// GitHub's summary of an operation as one line of plain text, without a final period.
+fn summary(o: &Operation) -> String {
+    one_line(&plain(str_of(o.op, "summary")), MAX_DESCRIPTION)
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// The caution for a DELETE whose summary deletes, removes or disables something. One that undoes the user's own
+/// action ("Unstar a repository", "Unlock an issue", "Mark a thread as done") gets none.
+pub(crate) fn delete_note(summary: &str) -> Option<String> {
+    match summary.split_whitespace().next()? {
+        "Delete" => Some(DELETE_NOTE.to_string()),
+        "Remove" => Some("Remove only what the user asked for or what you added.".to_string()),
+        "Disable" => Some("Disable only what the user asked for or what you enabled.".to_string()),
+        _ => None,
+    }
+}
+
+/// The summary (with `qualifier` when other tools have the same summary), then GitHub's description in whole
+/// sentences with config `sentence_fixes` applied, then config `notes`, all within MAX_DESCRIPTION characters. A
+/// `yes_no` check (a GET that answers with no content) ends with [`YES_NO`] unless its description already says when
+/// it fails with 404.
+fn tool_description(
+    o: &Operation,
+    untested: bool,
+    yes_no: bool,
+    qualifier: Option<&str>,
+    conf: &Config,
+) -> Result<String> {
+    let summary = summary(o);
     let mut detail = str_of(o.op, "description");
     for end in DESCRIPTION_ENDS {
         if let Some(i) = detail.find(end) {
             detail = &detail[..i];
         }
     }
-    let detail = one_line(&tidy(&plain(detail), &summary), MAX_DESCRIPTION);
-    let mut text = summary.trim_end_matches('.').to_string();
+    let mut detail = normalize(&plain(detail));
+    for (id, from, to) in &conf.sentence_fixes {
+        if id != o.op_id {
+            continue;
+        }
+        if !detail.contains(from.as_str()) {
+            return err(format!(
+                "{id}: config sentence_fixes text \"{from}\" is not in GitHub's description, which now reads:\n{detail}"
+            ));
+        }
+        detail = detail.replace(from.as_str(), to);
+    }
+    let mut text = match qualifier {
+        Some(q) => format!("{summary} {q}"),
+        None => summary.clone(),
+    };
     if !text.is_empty() && !text.ends_with(['?', '!']) {
         text.push('.');
     }
     // After the summary, so the first sentence (all that `utcp search` shows) still says what is deleted.
     if o.method == "DELETE" {
-        text = format!("{text} {DELETE_NOTE}");
-    }
-    if !detail.is_empty() {
-        text = format!("{text} {detail}");
+        if let Some(note) = delete_note(&summary) {
+            text = format!("{text} {note}");
+        }
     }
     if untested {
         text = format!("{UNTESTED} {text}");
     }
-    one_line(&text, MAX_DESCRIPTION + 80)
+    let budget = MAX_DESCRIPTION.saturating_sub(text.chars().count() + 1);
+    // "Lists webhooks for a repository." after "List repository webhooks" says only what the route does.
+    let route = o
+        .path
+        .replace("/repos/", "/repository/")
+        .replace("/orgs/", "/organization/");
+    let mut sentences = tidy_sentences(&detail, &format!("{summary} {route}"));
+    if let Some(note) = conf.notes.get(o.op_id) {
+        sentences.push(Sentence {
+            text: note.clone(),
+            essential: true,
+        });
+    }
+    if o.path.starts_with("/search/") {
+        sentences.push(Sentence {
+            text: SEARCH_NOTE.to_string(),
+            essential: true,
+        });
+    }
+    if yes_no && !sentences.iter().any(|s| s.text.contains("404")) {
+        sentences.push(Sentence {
+            text: YES_NO.to_string(),
+            essential: true,
+        });
+    }
+    let detail = end_sentence(&fit(&sentences, budget));
+    Ok(if detail.is_empty() {
+        text
+    } else {
+        format!("{text} {detail}")
+    })
 }
 
-pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config) -> Result<Entry> {
+/// One tool. `qualifier` ("for Dependabot") follows the summary when other tools have the same one.
+pub fn build_tool(
+    spec: &Value,
+    o: &Operation,
+    api_version: &str,
+    conf: &Config,
+    qualifier: Option<&str>,
+) -> Result<Entry> {
     let op_id = o.op_id;
     if op_id.is_empty() {
         return err(format!("{} {}: no operationId", o.method, o.path));
@@ -442,7 +672,7 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
         let place = str_of(p, "in");
         let mut schema = convert(spec, p.get("schema").unwrap_or(&json!({})), 0, &[])?;
         let mut description = field_description(str_of(p, "description"));
-        if place == "path" && description == format!("{name} parameter") {
+        if place == "path" && description.trim_end_matches('.') == format!("{name} parameter") {
             description = match conf.param_descriptions.get(name) {
                 Some(d) => d.clone(),
                 None => {
@@ -453,29 +683,32 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
                 }
             };
         }
-        let optional = place == "path"
-            && conf
-                .optional_path
-                .iter()
-                .any(|(id, param)| id == op_id && param == name);
-        if optional {
-            description = format!("{description} Leave it out for the repository root.");
-        }
+        let optional = conf
+            .optional_path
+            .iter()
+            .find(|(id, param, _)| place == "path" && id == op_id && param == name);
         if place == "query" && schema.get("type") == Some(&json!("array")) {
-            // utcp sends an array as one JSON string; GitHub reads repeated parameters. One value always works.
+            // GitHub reads a list as repeated parameters, utcp sends it comma-separated; one value works either way,
+            // so GitHub's "Accepts one or more ..." goes.
             let items = schema
                 .get("items")
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
             schema = items;
-            description = format!("{description} (one value)").trim().to_string();
+            let kept: Vec<&str> = sentences(&description)
+                .into_iter()
+                .filter(|s| !s.contains("one or more"))
+                .collect();
+            description = format!("{} Takes one value.", kept.join(" "))
+                .trim()
+                .to_string();
         }
         if !description.is_empty() {
             schema.insert("description".into(), json!(description));
         }
         match place {
-            "path" if optional => {}
+            "path" if optional.is_some() => {}
             "path" => required.push(name.to_string()),
             "query" => {
                 query.push(name.to_string());
@@ -601,6 +834,20 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
         template.insert("response_type".into(), json!("file"));
     }
     template.insert("auth".into(), auth());
+    describe_inputs(op_id, &mut props, conf)?;
+    for (_, name, note) in conf.optional_path.iter().filter(|(id, ..)| id == op_id) {
+        let Some(schema) = props.get_mut(name).and_then(Value::as_object_mut) else {
+            return err(format!(
+                "config optional_path names {op_id} argument '{name}', which the tool does not have"
+            ));
+        };
+        let d = schema
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let d = format!("{d} {note}");
+        schema.insert("description".into(), json!(d.trim()));
+    }
     let mut inputs = Map::new();
     inputs.insert("type".into(), json!("object"));
     inputs.insert("properties".into(), Value::Object(props));
@@ -619,12 +866,17 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
     if untested {
         tags.push(json!("untested"));
     }
+    let outputs = outputs(spec, o)?;
+    let yes_no = read && outputs.get("type") == Some(&json!("null"));
     let mut tool = Map::new();
     tool.insert("name".into(), Value::Null);
-    tool.insert("description".into(), json!(tool_description(o, untested)));
+    tool.insert(
+        "description".into(),
+        json!(tool_description(o, untested, yes_no, qualifier, conf)?),
+    );
     tool.insert("tags".into(), Value::Array(tags));
     tool.insert("inputs".into(), Value::Object(inputs));
-    tool.insert("outputs".into(), outputs(spec, o.op)?);
+    tool.insert("outputs".into(), outputs);
     tool.insert("tool_call_template".into(), Value::Object(template));
     Ok(Entry {
         op_id: op_id.to_string(),
@@ -636,6 +888,44 @@ pub fn build_tool(spec: &Value, o: &Operation, api_version: &str, conf: &Config)
     })
 }
 
+/// Every argument has a description: GitHub's, or for the ones GitHub leaves undescribed, the one in config
+/// `input_descriptions`. A config entry for an argument GitHub now describes, or that the tool does not have, is an
+/// error too, so the config cannot go stale.
+fn describe_inputs(op_id: &str, props: &mut Map<String, Value>, conf: &Config) -> Result<()> {
+    for (name, schema) in props.iter_mut() {
+        let configured = conf
+            .input_descriptions
+            .get(&(op_id.to_string(), name.clone()));
+        let Some(schema) = schema.as_object_mut() else {
+            continue;
+        };
+        match (schema.contains_key("description"), configured) {
+            (false, Some(d)) => {
+                schema.insert("description".into(), json!(d));
+            }
+            (false, None) => {
+                return err(format!(
+                    "{op_id}: argument '{name}' has no description; add one to config input_descriptions"
+                ))
+            }
+            (true, Some(_)) => {
+                return err(format!(
+                    "{op_id}: GitHub now describes argument '{name}'; remove it from config input_descriptions"
+                ))
+            }
+            (true, None) => {}
+        }
+    }
+    for (id, name) in conf.input_descriptions.keys() {
+        if id == op_id && !props.contains_key(name) {
+            return err(format!(
+                "config input_descriptions names {op_id} argument '{name}', which the tool does not have"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Every operationId the configuration names must exist, so a typo cannot silently keep an old name.
 fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
     let ids: HashSet<&str> = operations(spec).iter().map(|o| o.op_id).collect();
@@ -643,7 +933,11 @@ fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
         .names
         .keys()
         .chain(conf.tested_writes.iter())
-        .chain(conf.optional_path.iter().map(|(id, _)| id))
+        .chain(conf.optional_path.iter().map(|(id, ..)| id))
+        .chain(conf.input_descriptions.keys().map(|(id, _)| id))
+        .chain(conf.sentence_fixes.iter().map(|(id, ..)| id))
+        .chain(conf.notes.keys())
+        .chain(conf.variants.iter().map(|v| &v.op_id))
         .collect();
     named.sort();
     for op_id in named {
@@ -651,6 +945,156 @@ fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
             return err(format!(
                 "config names {op_id}, which the description does not have"
             ));
+        }
+    }
+    Ok(())
+}
+
+/// For each operation, the qualifier from config `summary_qualifiers` for its category when another kept operation
+/// has the same summary ("Get a repository secret" for Actions, Dependabot and the Copilot coding agent), so every
+/// tool's first sentence, which is all `utcp search` shows, is different.
+fn qualifiers<'a>(ops: &[Operation], conf: &'a Config) -> Result<Vec<Option<&'a str>>> {
+    let key = |o: &Operation| summary(o).to_lowercase();
+    let mut count: BTreeMap<String, usize> = BTreeMap::new();
+    for o in ops {
+        *count.entry(key(o)).or_default() += 1;
+    }
+    let mut out = Vec::new();
+    let mut qualified: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for o in ops {
+        let k = key(o);
+        if count[&k] < 2 {
+            qualified.entry(k).or_default().push(o.op_id);
+            out.push(None);
+            continue;
+        }
+        let Some(q) = conf.summary_qualifiers.get(o.category) else {
+            return err(format!(
+                "{}: other tools have the same summary \"{}\"; add category '{}' to config summary_qualifiers",
+                o.op_id,
+                summary(o),
+                o.category
+            ));
+        };
+        qualified
+            .entry(format!("{k} {q}"))
+            .or_default()
+            .push(o.op_id);
+        out.push(Some(q.as_str()));
+    }
+    for (summary, ids) in qualified {
+        if ids.len() > 1 {
+            return err(format!(
+                "{} still have the same summary \"{summary}\"; change config summary_qualifiers",
+                ids.join(", ")
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The `manual.tool` name of every operation `select` keeps.
+fn tool_names(ops: &[Operation], conf: &Config) -> Result<HashMap<String, String>> {
+    let mut per_manual: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for o in ops {
+        if o.op_id.is_empty() || select(o, conf).is_some() {
+            continue;
+        }
+        // An operation without a manual fails `generate` with its own message.
+        if let Some(manual) = conf.manual_of(o.category, o.subcategory) {
+            per_manual.entry(manual).or_default().push(o.op_id);
+        }
+    }
+    let mut out = HashMap::new();
+    for (manual, mut ids) in per_manual {
+        ids.sort();
+        let names = names::assign(manual, &ids, conf).map_err(GenerateError)?;
+        for (id, name) in ids.iter().zip(names) {
+            out.insert(id.to_string(), format!("{manual}.{name}"));
+        }
+    }
+    Ok(out)
+}
+
+/// A tool that calls the same operation as `base` with config variant `v`'s media type, name and description.
+fn variant(base: &Entry, v: &Variant) -> Entry {
+    let mut tool = base.tool.clone();
+    tool.insert("name".into(), json!(v.name));
+    tool.insert("description".into(), json!(v.description));
+    if let Some(t) = tool.get_mut("tool_call_template") {
+        t["headers"]["Accept"] = json!(v.accept);
+        if v.file {
+            t["response_type"] = json!("file");
+        }
+    }
+    let output = if v.file {
+        json!({"type": "object", "description": FILE_ANSWER})
+    } else {
+        json!({"description": v.output})
+    };
+    tool.insert("outputs".into(), output);
+    Entry {
+        name: v.name.clone(),
+        tool,
+        ..base.clone()
+    }
+}
+
+/// Every `description` string in `map` and below it with `pattern` replaced by `with`.
+fn replace_in_descriptions(map: &mut Map<String, Value>, pattern: &Regex, with: &str) {
+    for (k, v) in map.iter_mut() {
+        match v {
+            Value::String(s) if k == "description" => {
+                *s = pattern.replace_all(s, with).into_owned();
+            }
+            Value::Object(m) => replace_in_descriptions(m, pattern, with),
+            Value::Array(a) => {
+                for x in a.iter_mut() {
+                    if let Value::Object(m) = x {
+                        replace_in_descriptions(m, pattern, with);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every tool a description names (`github_repos.get_commit`) must exist, so a renamed tool cannot leave a pointer
+/// to nothing.
+fn check_named_tools(manuals: &IndexMap<String, Value>) -> Result<()> {
+    let mut all: HashSet<String> = HashSet::new();
+    for (manual, m) in manuals {
+        for t in m["tools"].as_array().into_iter().flatten() {
+            all.insert(format!("{manual}.{}", str_of(t, "name")));
+        }
+    }
+    fn walk<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+        match v {
+            Value::Object(m) => {
+                for (k, x) in m {
+                    match x {
+                        Value::String(s) if k == "description" => out.push(s),
+                        _ => walk(x, out),
+                    }
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    for (manual, m) in manuals {
+        for t in m["tools"].as_array().into_iter().flatten() {
+            let mut texts = Vec::new();
+            walk(t, &mut texts);
+            for name in texts.into_iter().flat_map(named_tools) {
+                if !all.contains(name) {
+                    return err(format!(
+                        "{manual}.{}: its description names {name}, which is not a tool",
+                        str_of(t, "name")
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -672,6 +1116,11 @@ pub fn generate(
             ));
         }
     }
+    // Tool names first, so descriptions can point to tools instead of documentation pages.
+    let ops = operations(spec);
+    let tools = tool_names(&ops, conf)?;
+    let linked = links::rewrite_spec(spec, &links::Targets::new(&ops, &tools));
+    let spec = &linked;
     let mut per_manual: IndexMap<String, Vec<Entry>> = conf
         .manuals
         .iter()
@@ -679,6 +1128,7 @@ pub fn generate(
         .collect();
     let mut left_out = Vec::new();
     let mut seen_ids = HashSet::new();
+    let mut kept = Vec::new();
     for o in operations(spec) {
         if !o.op_id.is_empty() && !seen_ids.insert(o.op_id) {
             return err(format!("operationId {} is used twice", o.op_id));
@@ -690,6 +1140,10 @@ pub fn generate(
             }));
             continue;
         }
+        kept.push(o);
+    }
+    let qualifiers = qualifiers(&kept, conf)?;
+    for (o, qualifier) in kept.iter().zip(qualifiers) {
         let Some(manual) = conf.manual_of(o.category, o.subcategory) else {
             return err(format!(
                 "{} ({} {}): category '{}' has no manual; add it to config categories, or leave it out with a rule",
@@ -702,7 +1156,20 @@ pub fn generate(
                 o.category
             ));
         };
-        list.push(build_tool(spec, &o, api_version, conf)?);
+        list.push(build_tool(spec, o, api_version, conf, qualifier)?);
+        for v in conf.variants.iter().filter(|v| v.op_id == o.op_id) {
+            let base = list.last().expect("the base tool was just added");
+            let entry = variant(base, v);
+            list.push(entry);
+        }
+    }
+    for v in &conf.variants {
+        if !kept.iter().any(|o| o.op_id == v.op_id) {
+            return err(format!(
+                "config variant {} is of {}, which is left out",
+                v.name, v.op_id
+            ));
+        }
     }
     let mut manuals = IndexMap::new();
     let mut report_manuals = Map::new();
@@ -712,14 +1179,30 @@ pub fn generate(
         if entries.is_empty() {
             continue;
         }
-        entries.sort_by(|a, b| a.op_id.cmp(&b.op_id));
-        let ids: Vec<&str> = entries.iter().map(|e| e.op_id.as_str()).collect();
-        let assigned = names::assign(&mconf.name, &ids, conf).map_err(GenerateError)?;
-        for (e, n) in entries.iter_mut().zip(assigned) {
-            e.tool.insert("name".into(), json!(n));
-            e.name = n;
+        for e in entries.iter_mut().filter(|e| e.name.is_empty()) {
+            let full = &tools[&e.op_id];
+            let name = full
+                .strip_prefix(&format!("{}.", mconf.name))
+                .unwrap_or(full);
+            e.tool.insert("name".into(), json!(name));
+            e.name = name.to_string();
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
+        // "make multiple requests to github_actions.update_check_run" on that tool itself.
+        for e in entries.iter_mut() {
+            let own = Regex::new(&format!(
+                r"\b{}\b",
+                regex::escape(&format!("{}.{}", mconf.name, e.name))
+            ))
+            .expect("an escaped name is a valid regex");
+            replace_in_descriptions(&mut e.tool, &own, "this tool");
+        }
+        if let Some(w) = entries.windows(2).find(|w| w[0].name == w[1].name) {
+            return err(format!(
+                "{}: two tools are named {} ({} and {}); change config variants or names",
+                mconf.name, w[0].name, w[0].op_id, w[1].op_id
+            ));
+        }
         let commit: String = str_of(source, "commit").chars().take(12).collect();
         let manual = json!({
             "manual_version": "1.0.0",
@@ -763,10 +1246,12 @@ pub fn generate(
         for e in &entries {
             tools_index.push(json!({
                 "manual": mconf.name, "name": e.name, "operation_id": e.op_id, "method": e.method, "path": e.path,
+                "accept": e.tool["tool_call_template"]["headers"]["Accept"],
             }));
         }
         manuals.insert(mconf.name.clone(), manual);
     }
+    check_named_tools(&manuals)?;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for x in &left_out {
         *counts.entry(str_of(x, "reason").to_string()).or_default() += 1;

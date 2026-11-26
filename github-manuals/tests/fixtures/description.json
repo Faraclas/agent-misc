@@ -6,7 +6,7 @@
     "/repos/{owner}/{repo}": {
       "get": {
         "summary": "Get a repository",
-        "description": "Gets a repository. See \"[Repositories](https://docs.github.com/rest/repos)\".\n\n**Fine-grained access tokens for \"Get a repository\"**\n\nThis endpoint works with fine-grained tokens.",
+        "description": "Gets a repository. See \"[Repositories](https://docs.github.com/rest/repos)\". To read a file, use \"[Get repository content](https://docs.github.com/rest/repos/contents#get-repository-content).\" To change it, see \"[Update a repository](https://docs.github.com/en/rest/repos/repos#update-a-repository).\"\n\n**Fine-grained access tokens for \"Get a repository\"**\n\nThis endpoint works with fine-grained tokens.",
         "operationId": "repos/get",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/repository"}}}}},
@@ -16,7 +16,7 @@
         "summary": "Update a repository",
         "operationId": "repos/update",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
-        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"visibility": {"type": "string"}}}}}},
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"visibility": {"type": "string", "description": "The visibility of the repository."}}}}}},
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/repository"}}}}},
         "x-github": {"category": "repos", "subcategory": "repos"}
       }
@@ -52,7 +52,7 @@
               {"type": "object", "properties": {"title": {"type": "string", "description": "The title of the issue."}}, "required": ["title"]},
               {"type": "object", "properties": {
                 "body": {"type": "string", "description": "The contents of the issue."},
-                "labels": {"type": "array", "items": {"type": "string"}},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Labels to associate with this issue."},
                 "id": {"type": "integer", "readOnly": true},
                 "parent": {"$ref": "#/components/schemas/issue-node"}
               }}
@@ -68,7 +68,7 @@
         "summary": "Create an issue comment",
         "operationId": "issues/create-comment",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"body": {"type": "string"}}, "required": ["body"]}}}},
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"body": {"type": "string", "description": "The contents of the comment."}}, "required": ["body"]}}}},
         "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "issues", "subcategory": "comments"}
       }
@@ -89,6 +89,7 @@
     "/repos/{owner}/{repo}/issues/{issue_number}/assignees": {
       "get": {
         "summary": "List assignees of an issue",
+        "description": "Lists the assignees of an issue.\n\nNote: Only users with push access are listed. Use the Link header to get the URL for the next page of assignees.\n\nTo add labels, see \"[Add labels to an issue](https://docs.github.com/rest/issues/labels#add-labels-to-an-issue).\" To remove assignees, use `DELETE /repos/{owner}/{repo}/issues/{issue_number}/assignees`.",
         "operationId": "issues/list-assignees",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
@@ -98,7 +99,7 @@
         "summary": "Remove assignees from an issue",
         "operationId": "issues/remove-assignees",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"}],
-        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"assignees": {"type": "array", "items": {"type": "string"}}}}}}},
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"assignees": {"type": "array", "items": {"type": "string"}, "description": "Usernames of assignees to remove from an issue."}}}}}},
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "issues", "subcategory": "assignees"}
       }
@@ -107,7 +108,7 @@
       "delete": {
         "summary": "Delete an issue comment",
         "operationId": "issues/delete-comment",
-        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "comment_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "comment_id", "in": "path", "required": true, "description": "The unique identifier of the comment.", "schema": {"type": "integer"}}],
         "responses": {"204": {"description": "Response"}},
         "x-github": {"category": "issues", "subcategory": "comments"}
       }
@@ -119,7 +120,7 @@
         "operationId": "reactions/list-for-issue",
         "parameters": [
           {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/issue-number"},
-          {"name": "content", "in": "query", "schema": {"type": "string", "enum": ["+1", "-1", "heart"]}},
+          {"name": "content", "in": "query", "description": "Returns a single [reaction type](https://docs.github.com/rest/reactions/reactions#about-reactions). Omit this parameter to list all reactions to an issue.", "schema": {"type": "string", "enum": ["+1", "-1", "heart"]}},
           {"name": "per_page", "in": "query", "description": "The number of results per page (max 100). For more information, see \"[Using pagination in the REST API](https://docs.github.com/rest/using-the-rest-api/using-pagination-in-the-rest-api).\"", "schema": {"type": "integer", "default": 30}}
         ],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
@@ -130,7 +131,7 @@
       "get": {
         "summary": "Download job logs for a workflow run",
         "operationId": "actions/download-job-logs-for-workflow-run",
-        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "job_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"name": "job_id", "in": "path", "required": true, "description": "The unique identifier of the job.", "schema": {"type": "integer"}}],
         "responses": {"302": {"description": "Response"}},
         "x-github": {"category": "actions", "subcategory": "workflow-jobs"}
       }
@@ -140,7 +141,7 @@
         "summary": "Create a check run",
         "operationId": "checks/create",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}, "head_sha": {"type": "string"}}, "required": ["name", "head_sha"]}}}},
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string", "description": "The name of the check. For example, \"code-coverage\"."}, "head_sha": {"type": "string", "description": "The SHA of the commit."}}, "required": ["name", "head_sha"]}}}},
         "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "checks", "subcategory": "runs"}
       }
@@ -152,7 +153,7 @@
         "servers": [{"url": "https://uploads.github.com"}],
         "parameters": [
           {"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
-          {"name": "release_id", "in": "path", "required": true, "schema": {"type": "integer"}},
+          {"name": "release_id", "in": "path", "required": true, "description": "The unique identifier of the release.", "schema": {"type": "integer"}},
           {"name": "name", "in": "query", "required": true, "schema": {"type": "string"}},
           {"name": "label", "in": "query", "schema": {"type": "string"}}
         ],
@@ -166,8 +167,8 @@
         "summary": "Create an attestation",
         "operationId": "repos/create-attestation",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
-          {"name": "dry", "in": "query", "schema": {"type": "boolean"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"bundle": {"type": "object"}}, "required": ["bundle"]}}}},
+          {"name": "dry", "in": "query", "description": "Check the bundle without storing it.", "schema": {"type": "boolean"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"bundle": {"type": "object", "description": "The attestation's Sigstore Bundle."}}, "required": ["bundle"]}}}},
         "responses": {"201": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "repos", "subcategory": "attestations"}
       }
@@ -175,6 +176,7 @@
     "/repos/{owner}/{repo}/dependabot/alerts/{alert_number}": {
       "get": {
         "summary": "Get a Dependabot alert",
+        "description": "Gets a single alert. Use the ref `refs/heads/<branch name>` for a branch, and put templates in the ISSUE\\_TEMPLATE folder. Branch names match `\\A[a-z]+`. Set the Accept header to application/json. To get the code scanning alert, use the `GET /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}` endpoint.",
         "operationId": "dependabot/get-alert",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/alert-number"}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
@@ -184,6 +186,7 @@
     "/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}": {
       "get": {
         "summary": "Get a code scanning alert",
+        "description": "Code scanning is available in public repositories with GitHub Free and GitHub Free for organizations, and in private repositories with GitHub Code Security. For GitHub Enterprise Server, alerts are kept for a year. The alert has a state. To get the Dependabot alert, see the documentation for the `GET /repos/{owner}/{repo}/dependabot/alerts/{alert_number}` endpoint.",
         "operationId": "code-scanning/get-alert",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"}, {"$ref": "#/components/parameters/alert-number"}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
@@ -195,7 +198,7 @@
         "summary": "List tasks for repository",
         "operationId": "agent-tasks/list-tasks-for-repo",
         "parameters": [{"$ref": "#/components/parameters/owner"}, {"$ref": "#/components/parameters/repo"},
-          {"name": "creator_id", "in": "query", "description": "Filter by creator.", "schema": {"type": "array", "items": {"type": "integer"}}}],
+          {"name": "creator_id", "in": "query", "description": "Filter by creator. Accepts one or more user IDs.", "schema": {"type": "array", "items": {"type": "integer"}}}],
         "responses": {"200": {"description": "Tasks retrieved successfully", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "agent-tasks", "subcategory": "agent-tasks"}
       }
@@ -203,8 +206,9 @@
     "/search/code": {
       "get": {
         "summary": "Search code",
+        "description": "Searches for code. To get more results, call `GET /search/code` again with the next page.",
         "operationId": "search/code",
-        "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string"}}],
+        "parameters": [{"name": "q", "in": "query", "required": true, "description": "The query contains one or more search keywords and qualifiers.", "schema": {"type": "string"}}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "search", "subcategory": "search"}
       }
@@ -238,7 +242,7 @@
       "get": {
         "summary": "List organization members",
         "operationId": "orgs/list-members",
-        "parameters": [{"name": "org", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "parameters": [{"name": "org", "in": "path", "required": true, "description": "The organization name. The name is not case sensitive.", "schema": {"type": "string"}}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "array"}}}}},
         "x-github": {"category": "orgs", "subcategory": "members"}
       }
@@ -247,7 +251,7 @@
       "get": {
         "summary": "Get an organization",
         "operationId": "orgs/get",
-        "parameters": [{"name": "org", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "parameters": [{"name": "org", "in": "path", "required": true, "description": "The organization name. The name is not case sensitive.", "schema": {"type": "string"}}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "orgs", "subcategory": "orgs"}
       }
@@ -257,7 +261,7 @@
         "summary": "Get a team (Legacy)",
         "operationId": "teams/get-legacy",
         "deprecated": true,
-        "parameters": [{"name": "team_id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "parameters": [{"name": "team_id", "in": "path", "required": true, "description": "The unique identifier of the team.", "schema": {"type": "integer"}}],
         "responses": {"200": {"description": "Response", "content": {"application/json": {"schema": {"type": "object"}}}}},
         "x-github": {"category": "teams", "subcategory": "teams", "deprecationDate": "2020-01-21"}
       }
@@ -268,7 +272,7 @@
       "owner": {"name": "owner", "in": "path", "required": true, "description": "The account owner of the repository.", "schema": {"type": "string"}},
       "repo": {"name": "repo", "in": "path", "required": true, "description": "The name of the repository.", "schema": {"type": "string"}},
       "issue-number": {"name": "issue_number", "in": "path", "required": true, "description": "The number that identifies the issue.", "schema": {"type": "integer"}},
-      "alert-number": {"name": "alert_number", "in": "path", "required": true, "schema": {"type": "integer"}}
+      "alert-number": {"name": "alert_number", "in": "path", "required": true, "description": "The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation.", "schema": {"type": "integer"}}
     },
     "schemas": {
       "repository": {"type": "object", "properties": {"name": {"type": "string"}}},

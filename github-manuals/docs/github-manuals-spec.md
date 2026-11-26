@@ -33,10 +33,14 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   `{"auth_type": "api_key", "var_name": "Authorization", "api_key": "Bearer ${GITHUB_MANUALS_PAT}", "location":
   "header"}`. GitHub's description declares no security scheme, so this is added by the generator.
 - **Arguments:** path parameters (required, except those in `Config::optional_path`, which utcp 0.2.4 drops from
-  the URL when left out: `get_content` without `path` lists the repository root), query parameters (required when
-  the description says so), then the request body. The description has no header or cookie parameters; one would be
-  an error. A path parameter whose description is only GitHub's placeholder ("path parameter") gets the one in
-  `Config::param_descriptions`; a placeholder without an entry fails `generate`.
+  the URL when left out, with a note on the argument: `get_content` without `path` lists the repository root, the
+  archives without `ref` are of the default branch), query parameters (required when the description says so), then
+  the request body. The description has no header or cookie parameters; one would be an error.
+- **Argument descriptions:** every argument has one. A path parameter whose description is only GitHub's
+  placeholder ("path parameter") gets the one in `Config::param_descriptions`; any other undescribed argument gets
+  the one in `Config::input_descriptions`, keyed by operationId and argument. An undescribed argument without an
+  entry fails `generate`, and so does an entry for an argument GitHub now describes or the tool lacks, so the
+  config cannot go stale.
 - **Bodies are flat** when the JSON body is an object with properties, the operation has no query parameters, and no
   body field shares a name with a parameter: the fields become arguments, and utcp sends the leftover arguments of a
   POST, PUT or PATCH as the JSON body. This matches GitHub's documentation and the earlier hand-written manual, and
@@ -52,28 +56,68 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
 - **Uploads:** an `application/octet-stream` body is `"body_type": "file"`; the argument `body` is `{"file": path}`.
 - **File answers:** an operation whose success answers have no content and include a 302 redirect (logs, archives,
   artifacts, SBOM reports) gets `"response_type": "file"`; utcp follows the redirect and saves the file.
-- **Schemas:** `$ref` and `allOf` are inlined down to three levels, a cycle stops at its first repeat (type and
+- **Variants:** `Config::variants` adds a second tool for an operation that asks for another `Accept` media type,
+  with the operation's inputs and its own name, description and output: `get_raw_content` (a file as it is, not
+  base64 in JSON), `download_release_asset` and `download_codeql_database` (`"response_type": "file"`). The base
+  tool's description points to its variant (`Config::notes`).
+- **Schemas:** `$ref` and `allOf` are inlined down to five levels, a cycle stops at its first repeat (type and
   description only); `oneOf`/`anyOf`, `enum`, `default` and known formats are kept; read-only properties, examples
-  and titles are dropped. An array query parameter takes one value (utcp would send an array as one JSON string).
-- **Outputs:** `object`, `array` or `string` (non-JSON answers such as `get_zen`), with the response description;
-  `null` for answers without content; the file description for file answers. Response schemas are not copied: agents
-  see the answer itself, and copying them would double the manuals' size.
-- **Descriptions:** summary, then the description up to GitHub's fine-grained-token section or its list of custom
-  media types (the fixed `Accept` header does not ask for those), as plain text (links become their text, alert
-  markers, HTML tags and Markdown emphasis go). Then, sentence by sentence (a split never follows `e.g.`, `i.e.`,
-  `etc.` or `vs.`): references to GitHub's docs ("For more information", "For more details", "For an example",
-  "See ...") are dropped, since agents cannot follow them; a first sentence whose content words all appear in the
-  summary is dropped as a restatement; and "OAuth app tokens and personal access tokens (classic) need the `repo`
-  scope to use this endpoint" becomes "Classic tokens need the `repo` scope", in place, because later sentences may
-  refer back to it. The result is cut to about 800 characters at a word, ending in "..." (parameter descriptions:
-  300). Parameter descriptions get the same treatment without the summary. The summary always ends with a period.
-  DELETEs have "Delete only what the user asked for or what you created." right after the summary, not before it,
-  so the first sentence (all that `utcp search` and `utcp list` show) still says what is deleted. Untested writes
-  start with `(untested)`.
+  and titles are dropped. A `oneOf`/`anyOf` without a description takes the sentences its branches share. An array
+  query parameter takes one value: GitHub reads a list as repeated parameters, utcp sends it comma-separated, so
+  GitHub's "Accepts one or more" sentence goes and "Takes one value." is added.
+- **Outputs:** only success answers count (2xx; a redirect is followed by utcp, so it is never the answer).
+  Response schemas are not copied: agents see the answer itself, and copying them would double the manuals' size.
+  - `object`, `array` (also for a schema with only `items`) or `string` (non-JSON answers such as `get_zen`).
+  - The description is GitHub's response description, unless it only names the outcome or the status ("OK",
+    "Response if merge was successful"), restates the summary, or differs between several success answers (utcp
+    does not show which one came).
+  - An answer with content next to one without (a 204 next to a 200) adds when it is null, from GitHub's text
+    ("Response if repository is empty" is "Null if the repository is empty."), or "Can also be null (an answer with
+    no content)."
+  - `null` without any content: a GET is a yes/no check ("Null means yes; no is a failed call with 404 Not Found.",
+    and the tool description says it too unless it already mentions 404); other methods get "No content: the call
+    answers null when it worked."
+  - File answers get utcp's file reference (`type`, `path`, `mime_type`, `bytes`, `filename`).
+- **Pointers to other endpoints** (`links.rs`, before anything else): GitHub points to other operations by their
+  documentation page (`[Get a commit](/rest/commits/commits#get-a-commit)`) or by method and path (`` `GET
+  /repos/{owner}/{repo}/commits` ``). Every page anchor and route is matched to its operation (placeholder names
+  ignored, `:ref` included); a match that is a tool names it (`github_repos.get_commit`), and "the X endpoint"
+  around it goes. A page title used as a name becomes the tool; one inside a sentence, or link text that says what
+  to do ("set the repository's subscription manually"), keeps its words and adds the tool in parentheses. A
+  pointer to a left-out operation or to a guide keeps only its text; an `/orgs/` alternative ("and `GET
+  /orgs/{org}/...` for organizations") is dropped when organization administration is left out. `generate` fails
+  when a description names a tool that does not exist.
+- **Descriptions:** summary (with `Config::summary_qualifiers` for its category, such as "for Dependabot", when
+  another kept operation has the same summary, so every first sentence differs), then the description up to
+  GitHub's fine-grained-token section or its list of custom media types (the fixed `Accept` header does not ask for
+  those), then `Config::notes`. As plain text: links become their text (or a tool, above), images their alt text,
+  lists, tables, headings and code blocks paragraphs (a short list after a colon joins its line), and alert
+  markers, "Note:", HTML tags and Markdown emphasis go; a search's URL query in a code span becomes the JSON
+  arguments the tool takes. `Config::sentence_fixes` then replace GitHub's text where it is wrong or names pages;
+  a fix whose text GitHub no longer has fails `generate`. Then, sentence by sentence (a paragraph always ends one;
+  a split never follows `e.g.`, `i.e.`, `etc.` or `vs.`, and before a lowercase word only a word of three letters
+  or more ends one):
+  - Dropped: pointers to GitHub's docs ("For more information", "See ..."), since agents cannot follow them; HTTP
+    details utcp takes care of (headers, media types, redirects, upload URLs, client advice); which plans have a
+    feature, and what holds only on GitHub Enterprise Server; a sentence equal to the one before; a first sentence
+    that restates the summary and route; a commit's signature-verification tables (one sentence instead).
+  - Rewritten: the Link header is `next_page`, "Gets a redirect URL to download" is "Downloads", "this endpoint"
+    and "the endpoint" are the tool, and "OAuth app tokens and personal access tokens (classic) need the `repo`
+    scope to use this endpoint" is "Classic tokens need the `repo` scope", in place, because later sentences may
+    refer back to it.
+  - A sentence ending with `:` ("For example:") is kept or dropped together with the next one.
+  The result keeps whole sentences up to 1,200 characters (argument descriptions: 600); classic-token scopes, notes,
+  the search limit and the yes/no answer are always kept. Only a first sentence that alone is too long is cut at a
+  word. Argument descriptions get the same treatment without the summary. The summary always ends with a period.
+- **Cautions:** a DELETE whose summary deletes, removes or disables something gets "Delete only what the user asked
+  for or what you created." (or "Remove ... what you added", "Disable ... what you enabled") right after the
+  summary, not before it, so the first sentence (all that `utcp search` and `utcp list` show) still says what
+  goes. One that undoes the user's own action (unstar, unlock) gets none. Every search ends with GitHub's limit of
+  1,000 results over all pages. Untested writes start with `(untested)`.
 - **Tags:** `github`, the category, the subcategory, and `untested` for untested writes.
 - **Tested writes:** `config::TESTED_WRITES` lists, by operationId, the writes that worked live through
-  `utcp call --staged` against a throwaway public repository of the token's owner (117 of 222 in 0.1.0). A name it
-  holds that the description lacks fails `generate`, so a new pin shows which tested operations GitHub dropped.
+  `utcp call --staged` against a throwaway public repository of the token's owner (117 of 222). A name it holds that
+  the description lacks fails `generate`, so a new pin shows which tested operations GitHub dropped.
 
 ## Names (scheme C)
 
@@ -101,7 +145,7 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
 - `report.json`: `api_version`, `source` (repository, commit, date, file, SHA-256), per manual (title, hint, tools,
   reads, writes, untested writes, bytes, approximate tokens), `left_out_summary` (count per reason), `left_out`
   (every operation with method, path, category, subcategory and reason), and `tools` (every tool with its manual,
-  operationId, method and path).
+  operationId, method and path; a variant has its operation's).
 
 ## Decisions
 
@@ -109,6 +153,7 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   account, which upstream issue and pull request work needs. The manuals therefore carry everything safe to offer,
   and the dangerous operations are left out by rule (a speed bump against accidents, not a security boundary).
 - **The API version is pinned** (`2026-03-10`, the newest), so a GitHub default change does not change behavior.
-- **Seven manuals** instead of one: a single manual of 605 tools is too large for search and for agents.
-- **Not covered yet:** organization administration (`/orgs/...`), fine-grained token links, live read and write
-  tests, header-selected answer formats (diffs and patches of commits and pull requests, raw file contents).
+- **Seven manuals** instead of one: a single manual of 608 tools is too large for search and for agents.
+- **Not covered yet:** organization administration (`/orgs/...`), fine-grained token permissions per tool, live
+  tests of the 105 untested writes, and the other header-selected answer formats (diffs and patches of commits and
+  pull requests).

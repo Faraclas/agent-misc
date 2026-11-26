@@ -109,6 +109,7 @@
           },
           "labels": {
             "type": "array",
+            "description": "Labels to associate with this issue.",
             "items": {
               "type": "string"
             }
@@ -179,7 +180,8 @@
             "description": "The number that identifies the issue."
           },
           "body": {
-            "type": "string"
+            "type": "string",
+            "description": "The contents of the comment."
           }
         },
         "required": [
@@ -229,7 +231,8 @@
             "description": "The name of the repository."
           },
           "comment_id": {
-            "type": "integer"
+            "type": "integer",
+            "description": "The unique identifier of the comment."
           }
         },
         "required": [
@@ -260,7 +263,7 @@
     },
     {
       "name": "list_issue_assignees",
-      "description": "List assignees of an issue.",
+      "description": "List assignees of an issue. Only users with push access are listed. Call again with next_page for the next page of assignees. To add labels, see github_issues_pulls.add_issue_labels. To remove assignees, use github_issues_pulls.remove_issue_assignees.",
       "tags": [
         "github",
         "issues",
@@ -309,7 +312,7 @@
     },
     {
       "name": "list_reactions_for_issue",
-      "description": "List reactions for an issue. Classic tokens need the repo scope with a private repository. You can use parameters to narrow the list of results. Each reaction has a type, e.g. heart. Anyone with read access to the repository can use this endpoint.",
+      "description": "List reactions for an issue. Classic tokens need the repo scope with a private repository. You can use parameters to narrow the list of results. Each reaction has a type, e.g. heart. Anyone with read access to the repository can use this tool.",
       "tags": [
         "github",
         "reactions"
@@ -335,7 +338,8 @@
               "+1",
               "-1",
               "heart"
-            ]
+            ],
+            "description": "Returns a single reaction type. Omit this parameter to list all reactions to an issue."
           },
           "per_page": {
             "type": "integer",
@@ -370,7 +374,7 @@
     },
     {
       "name": "remove_issue_assignees",
-      "description": "(untested) Remove assignees from an issue. Delete only what the user asked for or what you created.",
+      "description": "(untested) Remove assignees from an issue. Remove only what the user asked for or what you added.",
       "tags": [
         "github",
         "issues",
@@ -397,6 +401,7 @@
             "properties": {
               "assignees": {
                 "type": "array",
+                "description": "Usernames of assignees to remove from an issue.",
                 "items": {
                   "type": "string"
                 }

@@ -7,7 +7,7 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the GitHub REST API, so agents ca
   (MIT), file `descriptions/api.github.com/api.github.com.2026-03-10.json` at a pinned commit. The generator downloads
   it from `raw.githubusercontent.com` and checks it against the SHA-256 in [`pins.json`](./pins.json), which is built
   into the binary. Nothing from GitHub is stored in this repository.
-- **Output:** seven manuals with 605 tools for REST API version `2026-03-10` (every tool sends
+- **Output:** seven manuals with 608 tools for REST API version `2026-03-10` (every tool sends
   `X-GitHub-Api-Version: 2026-03-10`), and a `report.json` listing every tool and every operation left out with the
   reason. The manuals name no user or organization: one set works for any account.
 - **Requirements:** one static binary, no runtime; utcp 0.2.4 or newer (earlier versions cannot send the bodies
@@ -39,10 +39,10 @@ Generates [utcp](../utcp-rs/) HTTP manuals for the GitHub REST API, so agents ca
 
 | Manual | Tools | GitHub areas (`x-github` category) | Hint for `--hint` |
 | --- | --- | --- | --- |
-| `github_repos` | 133 | repos, branches, commits, git, releases, collaborators, deploy keys, metrics, licenses, gitignore, codes of conduct | GitHub repos, files, branches, commits, git, releases |
+| `github_repos` | 135 | repos, branches, commits, git, releases, collaborators, deploy keys, metrics, licenses, gitignore, codes of conduct | GitHub repos, files, branches, commits, git, releases |
 | `github_issues_pulls` | 138 | issues, pulls, reactions, projects; issue types, issue fields, planning statuses | GitHub issues, pull requests, reviews, labels, projects |
 | `github_actions` | 144 | actions, checks, deployments and environments, packages, pages | GitHub Actions, checks, environments, packages, Pages |
-| `github_security` | 66 | code scanning, Dependabot, secret scanning, security advisories, code quality, dependency graph, code security, attestations | GitHub code and secret scanning, Dependabot, advisories |
+| `github_security` | 67 | code scanning, Dependabot, secret scanning, security advisories, code quality, dependency graph, code security, attestations | GitHub code and secret scanning, Dependabot, advisories |
 | `github_copilot` | 31 | Copilot agent tasks and automations, agent secrets and variables (read), Copilot repository settings, agent merge, Copilot code review | GitHub Copilot agent tasks, automations, settings |
 | `github_search` | 7 | search | GitHub search: code, issues, PRs, repos, commits, users |
 | `github_users` | 86 | users, activity (notifications, stars, watching, events), your orgs and teams, apps you installed, your billing usage, meta, rate limit, markdown, emojis | GitHub users, notifications, stars, orgs, billing, meta |
@@ -53,7 +53,9 @@ Tool names follow GitHub's operation names in snake_case: `repos/create-or-updat
 `github_repos.create_or_update_file_contents`. A bare verb gets its noun (`repos/get` is `get_repo`), and the area is
 added where the name would be unclear (`pulls/list-files` is `list_pull_request_files`, `dependabot/get-alert` is
 `get_dependabot_alert`). Arguments are GitHub's own: path parameters, query parameters and the fields of the request
-body side by side (`create_issue` takes `owner`, `repo`, `title`, `body`, `labels`, ...). Writes not yet covered by a
+body side by side (`create_issue` takes `owner`, `repo`, `title`, `body`, `labels`, ...). Three operations have a
+second tool that asks GitHub for another format: `get_raw_content` prints a file as it is instead of base64 in JSON,
+and `download_release_asset` and `download_codeql_database` save the file. Writes not yet covered by a
 live write test start their description with `(untested)`. In 0.1.0, 117 of the 222 writes worked against a throwaway
 repository. Most of the others need what one personal repository does not have: an organization, a GitHub App token
 (check runs), a self-hosted runner, packages, security alerts, forks or templates, a paid plan, or workflow runs that
@@ -98,14 +100,14 @@ section for what they leave out); what an agent can actually do with them is wha
 Classic scopes that GitHub's descriptions name for the included tools: `repo` (or `public_repo` for public
 repositories only), `workflow`, `security_events`, `read:packages`, `write:packages`, `delete:packages`,
 `read:org`, `user` (covers `read:user`, `user:email`, `user:follow`), `notifications`, `project`, `read:public_key`,
-`read:gpg_key`, `read:ssh_signing_key`, `read:repo_hook`. The descriptions name no scope for about 385 of the 605
+`read:gpg_key`, `read:ssh_signing_key`, `read:repo_hook`. The descriptions name no scope for about 370 of the 608
 tools, so a call that answers 403 or 404 may need another scope. Leaving out `delete_repo` is recommended (the
 manuals cannot delete a repository anyway).
 
 ## What is left out, and why
 
 `generate` prints the count per reason; `report.json` lists every operation. Of the 1,281 operations in the
-description, 605 are tools. The others:
+description, 605 are tools (608 with the three second-format tools). The others:
 
 | Left out | Why |
 | --- | --- |
@@ -168,7 +170,7 @@ utcp has no aliases, so agents use the new names.
 | `create_issue` | `github_issues_pulls.create_issue` |
 | `create_pull_request` | `github_issues_pulls.create_pull_request` |
 | `get_commit` | `github_repos.get_commit` |
-| `get_file_contents` | `github_repos.get_content` |
+| `get_file_contents` | `github_repos.get_content` (`get_raw_content` prints the file as it is) |
 | `get_issue` | `github_issues_pulls.get_issue` |
 | `get_job_logs` | `github_actions.download_job_logs_for_workflow_run` (saves the log as a file) |
 | `get_latest_release` | `github_repos.get_latest_release` |

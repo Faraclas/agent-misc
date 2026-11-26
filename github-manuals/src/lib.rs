@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod generate;
 pub mod http;
+pub mod links;
 pub mod names;
 pub mod source;
 pub mod text;

@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "search_code",
-      "description": "Search code.",
+      "description": "Search code. To get more results, call this tool again with the next page. A search finds at most 1,000 results in all, over all pages; narrow the query to reach others.",
       "tags": [
         "github",
         "search"
@@ -18,7 +18,8 @@
         "type": "object",
         "properties": {
           "q": {
-            "type": "string"
+            "type": "string",
+            "description": "The query contains one or more search keywords and qualifiers."
           }
         },
         "required": [

@@ -27,7 +27,7 @@
           },
           "creator_id": {
             "type": "integer",
-            "description": "Filter by creator. (one value)"
+            "description": "Filter by creator. Takes one value."
           }
         },
         "required": [
@@ -36,8 +36,7 @@
         ]
       },
       "outputs": {
-        "type": "object",
-        "description": "Tasks retrieved successfully"
+        "type": "object"
       },
       "tool_call_template": {
         "call_template_type": "http",

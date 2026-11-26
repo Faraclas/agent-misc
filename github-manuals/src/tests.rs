@@ -22,7 +22,10 @@ use crate::generate::{generate, DELETE_NOTE, FILE_ANSWER, UNTESTED, UTCP_MAX_HIN
 use crate::http::{Request, Response, Transport};
 use crate::names;
 use crate::source::{self, sha256_hex, Pins, PINS};
-use crate::text::{one_line, plain, restates, sentences, snake, tidy, write_json};
+use crate::text::{
+    end_sentence, fit, one_line, plain, restates, sentences, snake, tidy, tidy_sentences,
+    write_json, Sentence,
+};
 
 fn fixtures() -> PathBuf {
     if let Some(dir) = std::env::var_os("GITHUB_MANUALS_TEST_FIXTURES") {
@@ -55,6 +58,13 @@ fn test_config() -> Config {
         .collect();
     let mut conf = Config::real();
     conf.names.retain(|k, _| ids.contains(k));
+    conf.input_descriptions
+        .retain(|(op, _), _| ids.contains(op));
+    conf.optional_path.retain(|(op, ..)| ids.contains(op));
+    conf.notes.retain(|op, _| ids.contains(op));
+    conf.variants.retain(|v| ids.contains(&v.op_id));
+    // The real fixes match GitHub's real text, which the hand-made description does not have.
+    conf.sentence_fixes.clear();
     conf.tested_writes = vec!["issues/create-comment".into()];
     conf
 }
@@ -161,10 +171,11 @@ fn left_out_with_reasons() {
     // Kept by the org rule's exception.
     assert!(tools.contains_key("get_org"));
     assert!(reason_of(&report, "orgs/get").is_none());
+    // A variant is a second tool for an operation that already has one.
     let total = crate::generate::operations(&description()).len();
     assert_eq!(
         tools.len() + report["left_out"].as_array().unwrap().len(),
-        total
+        total + test_config().variants.len()
     );
     let summary: usize = report["left_out_summary"]
         .as_array()
@@ -219,7 +230,13 @@ fn manuals_by_category_and_subcategory() {
 
 #[test]
 fn every_tool_sends_the_token_and_api_version() {
-    let (manuals, _) = run_generate();
+    let (manuals, report) = run_generate();
+    let variants: HashMap<String, String> = test_config()
+        .variants
+        .iter()
+        .map(|v| (v.name.to_string(), v.accept.to_string()))
+        .collect();
+    assert!(variants.contains_key("get_raw_content"));
     for (name, tool) in tools_by_name(&manuals) {
         let t = &tool["tool_call_template"];
         assert_eq!(
@@ -229,10 +246,17 @@ fn every_tool_sends_the_token_and_api_version() {
         );
         assert_eq!(t["auth"]["var_name"], "Authorization", "{name}");
         assert_eq!(t["headers"]["X-GitHub-Api-Version"], API_VERSION, "{name}");
-        assert_eq!(
-            t["headers"]["Accept"], "application/vnd.github+json",
-            "{name}"
-        );
+        let accept = variants
+            .get(&name)
+            .map_or("application/vnd.github+json", String::as_str);
+        assert_eq!(t["headers"]["Accept"], accept, "{name}");
+        let listed = report["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name.as_str())
+            .unwrap();
+        assert_eq!(listed["accept"], accept, "{name}");
         assert!(t["url"].as_str().unwrap().starts_with("https://"), "{name}");
     }
 }
@@ -332,10 +356,13 @@ fn query_parameters() {
     let reactions = &tools["list_reactions_for_issue"]["inputs"]["properties"];
     assert_eq!(reactions["content"]["enum"], json!(["+1", "-1", "heart"]));
     assert_eq!(reactions["per_page"]["default"], 30);
-    // An array query parameter takes one value (utcp would send the array as one JSON string).
+    // An array query parameter takes one value: GitHub reads repeated parameters, utcp sends a list comma-separated.
     let creator = &tools["list_agent_tasks_for_repo"]["inputs"]["properties"]["creator_id"];
     assert_eq!(creator["type"], "integer");
-    assert_eq!(creator["description"], "Filter by creator. (one value)");
+    assert_eq!(
+        creator["description"],
+        "Filter by creator. Takes one value."
+    );
 }
 
 #[test]
@@ -359,7 +386,7 @@ fn placeholder_descriptions_and_optional_path() {
     assert!(e.contains("'path' has only the placeholder"), "{e}");
     let mut conf = test_config();
     conf.optional_path
-        .push(("repos/no-such".into(), "path".into()));
+        .push(("repos/no-such".into(), "path".into(), "x".into()));
     let e = generate(&description(), API_VERSION, &source_json(), &conf)
         .unwrap_err()
         .to_string();
@@ -370,12 +397,16 @@ fn placeholder_descriptions_and_optional_path() {
 fn descriptions() {
     let tools = tools_by_name(&run_generate().0);
     let repo = tools["get_repo"]["description"].as_str().unwrap();
-    // "Gets a repository." restates the summary, and "See Repositories." lost its link.
-    assert_eq!(repo, "Get a repository.");
+    // "Gets a repository." restates the summary, and "See Repositories." lost its link; the note points to files.
+    assert_eq!(
+        repo,
+        "Get a repository. To read a file, use github_repos.get_content."
+    );
     let content = tools["get_content"]["description"].as_str().unwrap();
     assert_eq!(
         content,
-        "Get repository content. Gets the contents of a file."
+        "Get repository content. Gets the contents of a file. For a file's content as it is, instead of base64, \
+         use github_repos.get_raw_content."
     );
     let issue = tools["create_issue"]["description"].as_str().unwrap();
     assert_eq!(
@@ -387,7 +418,7 @@ fn descriptions() {
         tools["list_reactions_for_issue"]["description"],
         "List reactions for an issue. Classic tokens need the repo scope with a private repository. You can use \
          parameters to narrow the list of results. Each reaction has a type, e.g. heart. Anyone with read access \
-         to the repository can use this endpoint."
+         to the repository can use this tool."
     );
     assert_eq!(
         tools["list_reactions_for_issue"]["inputs"]["properties"]["per_page"]["description"],
@@ -642,8 +673,578 @@ fn tidy_descriptions() {
             "OAuth apps and personal access tokens (classic) cannot use this endpoint.",
             ""
         ),
-        "Classic tokens cannot use this endpoint."
+        "Classic tokens cannot use this tool."
     );
+}
+
+#[test]
+fn markdown_blocks() {
+    let text = |md: &str| tidy(&plain(md), "");
+    // Each list item is a sentence; a wrapped line (indented, or starting lowercase) joins its item.
+    assert_eq!(
+        text("Lists runs:\n\n- `Queued` runs\n  that wait.\n- Completed runs\nthat ended\n\nDone."),
+        "Lists runs: Queued runs that wait. Completed runs that ended. Done."
+    );
+    // A table row is `first cell: other cells`, without the header and rule rows.
+    assert_eq!(
+        text("States:\n\n| Name | Meaning |\n| --- | :---: |\n| `open` | Not done | Yet |\n| `closed` | Done |"),
+        "States: open: Not done, Yet. closed: Done."
+    );
+    // A bold heading goes, unless it leads in to what follows.
+    assert_eq!(
+        text("**Signature verification object**\n\nThe object has fields."),
+        "The object has fields."
+    );
+    assert_eq!(
+        text("**For a team:**\n\nUse the slug."),
+        "For a team: Use the slug."
+    );
+    // Code keeps its text, without the fences.
+    assert_eq!(
+        text("Example:\n\n```\ncurl -X POST\n```\n\nThen wait."),
+        "Example: curl -X POST. Then wait."
+    );
+    // An image becomes its alt text.
+    assert_eq!(
+        text("Shows the flow: ![Flow chart](https://x.test/y.png \"t\")"),
+        "Shows the flow: Flow chart."
+    );
+    assert_eq!(plain("  - One\n"), "One.");
+}
+
+#[test]
+fn tidy_sentence_list() {
+    let texts = |t: &str| {
+        tidy_sentences(t, "")
+            .into_iter()
+            .map(|s| (s.text, s.essential))
+            .collect::<Vec<_>>()
+    };
+    // A paragraph break ends a sentence, even after an example; the last one ends with a period only after a word.
+    assert_eq!(
+        tidy("Use base64 -w0\n\nUploads work. Default: main", ""),
+        "Use base64 -w0. Uploads work. Default: main."
+    );
+    assert_eq!(
+        tidy("Example: https://example.com/a", ""),
+        "Example: https://example.com/a"
+    );
+    assert_eq!(
+        tidy("(see below)\n\nHe said \"done.\"\n\nNext", ""),
+        "(see below). He said \"done.\" Next."
+    );
+    // A lead-in ending with `:` takes the next sentence with it, essential if that one is.
+    assert_eq!(
+        texts(
+            "Lists items. For private repositories:\n\nOAuth app tokens and personal access tokens (classic) need \
+             the repo scope to use this endpoint."
+        ),
+        [
+            ("Lists items.".to_string(), false),
+            (
+                "For private repositories: Classic tokens need the repo scope.".to_string(),
+                true
+            )
+        ]
+    );
+    // A clause that only points to a stripped link goes.
+    assert_eq!(
+        tidy(
+            "Returns runs, see \"Workflow runs\" for more information.",
+            ""
+        ),
+        "Returns runs."
+    );
+    assert_eq!(
+        tidy("Lists items; for more information, see \"Items.\"", ""),
+        "Lists items."
+    );
+    // Doubled small words are written once, and a repeated sentence goes.
+    assert_eq!(
+        tidy(
+            "Needs the the repo scope to to work. Needs the repo scope to work.",
+            ""
+        ),
+        "Needs the repo scope to work."
+    );
+    assert!(tidy_sentences("\n\n  \n", "").is_empty());
+}
+
+#[test]
+fn http_details_become_what_an_agent_does() {
+    // Words that say only that the tool is part of the API go.
+    assert_eq!(
+        tidy(
+            "You can use the REST API to list the sub-issues on an issue.",
+            ""
+        ),
+        "List the sub-issues on an issue."
+    );
+    // Paging is next_page, and headers are utcp's business.
+    assert_eq!(
+        tidy(
+            "Use the Link header to get the URL for the next page of results. Set the Accept header to raw.",
+            ""
+        ),
+        "Call again with next_page for the next page of results."
+    );
+    assert_eq!(
+        tidy(
+            "The Checks API only looks for pushes in the repository where the check suite or check run were created.",
+            ""
+        ),
+        "Checks only look for pushes in the repository where the check suite or check run was created."
+    );
+    // utcp prints the answer, not its status code.
+    assert_eq!(
+        tidy(
+            "A response with an HTTP 200 status means that you already added the reaction type to this issue.",
+            ""
+        ),
+        "If you already added this reaction type to this issue, the answer is that reaction and nothing is added."
+    );
+    // The tool itself, and tools in general, are tools; a Rails placeholder and a query parameter are arguments.
+    assert_eq!(
+        tidy(
+            "That endpoint reports runs. The endpoint will return 404. Use \"Issues\" endpoints. If you omit :ref, \
+             the default branch is used.",
+            ""
+        ),
+        "That tool reports runs. The tool will return 404. Use \"Issues\" tools. If you omit ref, the default \
+         branch is used."
+    );
+    assert_eq!(
+        tidy("To list all, pass the query parameter all=false.", ""),
+        "To list all, with all set to false."
+    );
+    // A list in the URL query is the JSON list the argument takes.
+    assert_eq!(
+        tidy(
+            "Example: cwes=79,284,22 or cwes[]=79&cwes[]=284&cwes[]=22",
+            ""
+        ),
+        "Example: [\"79\", \"284\", \"22\"]"
+    );
+    assert_eq!(
+        tidy("Example: cwes[]=79&cwes[]=284 or cwes=79,284", ""),
+        "Example: [\"79\", \"284\"]"
+    );
+}
+
+#[test]
+fn sentences_end_before_lowercase_words_only_after_words() {
+    // "created_at means" starts a sentence after a word, but a lowercase word after "v2." or
+    // "No." does not; a capital after "tags." does.
+    assert_eq!(
+        sentences("Sorts by the cache. created_at means age. Use v2. tags. No. items."),
+        [
+            "Sorts by the cache.",
+            "created_at means age.",
+            "Use v2. tags.",
+            "No. items."
+        ]
+    );
+    // JSON arguments end with a period; a URL or a quoted value does not.
+    assert_eq!(
+        end_sentence("Use {\"q\": \"css\"}"),
+        "Use {\"q\": \"css\"}."
+    );
+    // A search's URL query in a code span is the JSON arguments the tool takes.
+    assert_eq!(
+        plain("Try `q=tetris+language:assembly&sort=stars&per_page=5`."),
+        "Try {\"q\": \"tetris language:assembly\", \"sort\": \"stars\", \"per_page\": 5}."
+    );
+}
+
+#[test]
+fn links_name_tools() {
+    let spec = description();
+    let ops = crate::generate::operations(&spec);
+    let tools: HashMap<String, String> = [
+        ("repos/get", "github_repos.get_repo"),
+        (
+            "issues/list-assignees",
+            "github_issues_pulls.list_issue_assignees",
+        ),
+        ("checks/create", "github_actions.create_check_run"),
+        (
+            "code-scanning/get-alert",
+            "github_security.get_code_scanning_alert",
+        ),
+    ]
+    .into_iter()
+    .map(|(op, tool)| (op.to_string(), tool.to_string()))
+    .collect();
+    let t = crate::links::Targets::new(&ops, &tools);
+    let page = "https://docs.github.com/en/rest/repos/repos#get-a-repository";
+    // A page title in quotes, or after "use the", is the tool.
+    assert_eq!(
+        t.rewrite(&format!("See \"[Get a repository]({page}).\"")),
+        "See github_repos.get_repo."
+    );
+    assert_eq!(
+        t.rewrite(&format!("Use the [Get a repository]({page}) endpoint.")),
+        "Use github_repos.get_repo."
+    );
+    // Link text that names an endpoint is the tool, with the words around it gone.
+    assert_eq!(
+        t.rewrite(
+            "Use the [assignees endpoint](/rest/issues/assignees#list-assignees-of-an-issue)."
+        ),
+        "Use github_issues_pulls.list_issue_assignees."
+    );
+    // A page title inside a sentence reads as words, with the tool after them.
+    assert_eq!(
+        t.rewrite("You can manually [Create a check run](/rest/checks/runs#create-a-check-run)."),
+        "You can manually create a check run (github_actions.create_check_run)."
+    );
+    // Text that says what to do gets the tool; a thing after an article does not.
+    assert_eq!(
+        t.rewrite(&format!(
+            "You can [read the repository]({page}) or the [repository]({page})."
+        )),
+        "You can read the repository (github_repos.get_repo) or the repository."
+    );
+    // A left-out target, or a guide, keeps its text for plain().
+    assert_eq!(
+        t.rewrite("See \"[Update a repository](/rest/repos/repos#update-a-repository).\""),
+        "See \"Update a repository.\""
+    );
+    let guide = "See [About repositories](https://docs.github.com/repositories/about).";
+    assert_eq!(t.rewrite(guide), guide);
+    // A method and path, also with Rails placeholders or other names, is the tool.
+    assert_eq!(
+        t.rewrite("Call `GET /repos/{owner}/{repo}/code-scanning/alerts/{number}`."),
+        "Call github_security.get_code_scanning_alert."
+    );
+    assert_eq!(
+        t.rewrite("Use GET /repos/:owner/:repo."),
+        "Use github_repos.get_repo."
+    );
+    // The organization half of a pointer goes when organizations are left out.
+    assert_eq!(
+        t.rewrite(
+            "Use `GET /repos/{owner}/{repo}` and `GET /orgs/{org}/members` for organizations."
+        ),
+        "Use github_repos.get_repo."
+    );
+    // "the ... endpoint" goes around a tool name, also across a line break.
+    assert_eq!(
+        t.rewrite("Use the `GET /repos/{owner}/{repo}`\nendpoint."),
+        "Use github_repos.get_repo."
+    );
+}
+
+#[test]
+fn delete_notes_and_outputs() {
+    use crate::generate::{
+        answer_description, delete_note, null_when, outputs, NO_CONTENT, NULL_TOO, YES_NO_ANSWER,
+    };
+    assert_eq!(
+        delete_note("Delete a release").as_deref(),
+        Some(DELETE_NOTE)
+    );
+    assert_eq!(
+        delete_note("Remove a label").as_deref(),
+        Some("Remove only what the user asked for or what you added.")
+    );
+    assert_eq!(
+        delete_note("Disable a workflow").as_deref(),
+        Some("Disable only what the user asked for or what you enabled.")
+    );
+    // Undoing the user's own action needs no caution.
+    assert_eq!(delete_note("Unstar a repository"), None);
+    // Only what an answer's description says about its content is kept.
+    assert_eq!(answer_description("Response", ""), "");
+    assert_eq!(answer_description("Task created successfully", ""), "");
+    assert_eq!(
+        answer_description("Response if merge was successful", ""),
+        ""
+    );
+    assert_eq!(
+        answer_description("Response including the release's assets", ""),
+        "Includes the release's assets."
+    );
+    assert_eq!(
+        answer_description(
+            "The repository",
+            "Get a repository /repository/{owner}/{repo}"
+        ),
+        ""
+    );
+    assert_eq!(
+        null_when("Response if repository is empty"),
+        "Null if the repository is empty."
+    );
+    assert_eq!(
+        null_when("Response when already merged"),
+        "Null when already merged."
+    );
+    assert_eq!(null_when("A header with no content is returned."), NULL_TOO);
+
+    let schema = json!({"application/json": {"schema": {"type": "object"}}});
+    let list = json!({"application/json": {"schema": {"type": "array", "items": {}}}});
+    let out = |method: &str, responses: Value| {
+        let spec = json!({"paths": {"/x": {method: {"operationId": "x/y", "summary": "Get an x",
+                                                     "responses": responses}}}});
+        let ops = crate::generate::operations(&spec);
+        outputs(&spec, &ops[0]).unwrap()
+    };
+    // An outcome-only description says nothing; a redirect is followed, so it is not an answer.
+    assert_eq!(
+        out(
+            "get",
+            json!({"200": {"description": "OK", "content": schema}, "301": {"description": "Moved"}})
+        ),
+        json!({"type": "object"})
+    );
+    // Two answers described differently: utcp does not say which came, so no description.
+    assert_eq!(
+        out(
+            "post",
+            json!({"200": {"description": "Reaction exists", "content": schema},
+                            "201": {"description": "Reaction created", "content": schema}})
+        ),
+        json!({"type": "object"})
+    );
+    // A 204 next to a 200 says when the answer is null.
+    assert_eq!(
+        out(
+            "get",
+            json!({"200": {"description": "Response", "content": list},
+                           "204": {"description": "Response if repository is empty"}})
+        ),
+        json!({"type": "array", "description": "Null if the repository is empty."})
+    );
+    // Only a 204: a write answers null when it worked; a GET is a yes/no check.
+    assert_eq!(
+        out("put", json!({"204": {"description": "Response"}})),
+        json!({"type": "null", "description": NO_CONTENT})
+    );
+    assert_eq!(
+        out(
+            "get",
+            json!({"204": {"description": "If the user is blocked"},
+                           "404": {"description": "If the user is not blocked"}})
+        ),
+        json!({"type": "null", "description": YES_NO_ANSWER})
+    );
+}
+
+#[test]
+fn config_mistakes_fail() {
+    let fails = |conf: &Config| {
+        generate(&description(), API_VERSION, &source_json(), conf)
+            .unwrap_err()
+            .0
+    };
+    // A sentence fix whose text GitHub no longer has.
+    let mut conf = test_config();
+    conf.sentence_fixes
+        .push(("repos/get".into(), "No such text.".into(), "x".into()));
+    let e = fails(&conf);
+    assert!(e.contains("repos/get: config sentence_fixes text"), "{e}");
+    // A note naming a tool that does not exist.
+    let mut conf = test_config();
+    conf.notes
+        .insert("repos/get".into(), "Use github_repos.no_such_tool.".into());
+    let e = fails(&conf);
+    assert!(
+        e.contains("names github_repos.no_such_tool, which is not a tool"),
+        "{e}"
+    );
+    // An operation the description does not have.
+    let mut conf = test_config();
+    conf.notes.insert("repos/no-such".into(), "x".into());
+    let e = fails(&conf);
+    assert!(e.contains("config names repos/no-such"), "{e}");
+    // A variant of a left-out operation.
+    let mut conf = test_config();
+    let mut v = conf.variants[0].clone();
+    v.op_id = "repos/update".into();
+    v.name = "update_raw".into();
+    conf.variants.push(v);
+    let e = fails(&conf);
+    assert!(
+        e.contains("config variant update_raw is of repos/update, which is left out"),
+        "{e}"
+    );
+    // Two tools with one name.
+    let mut conf = test_config();
+    conf.names.insert("repos/get".into(), "get_content".into());
+    let e = fails(&conf);
+    assert!(
+        e.contains("tool name 'get_content' is used by repos/get and repos/get-content"),
+        "{e}"
+    );
+}
+
+#[test]
+fn fit_whole_sentences() {
+    let s = |text: &str, essential| Sentence {
+        text: text.into(),
+        essential,
+    };
+    // The essential sentence is kept even though an earlier one did not fit.
+    let list = [
+        s("One two.", false),
+        s("Three four five.", false),
+        s("Classic tokens need the repo scope.", true),
+    ];
+    assert_eq!(
+        fit(&list, 50),
+        "One two. Classic tokens need the repo scope."
+    );
+    assert_eq!(
+        fit(&list, 100),
+        "One two. Three four five. Classic tokens need the repo scope."
+    );
+    // A lead-in left last goes.
+    let list = [
+        s("Lists runs.", false),
+        s("For example:", false),
+        s("A long example sentence that does not fit.", false),
+    ];
+    assert_eq!(fit(&list, 30), "Lists runs.");
+    // Only a first sentence that alone is too long is cut, at a word.
+    let list = [s(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+        false,
+    )];
+    assert_eq!(
+        fit(&list, 50),
+        "alpha beta gamma delta epsilon zeta eta theta..."
+    );
+    assert_eq!(fit(&[], 50), "");
+}
+
+#[test]
+fn end_sentence_after_words_only() {
+    for text in [
+        "Default: false",
+        "a branch or tag",
+        "branch/PR",
+        "off-topic",
+        "the owner's",
+        "(an existing option)",
+        "Use `main`",
+    ] {
+        assert_eq!(end_sentence(text), format!("{text}."), "{text}");
+    }
+    for text in [
+        "https://example.com",
+        "docs/README.md",
+        "max 100",
+        "\"open\"",
+        "Done.",
+        "Why?",
+        "-x",
+        "",
+    ] {
+        assert_eq!(end_sentence(text), text, "{text}");
+    }
+}
+
+#[test]
+fn one_of_descriptions_move_up() {
+    let spec = json!({});
+    let convert = |schema: Value| crate::generate::convert(&spec, &schema, 0, &[]).unwrap();
+    // The sentences all branches start with move up.
+    let out = convert(json!({"oneOf": [
+        {"type": "integer", "description": "The milestone. Its number."},
+        {"type": "string", "description": "The milestone. Its title."}
+    ]}));
+    assert_eq!(out["description"], "The milestone.");
+    assert_eq!(out["oneOf"][0]["description"], "Its number.");
+    assert_eq!(out["oneOf"][1]["description"], "Its title.");
+    // The only described branch's description moves up whole.
+    let out = convert(json!({"anyOf": [
+        {"type": "integer", "description": "The milestone number."},
+        {"type": "null"}
+    ]}));
+    assert_eq!(out["description"], "The milestone number.");
+    assert!(out["anyOf"][0].get("description").is_none());
+    // Nothing shared, or a description of its own: nothing moves.
+    let out = convert(json!({"oneOf": [
+        {"type": "integer", "description": "A number."},
+        {"type": "string", "description": "A title."}
+    ]}));
+    assert!(out.get("description").is_none());
+    let out = convert(json!({"description": "Own.", "oneOf": [
+        {"type": "integer", "description": "Shared."},
+        {"type": "string", "description": "Shared."}
+    ]}));
+    assert_eq!(out["description"], "Own.");
+    assert_eq!(out["oneOf"][0]["description"], "Shared.");
+}
+
+#[test]
+fn shared_summaries_are_qualified() {
+    let mut spec = description();
+    spec["paths"]["/zen"]["get"]["summary"] = json!("Get the authenticated user");
+    let e = generate(&spec, API_VERSION, &source_json(), &test_config()).unwrap_err();
+    assert!(
+        e.0.contains("meta/get-zen: other tools have the same summary")
+            && e.0.contains("add category 'meta'"),
+        "{}",
+        e.0
+    );
+    let mut conf = test_config();
+    conf.summary_qualifiers
+        .insert("meta".into(), "for the meta API".into());
+    let (manuals, _) = generate(&spec, API_VERSION, &source_json(), &conf).unwrap();
+    let tools = tools_by_name(&manuals);
+    assert_eq!(
+        tools["get_zen"]["description"],
+        "Get the authenticated user for the meta API."
+    );
+    assert_eq!(
+        tools["get_authenticated_user"]["description"],
+        "Get the authenticated user for a user."
+    );
+    // Two tools of one category still collide.
+    let mut spec = description();
+    spec["paths"]["/repos/{owner}/{repo}/contents/{path}"]["get"]["summary"] =
+        json!("Get a repository");
+    let e = generate(&spec, API_VERSION, &source_json(), &test_config()).unwrap_err();
+    assert!(e.0.contains("still have the same summary"), "{}", e.0);
+}
+
+#[test]
+fn every_argument_is_described() {
+    let key = |op: &str, name: &str| (op.to_string(), name.to_string());
+    let mut spec = description();
+    spec["paths"]["/search/code"]["get"]["parameters"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("description");
+    let e = generate(&spec, API_VERSION, &source_json(), &test_config()).unwrap_err();
+    assert!(
+        e.0.contains("search/code: argument 'q' has no description"),
+        "{}",
+        e.0
+    );
+    let mut conf = test_config();
+    conf.input_descriptions
+        .insert(key("search/code", "q"), "The query.".into());
+    let (manuals, _) = generate(&spec, API_VERSION, &source_json(), &conf).unwrap();
+    assert_eq!(
+        tools_by_name(&manuals)["search_code"]["inputs"]["properties"]["q"]["description"],
+        "The query."
+    );
+    // An entry for an argument GitHub describes, or one the tool does not have, or for an unknown operation, fails.
+    let e = generate(&description(), API_VERSION, &source_json(), &conf).unwrap_err();
+    assert!(e.0.contains("GitHub now describes argument 'q'"), "{}", e.0);
+    let mut conf = test_config();
+    conf.input_descriptions
+        .insert(key("search/code", "nope"), "x".into());
+    let e = generate(&description(), API_VERSION, &source_json(), &conf).unwrap_err();
+    assert!(e.0.contains("which the tool does not have"), "{}", e.0);
+    let mut conf = test_config();
+    conf.input_descriptions
+        .insert(key("search/no-such-thing", "q"), "x".into());
+    let e = generate(&description(), API_VERSION, &source_json(), &conf).unwrap_err();
+    assert!(e.0.contains("search/no-such-thing"), "{}", e.0);
 }
 
 // Source
