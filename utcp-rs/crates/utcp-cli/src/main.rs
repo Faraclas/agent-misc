@@ -570,8 +570,20 @@ enum MediaAction {
     Clear,
 }
 
+/// `run_cli` is one large `match`, and unoptimized builds give it a frame larger than the 1 MB main
+/// thread stack Windows has, so it runs on a thread with Linux's default 8 MB on every platform.
+const CLI_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() {
-    let result = run_cli();
+    let result = std::thread::Builder::new()
+        .name("utcp".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(run_cli)
+        .map_err(anyhow::Error::from)
+        .and_then(|cli| {
+            cli.join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        });
     // A stdio MCP server stopped during this command (discovery, a direct-mode call, daemon
     // shutdown) gets a grace period after SIGTERM; don't exit before it is fully stopped.
     utcp_core::transports::wait_for_stopping_servers(std::time::Duration::from_secs(5));
