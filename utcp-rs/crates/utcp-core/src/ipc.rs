@@ -820,15 +820,7 @@ impl DaemonServerState {
                         }
                     }
                     None => IpcResponse::Error {
-                        message: format!(
-                            "Tool '{}' not found in {}",
-                            target,
-                            if staged {
-                                "the staged manuals (utcp list --staged)"
-                            } else {
-                                "registered manuals"
-                            }
-                        ),
+                        message: crate::catalog::tool_not_found(&target, staged),
                     },
                 }
             }
@@ -858,7 +850,7 @@ impl DaemonServerState {
                                 if staged {
                                     anyhow!("Manual '{}' is not staged", mname)
                                 } else {
-                                    anyhow!("Manual '{}' not loaded", mname)
+                                    anyhow!("Manual '{}' is not registered", mname)
                                 }
                             })?;
                             Ok((m, mname, tname, guard.env_map.clone()))
@@ -1001,9 +993,9 @@ impl DaemonServerState {
                                 let res = async {
                                     let (mname, tname) =
                                         resolve_manual_and_tool(&item.tool, Some(index), paths)?;
-                                    let manual = manuals
-                                        .get(&mname)
-                                        .ok_or_else(|| anyhow!("Manual '{}' not loaded", mname))?;
+                                    let manual = manuals.get(&mname).ok_or_else(|| {
+                                        anyhow!("Manual '{}' is not registered", mname)
+                                    })?;
                                     let files: &dyn CallerFiles = match &conn {
                                         Some(c) => c.as_ref(),
                                         None => &NoFiles,

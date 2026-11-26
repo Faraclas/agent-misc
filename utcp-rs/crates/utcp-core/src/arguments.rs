@@ -607,6 +607,39 @@ fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<
         .map(|(_, c)| c)
 }
 
+/// Up to `max` of `candidates` that look like `name`, best first, ignoring case: those containing
+/// it (`get_us` -> `get_user`), then those having each of its `_`/`-` words, also as a word's start
+/// (`list_comments` -> `list_issue_comments`), then near-typos (`trigers` -> `triggers`).
+pub fn similar_names<'a>(name: &str, candidates: &[&'a str], max: usize) -> Vec<&'a str> {
+    let lower = name.to_ascii_lowercase();
+    let is_sep = |c: char| c == '_' || c == '-';
+    let words: Vec<&str> = lower.split(is_sep).filter(|w| !w.is_empty()).collect();
+    let limit = (name.chars().count() / 3).clamp(1, 3);
+    let mut ranked: Vec<(usize, usize, usize, &str)> = candidates
+        .iter()
+        .filter_map(|&c| {
+            let cl = c.to_ascii_lowercase();
+            if cl == lower {
+                return None;
+            }
+            if !lower.is_empty() && cl.contains(&lower) {
+                return Some((0, 0, c.len(), c));
+            }
+            if words.len() > 1
+                && words
+                    .iter()
+                    .all(|w| cl.split(is_sep).any(|cw| cw.starts_with(w)))
+            {
+                return Some((1, 0, c.len(), c));
+            }
+            let d = distance(&lower, &cl);
+            (d <= limit).then_some((2, d, c.len(), c))
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().take(max).map(|r| r.3).collect()
+}
+
 /// Edit distance between two short strings, counting two swapped neighbors (`vaule`) as one edit
 /// (optimal string alignment).
 fn distance(a: &str, b: &str) -> usize {
@@ -1114,5 +1147,31 @@ mod tests {
             a["body"],
             json!({"n": 5, "b": true, "either": "5", "f": 0.5})
         );
+    }
+
+    #[test]
+    fn similar_names_rank_contains_then_words_then_typos() {
+        let tools = [
+            "list_issue_comments",
+            "list_comments_for_repo",
+            "get_user",
+            "get_user_by_id",
+            "create_issue",
+            "delete_issue",
+        ];
+        // Contains the name first (shortest first), then names with all of its words.
+        assert_eq!(
+            similar_names("list_comments", &tools, 5),
+            vec!["list_comments_for_repo", "list_issue_comments"]
+        );
+        assert_eq!(
+            similar_names("get_us", &tools, 5),
+            vec!["get_user", "get_user_by_id"]
+        );
+        // A typo within the edit-distance limit; case is ignored; the exact name is not a guess.
+        assert_eq!(similar_names("creat_isue", &tools, 5), vec!["create_issue"]);
+        assert_eq!(similar_names("GET_USER", &tools, 5), vec!["get_user_by_id"]);
+        assert!(similar_names("zzz", &tools, 5).is_empty());
+        assert_eq!(similar_names("issue", &tools, 2).len(), 2);
     }
 }

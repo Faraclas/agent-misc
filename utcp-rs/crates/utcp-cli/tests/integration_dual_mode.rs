@@ -2450,16 +2450,20 @@ async fn stage_diff_promote_rollback_and_discard() {
         err.contains("'pets' (staged) has no tool named 'get_us'"),
         "{err}"
     );
-    assert!(
-        err.contains("Tools with 'get_us' in the name: pets.get_user."),
-        "{err}"
-    );
+    assert!(err.contains("Similar tools: pets.get_user."), "{err}");
     assert!(err.contains("utcp list pets --staged"), "{err}");
     let err = run_err(&env, &["call", "pets.get_us", "{}"]);
     assert!(!err.contains("Add --staged"), "{err}");
     assert!(err.contains("has no tool named 'get_us'"), "{err}");
     let err = run_err(&env, &["call", "nope", "get_user"]);
     assert!(err.contains("No manual named 'nope'"), "{err}");
+    let err = run_err(&env, &["call", "pest.get_user", "{}"]);
+    assert!(err.contains("Similar manuals: pets."), "{err}");
+    assert_eq!(err.matches("utcp list").count(), 1, "{err}");
+    let err = run_err(&env, &["schema", "pest.get_user"]);
+    assert!(err.contains("Similar manuals: pets."), "{err}");
+    let err = run_err(&env, &["schema", "get_user"]);
+    assert!(err.contains("Name a tool as <manual>.<tool>"), "{err}");
     assert_eq!(call_staged_auth(&env), "Bearer from-secrets");
     assert!(!installed_skill_description(&env).contains("pets"));
     let doctor = doctor_json(&env);
@@ -2513,10 +2517,7 @@ async fn stage_diff_promote_rollback_and_discard() {
     let err = run_err(&env, &["call", "pets.get_user", "{}"]);
     assert!(err.contains("utcp call --staged pets.get_user"), "{err}");
     let err = run_err(&env, &["call", "pets.get_us", "{}"]);
-    assert!(
-        err.contains("Tools with 'get_us' in the name: pets.get_user."),
-        "{err}"
-    );
+    assert!(err.contains("Similar tools: pets.get_user."), "{err}");
     assert_eq!(call_staged_auth(&env), "Bearer from-secrets");
     let doctor = doctor_json(&env);
     assert_eq!(credential(&doctor, "pets")["is_set"], true);
@@ -3517,6 +3518,9 @@ async fn where_keeps_the_matching_list_items() {
         assert_eq!(names(&r["records"]), ["a", "b"], "{label}: {r}");
         let r = call(&["w.timeline", "--where", "type!^=t"]);
         assert_eq!(names(&r["records"]), ["b"], "{label}: {r}");
+        // A path part that matches no key exactly matches the key differing only in case.
+        let r = call(&["w.timeline", "--where", "Records.Issues.Type=error"]);
+        assert_eq!(names(&r["records"]), ["a"], "{label}: {r}");
         // Filtered first, then projected.
         let r = call(&[
             "w.timeline",

@@ -58,33 +58,19 @@ pub fn render_skill_markdown(platform: SkillTargetPlatform, manual_labels: &[Str
     match platform {
         SkillTargetPlatform::LinuxPosix => {
             let call_examples = "\
-- **Simple JSON arguments:**
+The arguments are one JSON object; pass long or quoted ones on stdin:
 
-  ```sh
-  utcp call <manual.tool> '{\"param\": \"value\"}'
-  ```
-
-- **Complex or multiline JSON arguments (via stdin):**
-
-  ```sh
-  utcp call <manual.tool> --args-stdin <<'EOF'
-  {\"param\": \"value\"}
-  EOF
-  ```
-
-- **Preview a call without executing (`--dry-run`; it shows the URL, query and body it would send):**
-
-  ```sh
-  utcp call <manual.tool> '{\"param\": \"value\"}' --dry-run
-  ```";
+```sh
+utcp call <manual.tool> '{\"param\": \"value\"}'
+utcp call <manual.tool> --args-stdin <<'EOF'
+{\"param\": \"value with 'quotes'\"}
+EOF
+```";
 
             let batch_example = "\
 ```sh
-utcp batch --stdin <<'EOF'
-[
-  {\"id\": \"1\", \"tool\": \"manual.tool_a\", \"args\": {\"id\": 1}},
-  {\"id\": \"2\", \"tool\": \"manual.tool_b\", \"args\": {\"id\": 2}}
-]
+utcp batch <<'EOF'
+[{\"tool\": \"manual.tool_a\", \"args\": {\"id\": 1}}, {\"id\": \"b\", \"tool\": \"manual.tool_b\", \"args\": {}}]
 EOF
 ```";
 
@@ -96,30 +82,19 @@ EOF
         }
         SkillTargetPlatform::WindowsPowerShell => {
             let call_examples = "\
-- **PowerShell-safe JSON arguments (via stdin):**
+The arguments are one JSON object; pass them on stdin so PowerShell keeps the quotes:
 
-  ```powershell
-  @'
-  {\"param\": \"value\"}
-  '@ | utcp.exe call <manual.tool> --args-stdin
-  ```
-
-- **Preview a call without executing (`--dry-run`; it shows the URL, query and body it would send):**
-
-  ```powershell
-  @'
-  {\"param\": \"value\"}
-  '@ | utcp.exe call <manual.tool> --args-stdin --dry-run
-  ```";
+```powershell
+@'
+{\"param\": \"value\"}
+'@ | utcp.exe call <manual.tool> --args-stdin
+```";
 
             let batch_example = "\
 ```powershell
 @'
-[
-  {\"id\": \"1\", \"tool\": \"manual.tool_a\", \"args\": {\"id\": 1}},
-  {\"id\": \"2\", \"tool\": \"manual.tool_b\", \"args\": {\"id\": 2}}
-]
-'@ | utcp.exe batch --stdin
+[{\"tool\": \"manual.tool_a\", \"args\": {\"id\": 1}}, {\"id\": \"b\", \"tool\": \"manual.tool_b\", \"args\": {}}]
+'@ | utcp.exe batch
 ```";
 
             let body = SKILL_TEMPLATE
@@ -194,7 +169,8 @@ pub fn manual_label(name: &str, hint: Option<&str>) -> String {
     }
 }
 
-/// Labels of the active manuals, sorted by name, for the skill description (see [`grouped_manual_labels`]).
+/// Labels of the active manuals, sorted by name, for the skill description (see [`grouped_manual_labels`]),
+/// shortened by [`fit_manual_labels`] so the description stays within [`MAX_DESCRIPTION_CHARS`].
 pub fn registered_manual_labels(paths: &UtcpPaths) -> Vec<String> {
     UtcpRegistryConfig::load(paths)
         .map(|cfg| {
@@ -203,18 +179,105 @@ pub fn registered_manual_labels(paths: &UtcpPaths) -> Vec<String> {
                 .iter()
                 .map(|(name, e)| (name.clone(), e.hint.clone()))
                 .collect();
-            grouped_manual_labels(&entries)
+            fit_manual_labels(&entries, SkillTargetPlatform::current())
         })
         .unwrap_or_default()
 }
 
+/// Longest skill description the Agent Skills format allows; clients warn about or cut a longer one.
+pub const MAX_DESCRIPTION_CHARS: usize = 1024;
+
+/// The front matter `description` of a rendered skill as a client reads it: the folded (`>-`) lines joined
+/// with single spaces.
+pub fn skill_description(md: &str) -> String {
+    let front = md
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map(|(front, _)| front)
+        .unwrap_or_default();
+    let mut lines = front.lines().skip_while(|l| !l.starts_with("description:"));
+    let first = lines
+        .next()
+        .map(|l| l.trim_start_matches("description:").trim())
+        .unwrap_or_default();
+    let mut parts: Vec<&str> = Vec::new();
+    if !first.is_empty() && first != ">-" && first != ">" {
+        parts.push(first);
+    }
+    parts.extend(
+        lines
+            .take_while(|l| l.starts_with(' ') || l.is_empty())
+            .map(str::trim)
+            .filter(|l| !l.is_empty()),
+    );
+    parts.join(" ")
+}
+
+/// [`grouped_manual_labels`], shortened until the `utcp-tools` description fits in
+/// [`MAX_DESCRIPTION_CHARS`]: the longest label that can still shrink takes its next form (see
+/// [`manual_label_forms`]) until the description fits. When even the shortest forms are too long, the list
+/// ends with `and N more (see utcp list)`.
+pub fn fit_manual_labels(
+    entries: &[(String, Option<String>)],
+    platform: SkillTargetPlatform,
+) -> Vec<String> {
+    let fits = |labels: &[String]| {
+        skill_description(&render_skill_markdown(platform, labels))
+            .chars()
+            .count()
+            <= MAX_DESCRIPTION_CHARS
+    };
+    let forms = manual_label_forms(entries);
+    let mut step = vec![0usize; forms.len()];
+    loop {
+        let labels: Vec<String> = forms
+            .iter()
+            .zip(&step)
+            .map(|(f, &s)| f[s].clone())
+            .collect();
+        if fits(&labels) {
+            return labels;
+        }
+        let longest = (0..forms.len())
+            .filter(|&i| step[i] + 1 < forms[i].len())
+            .max_by_key(|&i| (labels[i].chars().count(), std::cmp::Reverse(i)));
+        match longest {
+            Some(i) => step[i] += 1,
+            None => {
+                for keep in (0..labels.len()).rev() {
+                    let mut cut = labels[..keep].to_vec();
+                    let more = labels.len() - keep;
+                    cut.push(format!("and {more} more (see `utcp list`)"));
+                    if keep == 0 || fits(&cut) {
+                        return cut;
+                    }
+                }
+                return labels;
+            }
+        }
+    }
+}
+
 /// Labels for the skill description, which every agent loads on every task. Manuals named
-/// `<prefix>_<rest>` that share a prefix with another manual become one label, and the words their
-/// hints all start or end with are written once: `azdo_admin (Azure DevOps permissions, org ni)` and
-/// `azdo_git (Azure DevOps repos and PRs, org ni)` become
-/// `azdo_* (Azure DevOps, org ni: admin (permissions), git (repos and PRs))`. Other manuals get
-/// [`manual_label`]. `entries` must be sorted by name.
+/// `<prefix>_<rest>` that share a prefix with another manual become one label: the words their hints all
+/// start or end with, written once, then the member names. `azdo_admin (Azure DevOps permissions, org ni)` and
+/// `azdo_git (Azure DevOps repos and PRs, org ni)` become `azdo_* (Azure DevOps, org ni: admin, git)`; each
+/// member's own words are in `utcp list`. Members whose hints share no words keep their hints. Other manuals
+/// get [`manual_label`]. `entries` must be sorted by name.
 pub fn grouped_manual_labels(entries: &[(String, Option<String>)]) -> Vec<String> {
+    manual_label_forms(entries)
+        .into_iter()
+        .map(|mut forms| forms.swap_remove(0))
+        .collect()
+}
+
+/// For each label of [`grouped_manual_labels`], its forms from longest to shortest. A manual: `name (hint)`,
+/// then `name`. A group with shared words: the shared words with the member names
+/// (`azdo_* (Azure DevOps, org ni: admin, git)`), then the shared words alone (`azdo_* (Azure DevOps, org ni)`),
+/// then `azdo_*`. A group without: each member with its hint, then the member names, then the prefix. The
+/// member names follow the shared words because the names alone say more than the prefix does, and the
+/// shared words say what the group is.
+pub fn manual_label_forms(entries: &[(String, Option<String>)]) -> Vec<Vec<String>> {
     let prefix_of = |name: &str| name.split_once('_').map(|(p, _)| p.to_string());
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (name, _) in entries {
@@ -227,7 +290,10 @@ pub fn grouped_manual_labels(entries: &[(String, Option<String>)]) -> Vec<String
     for (name, hint) in entries {
         let group = prefix_of(name).filter(|p| counts.get(p).copied().unwrap_or(0) > 1);
         let Some(prefix) = group else {
-            labels.push(manual_label(name, hint.as_deref()));
+            let mut forms = vec![manual_label(name, hint.as_deref())];
+            forms.push(name.clone());
+            forms.dedup();
+            labels.push(forms);
             continue;
         };
         if !done.insert(prefix.clone()) {
@@ -243,12 +309,12 @@ pub fn grouped_manual_labels(entries: &[(String, Option<String>)]) -> Vec<String
                 )
             })
             .collect();
-        labels.push(group_label(&prefix, &members));
+        labels.push(group_label_forms(&prefix, &members));
     }
     labels
 }
 
-fn group_label(prefix: &str, members: &[(&str, Option<&str>)]) -> String {
+fn group_label_forms(prefix: &str, members: &[(&str, Option<&str>)]) -> Vec<String> {
     let words: Vec<Vec<&str>> = members
         .iter()
         .filter_map(|(_, h)| h.map(|h| h.split_whitespace().collect()))
@@ -282,22 +348,22 @@ fn group_label(prefix: &str, members: &[(&str, Option<&str>)]) -> String {
         }
         _ => String::new(),
     };
-    let parts: Vec<String> = members
-        .iter()
-        .map(|(rest, hint)| match hint {
-            Some(h) => {
-                let w: Vec<&str> = h.split_whitespace().collect();
-                let own = trim(w[lead..w.len() - tail].join(" "));
-                manual_label(rest, Some(&own))
-            }
-            None => rest.to_string(),
-        })
-        .collect();
+    let bare: Vec<&str> = members.iter().map(|(rest, _)| *rest).collect();
+    let mut forms = Vec::new();
     if shared.is_empty() {
-        format!("{prefix}_* ({})", parts.join(", "))
+        let parts: Vec<String> = members
+            .iter()
+            .map(|(rest, hint)| manual_label(rest, *hint))
+            .collect();
+        forms.push(format!("{prefix}_* ({})", parts.join(", ")));
+        forms.push(format!("{prefix}_* ({})", bare.join(", ")));
     } else {
-        format!("{prefix}_* ({shared}: {})", parts.join(", "))
+        forms.push(format!("{prefix}_* ({shared}: {})", bare.join(", ")));
+        forms.push(format!("{prefix}_* ({shared})"));
     }
+    forms.push(format!("{prefix}_*"));
+    forms.dedup();
+    forms
 }
 
 /// Enumerate the global and optional workspace skills root folders across Zed (`~/.agents/skills`),
@@ -571,12 +637,210 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "azdo_* (Azure DevOps, org ni: admin (permissions, connections, hooks), git (repos and PRs), \
-                 wiki_search (wiki and search))",
+                "azdo_* (Azure DevOps, org ni: admin, git, wiki_search)",
                 "context7 (library and framework docs)",
                 "d2",
                 "github (GitHub REST API)",
                 "my_tool (one of a kind)",
+            ]
+        );
+    }
+
+    /// The manuals registered on 25 Nov 2026: nine `azdo_*` and seven `github_*` with hints made the
+    /// description 1,219 characters, and Zed warned that it is over the 1,024 the Agent Skills format allows.
+    fn many_hinted_manuals() -> Vec<(String, Option<String>)> {
+        entries(&[
+            (
+                "azdo_admin",
+                Some("Azure DevOps permissions, connections, hooks, org ni"),
+            ),
+            (
+                "azdo_analytics",
+                Some("Azure DevOps Analytics OData queries, org ni"),
+            ),
+            (
+                "azdo_artifacts",
+                Some("Azure DevOps feeds, packages, symbols, org ni"),
+            ),
+            (
+                "azdo_core",
+                Some("Azure DevOps projects, teams, users, org ni"),
+            ),
+            ("azdo_git", Some("Azure DevOps repos and PRs, org ni")),
+            (
+                "azdo_pipelines",
+                Some("Azure DevOps builds and pipelines, org ni"),
+            ),
+            (
+                "azdo_test",
+                Some("Azure DevOps test plans and results, org ni"),
+            ),
+            (
+                "azdo_wiki_search",
+                Some("Azure DevOps wiki and search, org ni"),
+            ),
+            (
+                "azdo_work",
+                Some("Azure DevOps work items, boards, dashboards, org ni"),
+            ),
+            ("context7", Some("library and framework docs")),
+            ("d2", Some("diagrams from text")),
+            ("github", None),
+            (
+                "github_actions",
+                Some("GitHub Actions, checks, environments, packages, Pages"),
+            ),
+            (
+                "github_copilot",
+                Some("GitHub Copilot agent tasks, automations, settings"),
+            ),
+            (
+                "github_issues_pulls",
+                Some("GitHub issues, pull requests, reviews, labels, projects"),
+            ),
+            (
+                "github_repos",
+                Some("GitHub repos, files, branches, commits, git, releases"),
+            ),
+            (
+                "github_search",
+                Some("GitHub search: code, issues, PRs, repos, commits, users"),
+            ),
+            (
+                "github_security",
+                Some("GitHub code and secret scanning, Dependabot, advisories"),
+            ),
+            (
+                "github_users",
+                Some("GitHub users, notifications, stars, orgs, billing, meta"),
+            ),
+        ])
+    }
+
+    fn description_len(platform: SkillTargetPlatform, labels: &[String]) -> usize {
+        skill_description(&render_skill_markdown(platform, labels))
+            .chars()
+            .count()
+    }
+
+    /// Group members are listed by name only, so the 25 Nov 2026 set now fits untouched.
+    #[test]
+    fn the_registered_manuals_of_25_nov_fit_without_shortening() {
+        for platform in [
+            SkillTargetPlatform::LinuxPosix,
+            SkillTargetPlatform::WindowsPowerShell,
+        ] {
+            let all = many_hinted_manuals();
+            let labels = fit_manual_labels(&all, platform);
+            assert_eq!(labels, grouped_manual_labels(&all));
+            let len = description_len(platform, &labels);
+            assert!(len <= 700, "{len}: {labels:?}");
+        }
+    }
+
+    #[test]
+    fn the_description_is_shortened_to_the_limit_longest_label_first() {
+        for platform in [
+            SkillTargetPlatform::LinuxPosix,
+            SkillTargetPlatform::WindowsPowerShell,
+        ] {
+            let mut all = many_hinted_manuals();
+            for i in 0..8 {
+                all.push((
+                    format!("svc{i:02}"),
+                    Some(format!(
+                        "service number {i} for tests, with a hint of medium length"
+                    )),
+                ));
+            }
+            assert!(
+                description_len(platform, &grouped_manual_labels(&all)) > MAX_DESCRIPTION_CHARS,
+                "the case this guards against"
+            );
+            let labels = fit_manual_labels(&all, platform);
+            let len = description_len(platform, &labels);
+            assert!(len <= MAX_DESCRIPTION_CHARS, "{len}: {labels:?}");
+            // Short labels keep their hints; the longest labels give up their words first.
+            assert!(
+                labels.contains(&"context7 (library and framework docs)".to_string()),
+                "{labels:?}"
+            );
+            assert!(
+                labels.contains(&"d2 (diagrams from text)".to_string()),
+                "{labels:?}"
+            );
+            assert!(labels.contains(&"github".to_string()), "{labels:?}");
+            assert_eq!(labels.len(), 13, "no manual is cut: {labels:?}");
+            assert!(
+                labels.contains(&"github_* (GitHub)".to_string()),
+                "{labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_that_fit_are_left_alone() {
+        let few = entries(&[
+            ("context7", Some("library and framework docs")),
+            ("d2", None),
+        ]);
+        assert_eq!(
+            fit_manual_labels(&few, SkillTargetPlatform::LinuxPosix),
+            grouped_manual_labels(&few)
+        );
+        assert_eq!(
+            fit_manual_labels(&[], SkillTargetPlatform::LinuxPosix),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn when_bare_names_are_too_long_the_list_ends_with_how_many_more() {
+        let names: Vec<String> = (0..120).map(|i| format!("manual{i:03}")).collect();
+        let many: Vec<(String, Option<String>)> = names
+            .iter()
+            .map(|n| (n.clone(), Some("some hint".into())))
+            .collect();
+        let labels = fit_manual_labels(&many, SkillTargetPlatform::LinuxPosix);
+        let len = description_len(SkillTargetPlatform::LinuxPosix, &labels);
+        assert!(len <= MAX_DESCRIPTION_CHARS, "{len}");
+        let last = labels.last().unwrap();
+        assert!(
+            last.starts_with("and ") && last.ends_with(" more (see `utcp list`)"),
+            "{last}"
+        );
+        let shown = labels.len() - 1;
+        assert_eq!(last, &format!("and {} more (see `utcp list`)", 120 - shown));
+        assert!(
+            labels[..shown].iter().all(|l| !l.contains('(')),
+            "bare names: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn skill_description_reads_the_folded_front_matter() {
+        let md = "---\nname: x\ndescription: >-\n  one two\n  three\n---\n\nbody\n";
+        assert_eq!(skill_description(md), "one two three");
+        let md = "---\nname: x\ndescription: plain text\nother: y\n---\nbody\n";
+        assert_eq!(skill_description(md), "plain text");
+    }
+
+    #[test]
+    fn group_forms_go_from_member_words_to_the_bare_prefix() {
+        let forms = manual_label_forms(&entries(&[
+            ("azdo_git", Some("Azure DevOps repos and PRs, org ni")),
+            ("azdo_work", Some("Azure DevOps work items, org ni")),
+            ("d2", None),
+        ]));
+        assert_eq!(
+            forms,
+            vec![
+                vec![
+                    "azdo_* (Azure DevOps, org ni: git, work)".to_string(),
+                    "azdo_* (Azure DevOps, org ni)".to_string(),
+                    "azdo_*".to_string(),
+                ],
+                vec!["d2".to_string()],
             ]
         );
     }
@@ -596,7 +860,7 @@ mod tests {
         // A hint that is all shared words leaves the member bare.
         let labels =
             grouped_manual_labels(&entries(&[("x_a", Some("Foo")), ("x_b", Some("Foo bar"))]));
-        assert_eq!(labels, vec!["x_* (Foo: a, b (bar))"]);
+        assert_eq!(labels, vec!["x_* (Foo: a, b)"]);
     }
 
     #[test]
@@ -708,7 +972,7 @@ mod tests {
         }
     }
 
-    /// Agents learn to filter list answers and that a filtered page still has a next page.
+    /// Agents learn to filter list answers, to trust notes, and to page on.
     #[test]
     fn rendered_skill_teaches_where() {
         for platform in [
@@ -716,16 +980,37 @@ mod tests {
             SkillTargetPlatform::WindowsPowerShell,
         ] {
             let md = render_skill_markdown(platform, &[]);
-            assert!(
-                md.contains("'records.result=failed|canceled'"),
-                "{platform:?}"
-            );
-            assert!(md.contains("`note` in `batch`"), "{platform:?}");
-            assert!(md.contains("`\"where\": [\"path=value\"]`"), "{platform:?}");
-            assert!(
-                md.contains("no matching items still has `next_page`"),
-                "{platform:?}"
-            );
+            for needle in [
+                "`--where 'path=a|b'`",
+                "a date alone is that whole UTC day",
+                "`note` in `batch`",
+                "which keys aren't in the schema",
+                "fix the value rather than conclude there",
+                "plus those in `next_page`",
+                "`fields`, `where` and `out`",
+                "see one with `--path`",
+            ] {
+                assert!(md.contains(needle), "{platform:?} lacks {needle:?}");
+            }
+        }
+    }
+
+    /// The body stays in an agent's context for the rest of the thread once loaded, so it stays short;
+    /// details live in `utcp <command> --help`.
+    #[test]
+    fn rendered_skill_body_stays_short() {
+        for platform in [
+            SkillTargetPlatform::LinuxPosix,
+            SkillTargetPlatform::WindowsPowerShell,
+        ] {
+            let md = render_skill_markdown(platform, &[]);
+            let body = md
+                .strip_prefix("---\n")
+                .and_then(|rest| rest.split_once("\n---\n"))
+                .expect("front matter")
+                .1;
+            let len = body.chars().count();
+            assert!(len <= 4_500, "{platform:?}: {len} characters");
         }
     }
 

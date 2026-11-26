@@ -47,7 +47,7 @@ use utcp_core::catalog::{
     register_manual, reregister_manual, search_tools_sync, set_manual_hint, BatchRequestItem,
     DeregisterOutcome, UtcpRegistryConfig,
 };
-use utcp_core::index::ToolSummary;
+use utcp_core::index::{ToolSchemaDetail, ToolSummary};
 use utcp_core::ipc::{
     manual_caller_env, notify_daemon_reload, query_daemon_status, sync_caller_env_to_daemon,
     try_send_ipc_sync, try_send_ipc_with_files, IpcCommand, IpcPayload, IpcRequest, IpcResponse,
@@ -171,13 +171,28 @@ enum Commands {
         #[arg(long)]
         staged: bool,
     },
-    /// Print the exact JSON input/output schema for a single tool on demand
+    /// Print a tool's input schema: its arguments, with their types, descriptions and allowed values. A schema
+    /// over about 1,000 tokens is shortened: objects below the deepest level that fits are `collapsed` to a
+    /// line naming their fields and the `--path` that shows them
     Schema {
         /// Qualified tool name (`<manual>.<tool>`)
         target: String,
         /// A tool of a staged manual (`utcp stage`)
         #[arg(long)]
         staged: bool,
+        /// Show only this part of the inputs, such as `body.process` (dotted field names; lists, maps (`*`)
+        /// and alternatives are passed through), shortened the same way when it is large
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+        /// Print the whole schema, however large
+        #[arg(long)]
+        full: bool,
+        /// Force pretty-printed multi-line JSON output
+        #[arg(short, long, conflicts_with = "compact")]
+        pretty: bool,
+        /// Force compact single-line JSON output (default for agents and non-TTY pipes)
+        #[arg(long)]
+        compact: bool,
     },
     /// Execute a registered UTCP tool and print response JSON to stdout
     Call {
@@ -194,17 +209,19 @@ enum Commands {
         /// Optional comma-separated fields to project from JSON response (e.g. `sha,commit.message,html_url`).
         /// Dotted paths pass through arrays (`workflow_runs.id`); each path is resolved on its own, so a
         /// top-level key and item keys of a wrapped list can be mixed (`name,total_count`); a key that
-        /// itself has dots is matched whole (`fields.System.State`). A path that matches nothing
+        /// itself has dots is matched whole (`fields.System.State`); a path part that matches no key
+        /// exactly matches one differing only in case. A path that matches nothing
         /// gets a note on stderr listing the keys there.
         #[arg(long, value_delimiter = ',')]
         fields: Vec<String>,
         /// Keep only the list items that match (repeatable; all must hold), before `--fields`:
         /// `path=a|b` (equals one), `path~=a|b` (contains one), `path^=a|b` (starts with one); `!` before
-        /// the operator keeps the others; case is ignored; `\|` is a `|` in a value; a missing field is
+        /// the operator keeps the others; case is ignored in values and paths; `\|` is a `|` in a value; a missing field is
         /// `null`; `=` compares numbers as numbers. `path>v`, `>=`, `<`, `<=` compare numbers or ISO dates
         /// (a date alone means that whole day in UTC, with `=` and `!=` too). Quote the condition. A path
         /// starting with a top-level array filters that array (`records.result=failed`); otherwise the
-        /// answer's `value`/`items`/`results`/`data` list, or its only list of objects. When a condition
+        /// answer's `value`/`items`/`results`/`data` list, or its only list of objects. Through a list
+        /// inside each item (`labels.name=bug`) an item matches when any element does. When a condition
         /// keeps none of a list's items, a note on stderr shows the values the field has. When the answer
         /// has no list to filter (one object, text), the call still succeeds: the whole answer and a note.
         #[arg(long = "where", value_name = "PATH=VALUES")]
@@ -826,9 +843,23 @@ fn run_cli() -> Result<()> {
             print_tool_summaries(&tools, json, schemas)
         }
 
-        Commands::Schema { target, staged } => {
+        Commands::Schema {
+            target,
+            staged,
+            path,
+            full,
+            pretty,
+            compact,
+        } => {
             let started = Instant::now();
             let caller = detect_caller();
+            let shown = SchemaView {
+                path: path.as_deref(),
+                full,
+                pretty,
+                compact,
+                caller: &caller,
+            };
 
             if !cli.direct {
                 let req = IpcRequest {
@@ -843,10 +874,7 @@ fn run_cli() -> Result<()> {
                     return match resp {
                         IpcResponse::Ok {
                             data: IpcPayload::Schema(schema),
-                        } => {
-                            println!("{}", serde_json::to_string_pretty(&schema)?);
-                            Ok(())
-                        }
+                        } => print_schema(&schema, &shown),
                         IpcResponse::Error { message } => Err(with_staged_hint(
                             anyhow!(message),
                             &paths,
@@ -864,8 +892,7 @@ fn run_cli() -> Result<()> {
             maybe_log_direct(
                 &paths, &caller, "schema", &target, true, "OK", started, false, None,
             );
-            println!("{}", serde_json::to_string_pretty(&schema)?);
-            Ok(())
+            print_schema(&schema, &shown)
         }
 
         Commands::Call {
@@ -2103,7 +2130,7 @@ fn empty_list_message(registry: &UtcpRegistryConfig, manual: &str, staged: bool)
 }
 
 /// Where `manual.tool` can be called: which side of `--staged` holds the manual, whether that
-/// manual has the tool, and, when it does not, its tools whose names contain `tool`.
+/// manual has the tool, and, when it does not, its tools whose names look like `tool`.
 struct ToolLookup {
     staged: bool,
     found: bool,
@@ -2127,18 +2154,14 @@ fn lookup_tool(
     };
     let tools = list_tools_sync(paths, Some(manual), side).unwrap_or_default();
     let full = format!("{manual}.{tool}");
-    let needle = tool.to_ascii_lowercase();
-    let similar = tools
+    let prefix = format!("{manual}.");
+    let shorts: Vec<&str> = tools
         .iter()
-        .filter(|t| {
-            let short = t
-                .name
-                .strip_prefix(&format!("{manual}."))
-                .unwrap_or(&t.name);
-            short.to_ascii_lowercase().contains(&needle)
-        })
-        .map(|t| t.name.clone())
-        .take(5)
+        .map(|t| t.name.strip_prefix(&prefix).unwrap_or(&t.name))
+        .collect();
+    let similar = utcp_core::arguments::similar_names(tool, &shorts, 5)
+        .into_iter()
+        .map(|short| format!("{prefix}{short}"))
         .collect();
     Some(ToolLookup {
         staged: side,
@@ -2155,7 +2178,7 @@ fn staged_flag(staged: bool) -> &'static str {
     }
 }
 
-/// `'x' has no tool named 'y'.`, the tools with `y` in their name, and how to list them all.
+/// `'x' has no tool named 'y'.`, the tools whose names look like `y`, and how to list them all.
 fn no_such_tool(l: &ToolLookup, manual: &str, tool: &str) -> String {
     let flag = staged_flag(l.staged);
     let mut s = format!(
@@ -2163,10 +2186,7 @@ fn no_such_tool(l: &ToolLookup, manual: &str, tool: &str) -> String {
         if l.staged { " (staged)" } else { "" }
     );
     if !l.similar.is_empty() {
-        s.push_str(&format!(
-            " Tools with '{tool}' in the name: {}.",
-            l.similar.join(", ")
-        ));
+        s.push_str(&format!(" Similar tools: {}.", l.similar.join(", ")));
     }
     s.push_str(&format!(
         " See all of its tools with: utcp list {manual}{flag}"
@@ -2220,8 +2240,28 @@ fn target_hint(
     staged: bool,
     verb: &str,
 ) -> Option<String> {
-    let (manual, tool) = target.split_once('.')?;
-    let l = lookup_tool(paths, registry, manual, tool, staged)?;
+    let Some((manual, tool)) = target.split_once('.') else {
+        return Some(format!(
+            "Name a tool as <manual>.<tool>; find it with: utcp search '{target}'"
+        ));
+    };
+    let Some(l) = lookup_tool(paths, registry, manual, tool, staged) else {
+        let names: Vec<&str> = registry
+            .manuals
+            .keys()
+            .chain(registry.staged.keys())
+            .map(String::as_str)
+            .collect();
+        let similar = utcp_core::arguments::similar_names(manual, &names, 3);
+        let guess = if similar.is_empty() {
+            String::new()
+        } else {
+            format!(" Similar manuals: {}.", similar.join(", "))
+        };
+        return Some(format!(
+            "No manual named '{manual}' is registered or staged.{guess} See them all with: utcp list"
+        ));
+    };
     match (l.found, l.staged == staged) {
         (true, true) => None,
         (true, false) if l.staged => Some(format!(
@@ -2242,18 +2282,42 @@ fn with_staged_hint(
     staged: bool,
     verb: &str,
 ) -> anyhow::Error {
+    let text = format!("{err:#}");
+    // "not loaded" is what daemons before 0.2.6 say for a manual they don't have.
+    let about_the_target = [
+        "not found",
+        "not registered",
+        "not loaded",
+        "is staged",
+        "is not staged",
+        "unknown tool",
+    ];
+    if !about_the_target.iter().any(|t| text.contains(t)) {
+        return err;
+    }
     match UtcpRegistryConfig::load(paths)
         .ok()
         .and_then(|r| target_hint(paths, &r, target, staged, verb))
     {
-        Some(hint) => anyhow!(append_hint(&format!("{err:#}"), &hint)),
+        Some(hint) => anyhow!(append_hint(&text, &hint)),
         None => err,
     }
 }
 
 /// `error` and `hint` on separate lines, leaving out the hint's first sentence when `error`
 /// already says it (`Manual 'x' is staged, not active yet` + `'x' is staged, not active yet. Add ...`).
+/// A call to an unknown manual already says `Manual 'x' is not registered (see the manuals with:
+/// utcp list)`, so only the hint's `Similar manuals: ...` guess is added, if it has one.
 fn append_hint(error: &str, hint: &str) -> String {
+    if hint.starts_with("No manual named") && error.contains("is not registered") {
+        return match hint
+            .split_once(" Similar manuals: ")
+            .and_then(|(_, rest)| rest.split_once(". See them all"))
+        {
+            Some((names, _)) => format!("{error}\nSimilar manuals: {names}."),
+            None => error.to_string(),
+        };
+    }
     let hint = match hint.split_once(". ") {
         Some((first, rest)) if error.contains(first) => rest,
         _ => hint,
@@ -2704,6 +2768,65 @@ fn print_recent_activity(paths: &UtcpPaths, limit: usize, failed: bool, json: bo
         }
     }
     Ok(())
+}
+
+/// How `utcp schema` prints a tool's schema.
+struct SchemaView<'a> {
+    path: Option<&'a str>,
+    full: bool,
+    pretty: bool,
+    compact: bool,
+    caller: &'a str,
+}
+
+/// What `utcp schema --path` prints.
+#[derive(serde::Serialize)]
+struct SchemaPart<'a> {
+    name: &'a str,
+    path: &'a str,
+    schema: serde_json::Value,
+}
+
+/// `utcp schema`: the tool's schema with large inputs shortened (see [`utcp_core::schema_outline`]), or the
+/// part at `--path`. When parts were collapsed, a note on stderr says how to see them.
+fn print_schema(schema: &ToolSchemaDetail, view: &SchemaView) -> Result<()> {
+    use utcp_core::schema_outline::{outline, schema_at_path, SCHEMA_BUDGET_CHARS};
+    let budget = if view.full {
+        usize::MAX
+    } else {
+        SCHEMA_BUDGET_CHARS
+    };
+    let note = |first_collapsed: Option<String>| {
+        if let Some(example) = first_collapsed {
+            eprintln!(
+                "note: this schema is long, so its deeper objects are collapsed, each to a line naming its \
+                 fields; see one with --path (such as --path {example}), or all of it with --full"
+            );
+        }
+    };
+    match view.path {
+        Some(path) => {
+            let part = schema_at_path(&schema.inputs, path)
+                .map_err(|e| anyhow!("{}: {e}", schema.name))?;
+            let shown = outline(part, path, budget);
+            note(shown.first_collapsed);
+            let part = SchemaPart {
+                name: &schema.name,
+                path,
+                schema: shown.inputs,
+            };
+            print_json_output(&part, view.pretty, view.compact, view.caller)
+        }
+        None => {
+            let shown = outline(&schema.inputs, "", budget);
+            note(shown.first_collapsed);
+            let whole = ToolSchemaDetail {
+                inputs: shown.inputs,
+                ..schema.clone()
+            };
+            print_json_output(&whole, view.pretty, view.compact, view.caller)
+        }
+    }
 }
 
 fn print_tool_summaries(tools: &[ToolSummary], as_json: bool, with_schemas: bool) -> Result<()> {
@@ -3176,6 +3299,22 @@ mod tests {
                 "'g' has no tool named 't'. See all of its tools"
             ),
             "Tool 'g.t' not found\n'g' has no tool named 't'. See all of its tools"
+        );
+        let registered = "Manual 'gihub' is not registered (see the manuals with: utcp list)";
+        assert_eq!(
+            append_hint(
+                registered,
+                "No manual named 'gihub' is registered or staged. Similar manuals: github. \
+                 See them all with: utcp list"
+            ),
+            format!("{registered}\nSimilar manuals: github.")
+        );
+        assert_eq!(
+            append_hint(
+                registered,
+                "No manual named 'gihub' is registered or staged. See them all with: utcp list"
+            ),
+            registered
         );
     }
 

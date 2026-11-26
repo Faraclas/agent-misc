@@ -21,6 +21,7 @@ pub mod plugins;
 pub mod program;
 pub mod providers;
 pub mod repository;
+pub mod schema_outline;
 pub mod secrets;
 pub mod security;
 pub mod settings_file;

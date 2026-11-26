@@ -697,8 +697,8 @@ bypass the daemon and force standalone execution.
 | Global flags: `--config <path>`, `--direct` | `--config` uses another `.utcp_config.json` instead of the shared user catalog (a separate setup with its own cache folder and daemon endpoint, section 3); `--direct` skips the daemon. | All commands |
 | `utcp list [<manual>] [--tools] [--json] [--staged]` | Without a manual, one line per manual: name, hint, tool count, and whether it is active or staged (`--json`: `name`, `hint`, `tools`, `staged`); `--tools` lists every tool instead (`name`, `protocol`, `description`). With a manual, that manual's tools; with `--staged`, the staged manuals (or one staged manual's tools). Tool descriptions are cut to the first sentence, at most about 120 characters (`schema` has the full text). A manual with no match errors and says what to run instead (for example `--staged` for a staged manual). | **Hot (Daemon IPC or Sync Direct)** |
 | `utcp search <query> [--limit 10] [--schemas] [--json] [--staged]` | Ranked keyword/tag search returning compact 1-line tool summaries by default (the first sentence of each description, at most about 120 characters; or full schemas with `--schemas`). Matches tool names, descriptions, tags and the manual's hint words. `--staged` searches the staged manuals with the active ones (a staged manual replaces its active version) and marks their results `[staged]`; through a daemon without the `search_staged` feature it fails and says to restart it or use `--direct`. | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp schema <manual.tool> [--staged]` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms. | **Hot (Daemon IPC or Sync Direct)** |
-| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--where <path=v1\|v2 \| path~=v1\|v2 \| path^=v1\|v2 \| path>v \| path>=v \| path<v \| path<=v; ! before =, ~=, ^= negates>]... [--pretty \| --compact] [--dry-run] [--log] [--staged] [-o \| --out <path>]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); a key that itself contains dots is matched whole, the longest run of path parts that names a key winning (`fields.System.State` is the key `System.State` under `fields`; `--where` reads paths the same way); dotted paths pass through arrays (`workflow_runs.id`). Each path is resolved on its own: one whose first part names a top-level key projects that key, and the others project the fields of the items of the response's list (`items`/`results`/`data`, else its only array of objects, else on an empty page its only empty array; found before `--where`, so a list `--where` emptied stays, with its count), so `--fields name,total_count` on `{"total_count": 5, "jobs": [...]}` keeps `total_count` and each job's `name`. Optional `--where` (repeatable; every condition must hold) keeps the list items whose value at the path equals (`=`), contains (`~=`) or starts with (`^=`) one of the values separated by `\|`, before `--fields`; a `!` before the operator (`!=`, `!~=`, `!^=`) keeps the items that match none of them. Values are trimmed and compared as text, ignoring case (`null`, `true`); with `=`, a number field and a number value compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends). `>`, `>=`, `<` and `<=` keep the items whose value is greater, at least, less or at most one value: a JSON number, or an ISO date with a time and zone (`2026-11-24T10:00:00Z`, `+01:00`), with a time and no zone (UTC), or alone (`2026-11-24`, which compares the field's day in UTC, so `<=2026-11-24` includes that whole day; `=` and `!=` with a date alone also mean that whole day, `completed_at=2026-11-24` matching any time on it, while a full timestamp, or a field that is itself a date alone, compares as text); numbers written as strings count, and a field that is not a number (or not a date) does not match, with a note counting those items (`left out K of the N items in <list> whose <path> is not a number (as: ...)`). A comparison with several values, a value that is neither, a `!`, `~` or `^` before it (the opposite of `>` is `<=`), and `=<5` or `=>5` (write `<=5`) are errors; `\\|` is a `\|` inside a value and a comma is literal (matrix job names); an empty value is refused for `~=` and `^=` (it would match everything), while `path=` means the empty string. A missing field, or a path through a missing or `null` parent, counts as `null`; an object at the end of the path never matches; an array on the path matches when any element does (an empty array has no value), and the matching item keeps that inner array whole. The list is the root array; else the top-level array the path's first part names (when the path has more parts); else the response's `value`, `items`, `results` or `data` array; else its only array with objects; else, when every other top-level value is plain (an empty page such as `{"total_count": 0, "workflow_runs": []}`), its only empty array. Some problems show only in the answer, after the request was sent (it may have been a write), so they never fail the call: it succeeds (exit 0) with the whole answer, unfiltered (`--fields` still applied), and the note `the call succeeded; --where was not applied, so no items were left out: <reason>`. The reasons: a path that is only the name of a top-level array, whatever the array holds (`value.value` filters the items' own `value`; for a non-empty array of plain values the reason says only that it can't be filtered); a path whose first part is another top-level key of an object answer, naming the answer's list when it has one (that field belongs to the answer, not to its items); a non-empty list with no objects (log lines); several candidate arrays, naming the arrays whose items have the path's first part, with the path to write (`files.filename`), or all of them when none do; a single object; a non-JSON answer. A file answer is saved as usual, with the note that `--where` and `--fields` were not applied. Separately, a path no item of the list has at all (often a typo) counts as `null` in every item, with a note (`no item in <list> has <path> (...), so it counted as null in each`), since `!=` would otherwise silently keep everything. A condition without an operator or a field, with `==`, or with an empty path part (`a..b`) is an error before anything is called. The rest of the answer (`count`, `total_count`) is unchanged. Conditions on different lists each filter their own. When a condition keeps none of a non-empty list's items, `call` prints on stderr `note: --where '<condition>' kept none of the N items in <list> (<path> here: <values>)`: up to 10 distinct values the path has on that list, as JSON (strings quoted, a missing field `null`, `, and K more` after them), or `(no item has a value at <path>)`. Likewise a `--fields` path that matches nothing gets a note listing the keys there (a note, not an error: an optional field can be missing from a whole page). Several notes are joined with `; `, and stdout is the answer as without the note. Between the daemon (or Direct Mode) and the printer, the note travels beside the answer as `{"result", "next_page"?, "note"}`. Before sending, the arguments and the manual's secrets are checked (section 5, Checks Before Sending). With a daemon whose Status lacks the `where` feature (0.2.3 or older), `call --where` and a `batch` with any condition fail before calling and say to restart it or use `--direct`. `--staged` calls a staged manual (logged as `call --staged`). When the call fails because the manual is only on the other side of `--staged`, the error gives the command with or without `--staged`; `utcp call x y` (a tool name where the JSON goes) errors with `utcp call x.y` instead of a JSON parse error. `schema` does the same for `--staged`. A file answer (non-JSON, non-text, sent with `Content-Disposition: attachment`, or the template's `"response_type": "file"`) is saved and its reference `{"type": "file", "path", "mime_type", "bytes", "filename"}` printed (`mime_type` is the `Content-Type` essence, lowercased, without parameters: `application/zip; api-version=7.1` becomes `application/zip`; `application/octet-stream` when the server sends none): to `--out <path>` (overwritten; a folder keeps the server's name; `-` is stdout), else `download_dir`, the Downloads folder, or `<cache>/downloads`. A JSON answer over 10 MB after `--where` and `--fields` goes to `<cache>/downloads` (pruned after a day) with a `note`; with `--out` any JSON answer goes to that file, and when that file can't be written the answer prints instead, with the note `the call succeeded, but its answer could not be saved, so it is shown here: <reason>`. A template's `"body_type": "file"` uploads `{"file": "<path>", "offset"?, "length"?}`, read by the calling process; only POST, PUT and PATCH carry it, so on GET, DELETE or HEAD the call fails before sending (a broken manual). Arguments not used in the path or `header_fields` go to the query, except the body: POST, PUT and PATCH send the `body_field` argument (else all arguments as one JSON object); DELETE sends the `body_field` argument as the body only when the template sets `body_field` and the call passes it; GET and HEAD send none. `"body_type": "text"` sends the `body_field` string as is (POST, PUT, PATCH or DELETE; `Content-Type` from the template's headers, default `text/plain; charset=utf-8`); an unknown `body_type` fails as a broken manual. `--dry-run` prints the planned `query` and `body` next to `args`; when the arguments have a note, or `--fields` or `--where` were given, it prints `{"result": <request>, "note"}`, with the argument note first and then that a dry run has no answer for `--fields` and `--where` to shape. Limits: `max_upload_mb`, `max_download_mb`. A JSON or text answer that is one page of a longer list prints as `{"result": <answer>, "next_page": {<args>}}`; calling again with the call's own arguments plus `next_page` gets the next page, and the last page prints the answer alone. The HTTP transport reads two paging headers: `x-ms-continuationtoken` (Azure DevOps) becomes `{"continuationToken": <token>}`, or `{"x-ms-continuationtoken": <token>}` when the template's `header_fields` declares that name (any case); `Link` with `rel="next"` (RFC 8288, GitHub) becomes the next URL's query pairs that differ from the ones this call sent (the template URL's query and the query arguments), as strings, after resolving a relative URL. `--where`, `--fields` and `--out` apply to `result` only (a page with no matching items keeps `next_page`); file answers ignore paging headers. | **Hot (Daemon IPC or Async Direct)** |
+| `utcp schema <manual.tool> [--staged] [--path <PATH>] [--full] [--pretty\|--compact]` | Prints the exact JSON input/output schema for a single tool on demand in < 1 ms, compact for agents and pipes. Past about 4,000 characters, objects below the deepest level that fits become `"collapsed": "N fields: a, b, …; see with --path X"` with a note on stderr. `--path body.process` prints that part alone (through lists, `oneOf`/`anyOf`/`allOf`, and `*` for a map's values; a dotted key such as `System.State` is one name); `--full` prints everything. | **Hot (Daemon IPC or Sync Direct)** |
+| `utcp call <manual.tool> [<json_args>] [--args-stdin] [--args-file <path>] [--fields <k1,k2>] [--where <path=v1\|v2 \| path~=v1\|v2 \| path^=v1\|v2 \| path>v \| path>=v \| path<v \| path<=v; ! before =, ~=, ^= negates>]... [--pretty \| --compact] [--dry-run] [--log] [--staged] [-o \| --out <path>]` | Executes tool; emits compact JSON automatically for agent/non-TTY callers (`--pretty` for indented human output). Optional `--fields` projects top-level or dotted keys (e.g., `sha,commit.message`); a key that itself contains dots is matched whole, the longest run of path parts that names a key winning (`fields.System.State` is the key `System.State` under `fields`; `--where` reads paths the same way, and in both a path part matches a key exactly, else the one key that differs from it only in case, so `Commit.Author.Name` reads `commit.author.name`; when two keys differ only in case, neither matches); dotted paths pass through arrays (`workflow_runs.id`). Each path is resolved on its own: one whose first part names a top-level key projects that key, and the others project the fields of the items of the response's list (`items`/`results`/`data`, else its only array of objects, else on an empty page its only empty array; found before `--where`, so a list `--where` emptied stays, with its count), so `--fields name,total_count` on `{"total_count": 5, "jobs": [...]}` keeps `total_count` and each job's `name`. Optional `--where` (repeatable; every condition must hold) keeps the list items whose value at the path equals (`=`), contains (`~=`) or starts with (`^=`) one of the values separated by `\|`, before `--fields`; a `!` before the operator (`!=`, `!~=`, `!^=`) keeps the items that match none of them. Values are trimmed and compared as text, ignoring case (`null`, `true`); with `=`, a number field and a number value compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends). `>`, `>=`, `<` and `<=` keep the items whose value is greater, at least, less or at most one value: a JSON number, or an ISO date with a time and zone (`2026-11-24T10:00:00Z`, `+01:00`), with a time and no zone (UTC), or alone (`2026-11-24`, which compares the field's day in UTC, so `<=2026-11-24` includes that whole day; `=` and `!=` with a date alone also mean that whole day, `completed_at=2026-11-24` matching any time on it, while a full timestamp, or a field that is itself a date alone, compares as text); numbers written as strings count, and a field that is not a number (or not a date) does not match, with a note counting those items (`left out K of the N items in <list> whose <path> is not a number (as: ...)`). A comparison with several values, a value that is neither, a `!`, `~` or `^` before it (the opposite of `>` is `<=`), and `=<5` or `=>5` (write `<=5`) are errors; `\\|` is a `\|` inside a value and a comma is literal (matrix job names); an empty value is refused for `~=` and `^=` (it would match everything), while `path=` means the empty string. A missing field, or a path through a missing or `null` parent, counts as `null`; an object at the end of the path never matches; an array on the path matches when any element does (an empty array has no value), and the matching item keeps that inner array whole. The list is the root array; else the top-level array the path's first part names (when the path has more parts); else the response's `value`, `items`, `results` or `data` array; else its only array with objects; else, when every other top-level value is plain (an empty page such as `{"total_count": 0, "workflow_runs": []}`), its only empty array. Some problems show only in the answer, after the request was sent (it may have been a write), so they never fail the call: it succeeds (exit 0) with the whole answer, unfiltered (`--fields` still applied), and the note `the call succeeded; --where was not applied, so no items were left out: <reason>`. The reasons: a path that is only the name of a top-level array, whatever the array holds (`value.value` filters the items' own `value`; for a non-empty array of plain values the reason says only that it can't be filtered); a path whose first part is another top-level key of an object answer, naming the answer's list when it has one (that field belongs to the answer, not to its items); a non-empty list with no objects (log lines); several candidate arrays, naming the arrays whose items have the path's first part, with the path to write (`files.filename`), or all of them when none do; a single object; a non-JSON answer. A file answer is saved as usual, with the note that `--where` and `--fields` were not applied. Separately, a path no item of the list has at all (often a typo) counts as `null` in every item, with a note (`no item in <list> has <path> (...), so it counted as null in each`), since `!=` would otherwise silently keep everything. A condition without an operator or a field, with `==`, or with an empty path part (`a..b`) is an error before anything is called. The rest of the answer (`count`, `total_count`) is unchanged. Conditions on different lists each filter their own. When a condition keeps none of a non-empty list's items, `call` prints on stderr `note: --where '<condition>' kept none of the N items in <list> (<path> here: <values>)`: up to 10 distinct values the path has on that list, as JSON (strings quoted, a missing field `null`, `, and K more` after them), or `(no item has a value at <path>)`. Likewise a `--fields` path that matches nothing gets a note listing the keys there (a note, not an error: an optional field can be missing from a whole page). Several notes are joined with `; `, and stdout is the answer as without the note. Between the daemon (or Direct Mode) and the printer, the note travels beside the answer as `{"result", "next_page"?, "note"}`. Before sending, the arguments and the manual's secrets are checked (section 5, Checks Before Sending). With a daemon whose Status lacks the `where` feature (0.2.3 or older), `call --where` and a `batch` with any condition fail before calling and say to restart it or use `--direct`. `--staged` calls a staged manual (logged as `call --staged`). When the call fails because the manual is only on the other side of `--staged`, the error gives the command with or without `--staged`; `utcp call x y` (a tool name where the JSON goes) errors with `utcp call x.y` instead of a JSON parse error. `schema` does the same for `--staged`. A file answer (non-JSON, non-text, sent with `Content-Disposition: attachment`, or the template's `"response_type": "file"`) is saved and its reference `{"type": "file", "path", "mime_type", "bytes", "filename"}` printed (`mime_type` is the `Content-Type` essence, lowercased, without parameters: `application/zip; api-version=7.1` becomes `application/zip`; `application/octet-stream` when the server sends none): to `--out <path>` (overwritten; a folder keeps the server's name; `-` is stdout), else `download_dir`, the Downloads folder, or `<cache>/downloads`. A JSON answer over 10 MB after `--where` and `--fields` goes to `<cache>/downloads` (pruned after a day) with a `note`; with `--out` any JSON answer goes to that file, and when that file can't be written the answer prints instead, with the note `the call succeeded, but its answer could not be saved, so it is shown here: <reason>`. A template's `"body_type": "file"` uploads `{"file": "<path>", "offset"?, "length"?}`, read by the calling process; only POST, PUT and PATCH carry it, so on GET, DELETE or HEAD the call fails before sending (a broken manual). Arguments not used in the path or `header_fields` go to the query, except the body: POST, PUT and PATCH send the `body_field` argument (else all arguments as one JSON object); DELETE sends the `body_field` argument as the body only when the template sets `body_field` and the call passes it; GET and HEAD send none. `"body_type": "text"` sends the `body_field` string as is (POST, PUT, PATCH or DELETE; `Content-Type` from the template's headers, default `text/plain; charset=utf-8`); an unknown `body_type` fails as a broken manual. `--dry-run` prints the planned `query` and `body` next to `args`; when the arguments have a note, or `--fields` or `--where` were given, it prints `{"result": <request>, "note"}`, with the argument note first and then that a dry run has no answer for `--fields` and `--where` to shape. Limits: `max_upload_mb`, `max_download_mb`. A JSON or text answer that is one page of a longer list prints as `{"result": <answer>, "next_page": {<args>}}`; calling again with the call's own arguments plus `next_page` gets the next page, and the last page prints the answer alone. The HTTP transport reads two paging headers: `x-ms-continuationtoken` (Azure DevOps) becomes `{"continuationToken": <token>}`, or `{"x-ms-continuationtoken": <token>}` when the template's `header_fields` declares that name (any case); `Link` with `rel="next"` (RFC 8288, GitHub) becomes the next URL's query pairs that differ from the ones this call sent (the template URL's query and the query arguments), as strings, after resolving a relative URL. `--where`, `--fields` and `--out` apply to `result` only (a page with no matching items keeps `next_page`); file answers ignore paging headers. | **Hot (Daemon IPC or Async Direct)** |
 | `utcp batch [--stdin \| --file <path>] [--concurrency 8] [--fields <k1,k2>] [--where <cond>]... [--pretty \| --compact] [--log] [--staged]` | Executes multiple tool calls concurrently over a shared pool (supports per-item `"fields": [...]` (or one comma-separated string) as well as `--fields`, per-item `"where": ["path=v", ...]` (or one condition as a string; another type is an error naming the item) as well as `--where` (the flags apply to items without their own; a bad condition fails the batch before any call, naming the item), and per-item `"out": "<path>"` like `call --out`, but not `-`). An item whose answer is a page has `next_page` next to its `result` (see `call`), and an item with an argument, `--where` or `--fields` note has it as `note` there (several joined with `; `). `args` may also be written `arguments`. `latency_ms` is rounded to 0.01 ms. `id` is optional (default: the item's position from 0); unknown item keys and duplicate ids are refused before any call; when any item failed, the command exits with status 2 after printing every result. With `--staged`, every item calls a staged manual. Without `--file`, the array is read from stdin when `--stdin` is given or stdin is not a terminal (a pipe or file; nothing read is an error). | **Hot (Daemon IPC or Async Direct)** |
 | `utcp daemon <start \| stop \| status \| restart \| reload-env \| run>` | Manages the `--user` local IPC daemon. On Linux `start`, `stop` and `restart` delegate to `systemctl --user` when `utcp-daemon.service` is installed (`systemctl --user cat` succeeds), the setup is the default one (not a separate setup, section 3) and `UTCP_SOCKET_PATH` is not set (for `start` and `restart`, also no `--idle-timeout`). `reload-env` syncs the shell variables registered manuals use into daemon RAM, rereads the daemon's environment and `.env`, and runs the `[secrets]` command again; it prints the command's result. `start`, `restart`, and `run` take `--idle-timeout <minutes>`; `status` takes `--json` and shows the secrets command's last run, the daemon's `version` and its `features` (request fields older daemons ignore, currently `where` and `search_staged`; a daemon before 0.2.4 sends neither and shows as `0.2.3 or older`), with a `WARNING` line when the version differs from the CLI's. | Management |
 | `utcp daemon servers [--json]` | Lists the local (stdio) MCP servers of registered manuals: state, PID, uptime, restart count, program name. Errors when no daemon is running (in direct mode each call starts and stops its own server). | Management (Daemon IPC) |
@@ -878,11 +878,15 @@ progressive disclosure** so an agent's context window is never polluted with unu
 
 | Stage | What Happens | Context Cost | What Stays Hidden from Context |
 | :--- | :--- | :--- | :--- |
-| **1. Session Startup** | Agent loads only the short `description` frontmatter of the two skills (`utcp-tools`, `utcp-admin`). | **~170 tokens** for both with three manuals (~110 for `utcp-tools`, growing a few per manual name and hint; ~70 for `utcp-admin`) | All manuals, all tool names, all parameter schemas, and all transport/auth configs. |
-| **2. Skill Activation** | When a task requires an external service, the agent reads `SKILL.md` to learn the CLI workflow. | **~150 tokens** | The entire registered tool catalog remains on disk / in daemon RAM. |
-| **3. Tool Discovery (`utcp search`)** | Agent runs `utcp search "<query>"` and receives compact 1-line summaries (`manual.tool`, `protocol`, short `description`) for only the top matches. | **~50–100 tokens** | Full JSON parameter schemas and all non-matching tools across other manuals. |
-| **4. Schema Inspection (`utcp schema`)** | Agent runs `utcp schema <manual.tool>` for the **single** tool it chose, loading only that tool's input JSON schema. | **~100–250 tokens** | Schemas for the other 99% of registered tools, plus underlying HTTP headers, URLs, and `.env` secrets. |
+| **1. Session Startup** | Agent loads only the short `description` frontmatter of the two skills (`utcp-tools`, `utcp-admin`). | **~230 tokens** for both with 19 manuals (~150 for `utcp-tools`, 582 characters, growing a few per manual name and hint up to the 1,024-character cap; ~80 for `utcp-admin`) | All manuals, all tool names, all parameter schemas, and all transport/auth configs. |
+| **2. Skill Activation** | When a task requires an external service, the agent reads `SKILL.md` to learn the CLI workflow. It stays in context for the rest of that conversation. | **~1,000 tokens** (about 4 KB; was 8.9 KB before 0.2.6) | The entire registered tool catalog remains on disk / in daemon RAM; every option's detail stays in `utcp <command> --help`. |
+| **3. Tool Discovery (`utcp search`)** | Agent runs `utcp search "<query>"` and receives compact 1-line summaries (`manual.tool`, short `description`) for only the top matches. | **~250–300 tokens** for ten matches (about 1 KB) | Full JSON parameter schemas and all non-matching tools across other manuals. |
+| **4. Schema Inspection (`utcp schema`)** | Agent runs `utcp schema <manual.tool>` for the **single** tool it chose, loading only that tool's input JSON schema, compact, with deeper objects collapsed past about 4,000 characters (`--path` opens one). | **~250 tokens** typical (median 865 B over 1,993 tools), **~1,500 at most** (largest 5.7 KB; 81 KB before 0.2.6) | Schemas for the other 99% of registered tools, plus underlying HTTP headers, URLs, and `.env` secrets. |
 | **5. Execution (`utcp call`)** | Agent invokes `utcp call <manual.tool> '{...}'` and receives the raw JSON response payload. | **Response only** | Connection pooling, TLS handshakes, auth injection, and protocol framing. |
+
+The same 1,993 tools as MCP tool definitions would cost roughly 640k tokens in every conversation. Even so, the
+stages above are not free: until 0.2.6 the skill body was 8.9 KB and one `utcp schema` could print 81 KB, so both
+are now held to budgets that tests enforce (the body under 4,500 characters, a schema near 4,000 compact characters).
 
 Even with 20 manuals and 500+ tools registered on the machine, an agent pays **zero tokens** for the 499 tools it does
 not use in a given conversation.
@@ -913,11 +917,19 @@ manuals by name. A name such as `github` explains itself; `context7` does not. E
 show the bare name. Hints cost a few tokens per manual in every session, so they stay short.
 
 Manuals named `<prefix>_<rest>` that share a prefix with another manual become one label, so a family of manuals
-costs its common words once: `azdo_* (Azure DevOps, org ni: admin (permissions, connections, hooks), git (repos and
-PRs), ...)` instead of nine hints each ending in `org ni`. The words every member's hint starts with, and the words
-every hint ends with, go before the colon; each member keeps the rest of its hint. Shared words are used only when
-every member has a hint; otherwise each member shows its own hint (or none). `utcp sync-ides --print-skill` shows
-the result.
+costs its common words once: `azdo_* (Azure DevOps, org ni: admin, git, ...)` instead of nine hints each ending in
+`org ni`. The words every member's hint starts with, and the words every hint ends with, go before the colon,
+followed by the member names alone; since 0.2.6 the rest of each member's hint is left to `utcp list`, which an agent
+reads after loading the skill anyway. Shared words are used only when every member has a hint; otherwise each member
+shows its own hint (or none). `utcp sync-ides --print-skill` shows the result.
+
+The Agent Skills format allows at most 1,024 characters in a description, and clients warn about or cut a longer
+one (Zed: "Skill Loaded with a Long Description"), so the list is shortened to fit (since 0.2.6). The description is
+measured as a client reads it, with the folded lines joined. While it is too long, the longest label that can still
+shrink takes its next form: a manual drops its hint; a group drops its member names (`github_* (GitHub)`), then the
+shared words (`github_*`); a group without shared words drops its members' hints, then the names. When even
+the shortest forms are too long, the list keeps the manuals that fit and ends with `and N more (see `utcp
+list`)`. `utcp list` always shows every manual with its hint.
 
 The description also says that these tools are not in the agent's own tool list or MCP servers and that the `utcp`
 CLI reaches them, and that the skill applies whenever a request names one of the manuals. Without that, a VS Code
@@ -978,144 +990,81 @@ write it explicitly, and nothing creates it implicitly.
 ---
 name: utcp-tools
 description: >-
-  Call tools from utcp manuals (registered manuals: context7 (library and framework docs), d2 (diagrams from text), github): REST and OpenAPI APIs, CLI tools, WebSockets and
-  imported MCP servers. These tools are not in your own tool list or MCP servers; run them with the
-  `utcp` CLI (`utcp search`, `schema`, `call <manual.tool>`). Use this skill whenever a request names
-  one of these manuals, instead of ad-hoc `--help` probing or scratch files.
+  Call tools from utcp manuals (registered manuals: context7 (library and framework docs), d2 (diagrams from text), github). These tools are not in your own tool list or MCP
+  servers; run them with the `utcp` CLI (`search`, `schema`, `call <manual.tool>`). Use this skill whenever
+  a request names one of these manuals or needs one of these services, instead of `--help` probing or scratch files.
 ---
 
 <!-- Written by utcp from its built-in template and your registered manuals; edits here are overwritten. Change
 manuals and hints with `utcp register`, `promote`, `deregister` or `set-hint`, which update this file. -->
 
-# UTCP Direct Tool Calling (`utcp`)
+# Calling Tools with `utcp`
 
-Use the native `utcp` CLI to discover, inspect, and invoke external APIs and local tools lazily on demand so
-your context window stays clean and you avoid wasting turns on `--help` probing or temporary files. Follow the
-progressive disclosure workflow (`search` -> `schema` -> `call`):
+Find a tool, read its inputs, call it: `search` -> `schema` -> `call`. Every option is explained in
+`utcp <command> --help`; read that only when this page is not enough.
 
-## 1. Discover & Inspect Tools Lazily
-
-- **Step 1: Search tools by keyword (compact summary):**
-
-  ```sh
-  utcp search "<keywords>"
-  ```
-
-- **Step 2: Fetch the exact JSON input schema for only the tool you need:**
-
-  ```sh
-  utcp schema <manual.tool>
-  ```
-
-- **List the manuals (name, tool count, hint), or one manual's tools:**
-
-  ```sh
-  utcp list
-  utcp list <manual>
-  ```
-
-- **Staged manuals** (added with `utcp stage` for testing, not yet promoted) are not in `search`, and `list`
-  shows them under Staged. Reach them only when the user asks you to test one, with `--staged` on `search`, `list`,
-  `schema`, `call` and `batch`:
-
-  ```sh
-  utcp list --staged
-  utcp call --staged <manual.tool> '{"param": "value"}'
-  ```
-
-## 2. Call a Tool
-
-- **Simple JSON arguments:**
-
-  ```sh
-  utcp call <manual.tool> '{"param": "value"}'
-  ```
-
-- **Complex or multiline JSON arguments (via stdin):**
-
-  ```sh
-  utcp call <manual.tool> --args-stdin <<'EOF'
-  {"param": "value"}
-  EOF
-  ```
-
-- **Preview a call without executing (`--dry-run`; it shows the URL, query and body it would send):**
-
-  ```sh
-  utcp call <manual.tool> '{"param": "value"}' --dry-run
-  ```
-
-- **Filter Verbose API Responses (`--fields`):** For noisy APIs (such as GitHub commits, issues, or repos), pass
-  `--fields key1,nested.key2` (for example, `--fields sha,commit.message,commit.author,html_url`) to strip unneeded
-  boilerplate keys while keeping full fidelity when omitted. Dotted paths pass through lists (`assets.name`), and
-  for a wrapped list such as `{"total_count": N, "workflow_runs": [...]}` you can name the item keys directly
-  (`--fields id,name,conclusion`), also next to top-level keys (`--fields total_count,name`). A key that itself has
-  dots is one name (`fields.System.State` on an Azure DevOps work item). A path that matches nothing gets a note
-  listing the keys there.
-- **Keep only matching list items (`--where`):** use the tool's own filter arguments first (see `schema`), then
-  `--where 'path=a|b'` (equals `a` or `b`), `~=` (contains) or `^=` (starts with); `!=`, `!~=`, `!^=` keep the
-  others. `>`, `>=`, `<`, `<=` compare numbers and dates (`'completed_at>=2026-11-24'`); a date alone means that
-  whole day in UTC, with `=` too. Quote the condition. Case is ignored; a missing field is `null`
-  (`pull_request!=null` keeps the items that have one); name a field inside an object (`user.login=octocat`); `\|`
-  is a `|` inside a value. Repeat `--where` for more conditions; all must hold. Start the path with the list to
-  filter when the answer has several (`'records.result=failed|canceled'`). Through a list inside each item
-  (`labels.name=bug`), an item matches when any element does. `count` and `total_count` still count the unfiltered
-  list, and `--where` runs before `--fields`. When nothing matches, a note (`note` in `batch`) lists the values the
-  field has: fix the value rather than conclude there are none. When the answer has no list to filter (one object),
-  the call still succeeds: you get the whole answer and a note saying why, so don't call again.
-- **Long lists come in pages:** when a list has more, utcp prints `{"result": <answer>, "next_page": {...}}`. For
-  the next page, call the same tool again with your arguments plus the ones in `next_page` (such as
-  `{"page": "2"}` or `{"continuationToken": "..."}`). The last page prints the answer alone. `--where`, `--fields`
-  and `--out` apply to `result`, so a page with no matching items still has `next_page`; in `batch`, `next_page` is
-  next to the item's `result`. Fetch more pages only when you need them, and say so when you stop early.
-- **Images and Binary Media:** If a tool writes an image or binary payload to a file path on disk (for example,
-  `"type": "media_file"` with a `"path"`), pass that file path to your multimodal file-reading/vision tool only when
-  visual inspection is needed.
-- **Files a tool answers with** (an archive, a log, a PDF): utcp saves the file and prints
-  `{"type": "file", "path": ..., "mime_type": ..., "bytes": ..., "filename": ...}` instead of its content
-  (`mime_type` is the bare media type, such as `application/zip`, without parameters). Without `--out` it goes to
-  the user's Downloads folder (`a.zip` becomes `a (1).zip` if it exists; nothing is overwritten). To choose the
-  place, pass `--out <path>` (overwrites, like `curl -o`; a folder keeps the server's file name), or `--out -` to get
-  the raw bytes on stdout for a pipe. Open the file only if you need its content.
-- **Answers too large to print:** a JSON or text answer over 10 MB is saved to utcp's cache folder
-  (`~/.cache/utcp/downloads/`; on Windows `%LOCALAPPDATA%\utcp\cache\downloads\`), not to Downloads, and the call
-  prints the file reference above, with its `path`, and a `note`. That folder is emptied after a day, so use `--out`
-  for a file you want to keep. Read the parts you need (for example with `jq`), or call again with `--where` or
-  `--fields` to get less.
-- **Uploading a file:** a tool that uploads takes the file in its body argument (see `schema`) as
-  `{"file": "<path>"}`; add `"offset"` and `"length"` (bytes) to send one part. A relative path is relative to your
-  working folder, and utcp reads the file with your permissions.
-- **Size limits:** when an upload or download fails "only because of this limit", tell the user: the error names
-  the setting (`max_upload_mb` or `max_download_mb` in utcp's `settings.toml`) and how to change it. Do not change
-  it yourself unless the user asks.
-
-## 3. Execute Multiple Calls in Parallel (`batch`)
-
-Each item has `tool` and `args`, and optionally `id` (default: its position, from 0), `"fields": ["key1",
-"nested.key2"]`, `"where": ["path=value"]` and `"out": "<path>"` to save that item's answer to a file. Other keys are
-refused. `--fields` and `--where` on `batch` apply to the items without their own. Every item's answer or `error` is
-printed; when any item failed, `utcp` then exits with status 2:
+## 1. Find a Tool
 
 ```sh
-utcp batch --stdin <<'EOF'
-[
-  {"id": "1", "tool": "manual.tool_a", "args": {"id": 1}},
-  {"id": "2", "tool": "manual.tool_b", "args": {"id": 2}}
-]
+utcp search "<keywords>"
+utcp list [<manual>]
+utcp schema <manual.tool>
+```
+
+`search` prints the best matches, one line each; `list` the manuals with their hints, or one manual's tools;
+`schema` one tool's inputs. A long schema comes shortened, with a note: each deeper object is a `collapsed` line
+naming its fields; see one with `--path` (`--path body.process`).
+
+Staged manuals are being tested and are not active. Use them only when the user asks you to test one, with
+`--staged` on each command.
+
+## 2. Call It
+
+The arguments are one JSON object; pass long or quoted ones on stdin:
+
+```sh
+utcp call <manual.tool> '{"param": "value"}'
+utcp call <manual.tool> --args-stdin <<'EOF'
+{"param": "value with 'quotes'"}
+EOF
+```
+
+- **`--dry-run`** shows the request without sending it.
+- **`--fields id,name,commit.message`** keeps only those keys. Paths go through lists; for a wrapped list
+  (`{"total_count": N, "workflow_runs": [...]}`) name the item keys directly.
+- **`--where 'path=a|b'`** keeps the list items that match, after the tool's own filter arguments (see `schema`).
+  `~=` is contains, `^=` starts with, `!` before any of them keeps the others, and `>`, `>=`, `<`, `<=` compare
+  numbers and dates (a date alone is that whole UTC day). Paths and values ignore case, and a missing field is
+  `null`. Repeat it for more conditions. `total_count` still counts the whole list.
+- **Notes** (`note: ...` on stderr, `note` in `batch`) explain what utcp did: why an answer is empty or
+  unfiltered, which keys aren't in the schema, where a file went. When nothing matched, the note lists the values
+  the field has: fix the value rather than conclude there are none. An answer with a note is still a success, so
+  don't call again.
+- **Pages:** a long list prints `{"result": ..., "next_page": {...}}`. For more, call again with your arguments
+  plus those in `next_page`. Fetch more only when you need them, and say so when you stop early.
+- **Files** (an archive, a log, an image): the answer is `{"type": "file", "path": ...}`, saved to Downloads, or
+  to `--out <path>` (`--out -` writes the bytes to stdout). Open it only if you need its content. To upload, pass
+  `{"file": "<path>"}` where the schema takes the body.
+
+## 3. Several Calls at Once
+
+Each item has `tool` and `args`, and optionally `id`, `fields`, `where` and `out`. Every answer or `error` is
+printed, and the exit status is 2 when any item failed:
+
+```sh
+utcp batch <<'EOF'
+[{"tool": "manual.tool_a", "args": {"id": 1}}, {"id": "b", "tool": "manual.tool_b", "args": {}}]
 EOF
 ```
 
 ## 4. When a Call Fails
 
-- **Nothing was sent:** an error that says so (a required argument missing, an argument or body field name the
-  tool doesn't have, a wrong type or value, or a secret placeholder that isn't set) is about your call, not the API.
-  Fix the arguments from `utcp schema <manual.tool>`; an unset placeholder is for the user to set (see
-  the utcp-admin skill). A `note` that keys were "sent as given, but not in the tool's schema" means the API may
-  ignore them: if the result shows no change, check those keys.
-- **The API said no:** the error has its status and answer. A rate-limited API says when to retry: wait that long
-  instead of retrying at once. `utcp log recent --failed` lists recent failed calls with their full errors.
-- **Adding or changing manuals, hints and secrets, or the daemon and its local MCP servers** (a hung server, calls
-  that time out): use the utcp-admin skill.
+- **"Nothing was sent":** the arguments don't fit the tool. Fix them from `schema`. A secret that isn't set is
+  for the user to set.
+- **The API said no:** the error has its status and answer. When rate-limited, wait as long as it says.
+  `utcp log recent --failed` lists recent failures.
+- **A size limit** (`max_upload_mb`, `max_download_mb`): tell the user; don't change it unless asked.
+- **Adding manuals, hints or secrets, or a stuck daemon or MCP server:** use the utcp-admin skill.
 ````
 
 *(On Windows, Sections 2 and 3 render PowerShell `@' ... '@ | utcp.exe ... --args-stdin` syntax instead of `<<'EOF'`.)*

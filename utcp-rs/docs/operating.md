@@ -353,9 +353,10 @@ how to ask for more. File answers ignore paging headers.
 names a top-level key keeps that key, and for a wrapped list such as `{"count": N, "value": [...]}` the item keys
 alone are enough, so `--fields count,id,name` keeps `count` and each item's `id` and `name`. A key that itself has
 dots, as in an Azure DevOps work item's `fields`, is one name: `--fields fields.System.State` and
-`--where 'fields.System.State=Active'` work (the longest key that matches wins). `--where` keeps only the list items
-that match, before `--fields`. Use the tool's own filter arguments first (see `schema`): they make the server send
-less, while `--where` filters what came back.
+`--where 'fields.System.State=Active'` work (the longest key that matches wins). A path part that matches no key
+exactly matches the one key that differs only in case (`Commit.Author.Name` reads `commit.author.name`). `--where`
+keeps only the list items that match, before `--fields`. Use the tool's own filter arguments first (see `schema`):
+they make the server send less, while `--where` filters what came back.
 
 ```sh
 utcp call <tool> '{...}' --where 'records.result=failed|canceled' --fields records.name
@@ -366,8 +367,8 @@ utcp call <tool> '{...}' --where 'completed_at>=2026-11-24' --where 'run_attempt
 
 - `path=a|b` keeps the items whose `path` is `a` or `b`, `path~=a|b` those containing `a` or `b`, `path^=a|b`
   those starting with one. A `!` before the operator (`!=`, `!~=`, `!^=`) keeps the others. Quote the condition,
-  since the shell reads `|`, `!`, `<` and `>`. Matching ignores case and compares text, so `null` and `true` work;
-  with `=`, numbers compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends).
+  since the shell reads `|`, `!`, `<` and `>`. Matching ignores case in values and paths and compares text, so `null`
+  and `true` work; with `=`, numbers compare as numbers (`RemainingWork=0` matches the `0.0` Azure DevOps sends).
 - `path>v`, `path>=v`, `path<v` and `path<=v` compare numbers or ISO dates, with one value: `'changes>=200'`,
   `'completed_at<2026-11-24T10:00:00Z'` (a time without a zone is UTC). A date alone compares the field's day in UTC,
   so `'closedDate<=2026-11-24'` includes that whole day, and `'completed_at=2026-11-24'` (or `!=`) means any time
@@ -411,6 +412,19 @@ utcp call <tool> '{...}' --where 'completed_at>=2026-11-24' --where 'run_attempt
   item's `result` as `note`, with any note about its arguments.
 - A daemon older than 0.2.4 does not know `--where`. The CLI then refuses before calling and says to restart the
   daemon (section 5) or to call with `--direct`.
+
+### Long Schemas (`utcp schema`)
+
+`utcp schema <manual.tool>` prints compact JSON for agents and pipes (`--pretty` for people). A few tools have
+huge inputs: Azure DevOps `update_definition` took 81 KB, about 20,000 tokens. Since 0.2.6, a schema longer than
+about 4,000 characters keeps the deepest levels that fit, and each object below them becomes one line, such as
+`"collapsed":"36 fields: authoredBy, badgeEnabled, ...; see with --path body"`; a map of named objects says
+`see one with --path X.*`. A note on stderr says the schema was shortened. Of 1,993 tools, 78 are shortened, and the
+longest now prints 5.7 KB.
+
+- `--path body.process` prints that part alone. A path goes through lists, `oneOf`, `anyOf` and `allOf`; `*` is a
+  map's values; a key that itself has dots (`System.State`) is one name. A wrong path lists the fields there.
+- `--full` prints the whole schema.
 
 ## 4. Changing and Removing Manuals
 
@@ -561,8 +575,14 @@ installing a new `utcp`, run `utcp sync-ides --global` again so the skills match
 skills with its own manuals, so `doctor` there shows your normal skills as `OUTDATED` and says so; don't run
 `sync-ides --global` there unless that setup should own them.
 
-The description groups manuals that share a `prefix_`: `azdo_* (Azure DevOps, org ni: admin (permissions), git (repos
-and PRs), ...)`, with the words all their hints share written once. `utcp sync-ides --print-skill` shows it.
+The description groups manuals that share a `prefix_`: `azdo_* (Azure DevOps, org ni: admin, git, ...)`, with the
+words all their hints share written once and the members by name; `utcp list` shows each member's own hint.
+`utcp sync-ides --print-skill` shows it. A description may have at most 1,024 characters, so with many manuals the
+longest labels are shortened to fit: a manual loses its hint, a group its member names, then its shared words.
+Agents still see every hint with `utcp list`.
+
+The `utcp-tools` body (about 4 KB, 1,000 tokens) stays in an agent's context once loaded, so it covers the usual
+call and points to `utcp <command> --help` for every option.
 
 Each skills folder records which registry wrote it (`utcp-tools/.utcp-registry`). Only that registry's changes
 rewrite it, so registering in a separate setup (section 1) leaves your skills alone. `sync-ides` always writes and

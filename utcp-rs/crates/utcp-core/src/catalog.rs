@@ -2173,11 +2173,12 @@ fn index_for(paths: &UtcpPaths, staged: bool) -> Result<SearchIndex> {
     }
 }
 
-fn not_found_in(staged: bool) -> &'static str {
+/// The error for a tool `schema` or `call` can't find; the CLI adds what to do about it.
+pub fn tool_not_found(target: &str, staged: bool) -> String {
     if staged {
-        "the staged manuals (utcp list --staged)"
+        format!("Tool '{target}' not found among the staged manuals")
     } else {
-        "registered manuals"
+        format!("Tool '{target}' not found")
     }
 }
 
@@ -2210,7 +2211,7 @@ pub fn search_tools_sync(
 pub fn get_schema_sync(paths: &UtcpPaths, target: &str, staged: bool) -> Result<ToolSchemaDetail> {
     let idx = index_for(paths, staged)?;
     idx.get_schema(target)
-        .ok_or_else(|| anyhow!("Tool '{}' not found in {}", target, not_found_in(staged)))
+        .ok_or_else(|| anyhow!("{}", tool_not_found(target, staged)))
 }
 
 /// Load one active manual's cached JSON (a small registry read, then one file from the OS page
@@ -2473,21 +2474,32 @@ pub async fn release_manual_connections(
 
 /// The value a path starts at in `map`: its key, the value, and how many of `parts` the key used.
 /// Keys may contain dots (Azure DevOps `fields.System.State`), so the longest run of parts that
-/// names a key wins: `fields.System.State` is the key `System.State` under `fields`.
+/// names a key wins: `fields.System.State` is the key `System.State` under `fields`. Case is
+/// ignored when no key matches exactly and exactly one key matches without case
+/// (`Commit.Author.Name` finds `commit.author.name`).
 fn lookup_key<'a, S: AsRef<str>>(
     map: &'a serde_json::Map<String, Value>,
     parts: &[S],
 ) -> Option<(&'a String, &'a Value, usize)> {
-    if let [only] = parts {
-        return map.get_key_value(only.as_ref()).map(|(k, v)| (k, v, 1));
-    }
-    (1..=parts.len()).rev().find_map(|n| {
-        let key = parts[..n]
+    let joined = |n: usize| {
+        parts[..n]
             .iter()
             .map(AsRef::as_ref)
             .collect::<Vec<&str>>()
-            .join(".");
-        map.get_key_value(&key).map(|(k, v)| (k, v, n))
+            .join(".")
+    };
+    let exact = (1..=parts.len())
+        .rev()
+        .find_map(|n| map.get_key_value(&joined(n)).map(|(k, v)| (k, v, n)));
+    exact.or_else(|| {
+        (1..=parts.len()).rev().find_map(|n| {
+            let key = joined(n);
+            let mut found = map.iter().filter(|(k, _)| k.eq_ignore_ascii_case(&key));
+            match (found.next(), found.next()) {
+                (Some((k, v)), None) => Some((k, v, n)),
+                _ => None,
+            }
+        })
     })
 }
 
@@ -2906,7 +2918,8 @@ fn capped_list(names: BTreeSet<String>, cap: usize) -> String {
 
 /// One `--where` condition: `path=a|b` keeps the list items whose field at `path` is `a` or `b`,
 /// `path~=a|b` those whose field contains `a` or `b`, `path^=a|b` those whose field starts with one;
-/// a `!` before the operator (`!=`, `!~=`, `!^=`) keeps the others. Case is ignored, `\|` is a `|`
+/// a `!` before the operator (`!=`, `!~=`, `!^=`) keeps the others. Case is ignored in values (and
+/// in path parts that match no key exactly), `\|` is a `|`
 /// inside a value, and a missing field counts as `null`. With `=`, a date alone matches any time
 /// that day, in UTC. `path>v`, `<`, `>=` and `<=` compare
 /// numbers, or dates (a date alone compares whole days, in UTC); a field that isn't one is left out.
@@ -4575,6 +4588,26 @@ mod where_filter_tests {
 
         let (_, note) = noted(work_items(), &["fields.System.State=Resolved"]).unwrap();
         assert!(note.unwrap().contains("\"Active\", \"Closed\""));
+    }
+
+    /// `Commit.Author.Name` kept nothing although the answer has `commit.author.name`.
+    #[test]
+    fn paths_ignore_case_when_no_key_matches_exactly() {
+        let out = filter(work_items(), &["Fields.system.state=active"]).unwrap();
+        assert_eq!(ids(&out), [1, 3]);
+        let (out, note) = fields_noted(work_items(), &["ID", "FIELDS.System.Title"]);
+        assert_eq!(note, None);
+        assert_eq!(
+            out["value"][1],
+            json!({ "id": 2, "fields": { "System.Title": "Two" } }),
+            "the answer's own spelling is kept"
+        );
+        // An exact key wins; two keys that differ only in case leave the path unmatched.
+        let items = json!([{ "a": 1, "A": 2 }]);
+        assert_eq!(filter(items.clone(), &["A=2"]).unwrap(), items);
+        let (out, note) = fields_noted(json!({ "ab": 1, "AB": 2 }), &["Ab"]);
+        assert_eq!(out, json!({}));
+        assert!(note.is_some());
     }
 
     #[test]
