@@ -2518,6 +2518,10 @@ async fn stage_diff_promote_rollback_and_discard() {
     assert!(err.contains("utcp call --staged pets.get_user"), "{err}");
     let err = run_err(&env, &["call", "pets.get_us", "{}"]);
     assert!(err.contains("Similar tools: pets.get_user."), "{err}");
+    // Through the daemon too: the error points to `utcp list` once, and names the guess once.
+    let err = run_err(&env, &["call", "pest.get_user", "{}"]);
+    assert!(err.contains("Similar manuals: pets."), "{err}");
+    assert_eq!(err.matches("utcp list").count(), 1, "{err}");
     assert_eq!(call_staged_auth(&env), "Bearer from-secrets");
     let doctor = doctor_json(&env);
     assert_eq!(credential(&doctor, "pets")["is_set"], true);

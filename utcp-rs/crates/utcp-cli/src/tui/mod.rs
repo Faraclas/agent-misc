@@ -3989,7 +3989,13 @@ mod tests {
         fn tool(manual: &str, i: usize) -> utcp_core::index::IndexedTool {
             let qualified = format!("{manual}.tool_{i:02}");
             utcp_core::index::IndexedTool {
-                search_blob: qualified.clone(),
+                words: utcp_core::index::SearchWords::new(
+                    manual,
+                    &format!("tool_{i:02}"),
+                    "Demo tool.",
+                    &[],
+                    "",
+                ),
                 qualified_name: qualified,
                 manual_name: manual.into(),
                 tool_name: format!("tool_{i:02}"),

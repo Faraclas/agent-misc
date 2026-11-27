@@ -29,6 +29,7 @@ pub mod skills;
 pub mod spec;
 pub mod staging;
 pub mod tag;
+pub mod text;
 pub mod tools;
 pub mod transfer;
 pub mod transports;

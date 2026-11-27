@@ -850,7 +850,10 @@ impl DaemonServerState {
                                 if staged {
                                     anyhow!("Manual '{}' is not staged", mname)
                                 } else {
-                                    anyhow!("Manual '{}' is not registered", mname)
+                                    anyhow!(
+                                        "Manual '{}' is not registered (see the manuals with: utcp list)",
+                                        mname
+                                    )
                                 }
                             })?;
                             Ok((m, mname, tname, guard.env_map.clone()))
@@ -994,7 +997,10 @@ impl DaemonServerState {
                                     let (mname, tname) =
                                         resolve_manual_and_tool(&item.tool, Some(index), paths)?;
                                     let manual = manuals.get(&mname).ok_or_else(|| {
-                                        anyhow!("Manual '{}' is not registered", mname)
+                                        anyhow!(
+                                            "Manual '{}' is not registered (see the manuals with: utcp list)",
+                                            mname
+                                        )
                                     })?;
                                     let files: &dyn CallerFiles = match &conn {
                                         Some(c) => c.as_ref(),

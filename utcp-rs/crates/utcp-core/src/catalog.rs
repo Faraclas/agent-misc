@@ -1,5 +1,6 @@
 use crate::index::{
-    IndexedManual, IndexedTool, SearchIndex, ToolSchemaDetail, ToolSummary, SEARCH_INDEX_MAGIC,
+    IndexedManual, IndexedTool, SearchIndex, SearchWords, ToolSchemaDetail, ToolSummary,
+    SEARCH_INDEX_MAGIC,
 };
 use crate::loader::{create_provider_from_value, tool_to_provider, with_call_template_type};
 use crate::openapi::{parse_spec_bytes, OpenApiConverter};
@@ -2112,16 +2113,12 @@ pub(crate) fn build_index(
                 serde_json::to_string(&t.inputs).unwrap_or_else(|_| r#"{"type":"object"}"#.into());
             let output_schema_json =
                 serde_json::to_string(&t.outputs).unwrap_or_else(|_| r#"{"type":"object"}"#.into());
-            let search_blob = format!(
-                "{} {} {} {}",
-                qualified_name.to_ascii_lowercase(),
-                t.description.to_ascii_lowercase(),
-                t.tags.join(" ").to_ascii_lowercase(),
-                entry
-                    .hint
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
+            let words = SearchWords::new(
+                name,
+                &t.name,
+                &t.description,
+                &t.tags,
+                entry.hint.as_deref().unwrap_or_default(),
             );
 
             tools.push(IndexedTool {
@@ -2133,7 +2130,7 @@ pub(crate) fn build_index(
                 tags: t.tags.clone(),
                 input_schema_json,
                 output_schema_json,
-                search_blob,
+                words,
             });
         }
 

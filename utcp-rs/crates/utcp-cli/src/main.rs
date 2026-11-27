@@ -2258,12 +2258,15 @@ fn target_hint(
         ));
     };
     let Some(l) = lookup_tool(paths, registry, manual, tool, staged) else {
-        let names: Vec<&str> = registry
+        let mut names: Vec<&str> = registry
             .manuals
             .keys()
             .chain(registry.staged.keys())
             .map(String::as_str)
             .collect();
+        // A manual that is active and staged at once is one name.
+        names.sort_unstable();
+        names.dedup();
         let similar = utcp_core::arguments::similar_names(manual, &names, 3);
         let guess = if similar.is_empty() {
             String::new()
@@ -2983,11 +2986,7 @@ const SUMMARY_CHARS: usize = 120;
 /// A description's first sentence (of its first non-empty line), cut at a word near
 /// [`SUMMARY_CHARS`] with `...` when longer.
 fn summary_line(text: &str) -> String {
-    let line = first_line(text);
-    let sentence = line
-        .char_indices()
-        .find(|&(i, c)| c == '.' && ends_sentence(line, i))
-        .map_or(line, |(i, _)| &line[..=i]);
+    let sentence = utcp_core::text::first_sentence(text);
     if sentence.chars().count() <= SUMMARY_CHARS {
         return sentence.to_string();
     }
@@ -2997,28 +2996,6 @@ fn summary_line(text: &str) -> String {
         _ => &cut,
     };
     format!("{}...", cut.trim_end_matches([',', ';', ':', ' ']))
-}
-
-/// Abbreviations whose `.` does not end a sentence.
-const ABBREVIATIONS: [&str; 5] = ["e.g.", "i.e.", "cf.", "vs.", "etc."];
-
-/// Whether the `.` at byte `dot` of `line` ends a sentence: a space follows it, the word it ends is
-/// not an abbreviation such as `e.g.`, and the text after it does not go on in lower case.
-fn ends_sentence(line: &str, dot: usize) -> bool {
-    let rest = &line[dot + 1..];
-    if !rest.starts_with(' ') {
-        return false;
-    }
-    if rest.trim_start().starts_with(|c: char| c.is_lowercase()) {
-        return false;
-    }
-    let word = line[..=dot]
-        .rsplit(char::is_whitespace)
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .to_lowercase();
-    !ABBREVIATIONS.contains(&word.as_str())
 }
 
 const BLUE: &str = "34";
@@ -3070,14 +3047,6 @@ fn skill_tag(s: &utcp_core::skills::IdeSkillTargetStatus, color: bool) -> String
         tag.to_string()
     };
     format!("[{shown}{:pad$}]", "", pad = 13 - tag.len())
-}
-
-/// The first non-empty line of a description, so text output stays one line per tool.
-fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
 }
 
 fn parse_call_args(
@@ -3263,9 +3232,9 @@ fn maybe_log_direct(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_hint, credential_lines, diff_tokens, first_line, format_uptime, name_patterns,
-        paint, render_word_diff, skill_tag, summary_line, tool_line, tool_name_width, word_diff,
-        Span, BLUE, GREEN,
+        append_hint, credential_lines, diff_tokens, format_uptime, name_patterns, paint,
+        render_word_diff, skill_tag, summary_line, tool_line, tool_name_width, word_diff, Span,
+        BLUE, GREEN,
     };
     use utcp_core::catalog::CredentialStatus;
     use utcp_core::index::ToolSummary;
@@ -3488,11 +3457,10 @@ mod tests {
     #[test]
     fn text_summaries_use_the_first_non_empty_description_line() {
         assert_eq!(
-            first_line("\n  Query docs.  \n\nUse it when:\n- a library\n"),
+            summary_line("\n  Query docs.  \n\nUse it when:\n- a library\n"),
             "Query docs."
         );
-        assert_eq!(first_line("one line"), "one line");
-        assert_eq!(first_line(" \n "), "");
+        assert_eq!(summary_line(" \n "), "");
     }
 
     #[test]

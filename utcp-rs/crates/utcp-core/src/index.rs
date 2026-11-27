@@ -3,10 +3,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-/// Format tag at the start of `search_index.bin`. Bump it whenever the layout or the meaning of a field changes (`3`:
-/// `search_blob` includes the manual's hint): a file with another tag is treated as missing and rebuilt from the
-/// registry instead of failing to decode or giving stale results.
-pub const SEARCH_INDEX_MAGIC: [u8; 8] = *b"UTCPIDX3";
+/// Format tag at the start of `search_index.bin`. Bump it whenever the layout or the meaning of a field changes (`4`:
+/// precomputed [`SearchWords`] replace the lowercased `search_blob`): a file with another tag is treated as missing
+/// and rebuilt from the registry instead of failing to decode or giving stale results.
+pub const SEARCH_INDEX_MAGIC: [u8; 8] = *b"UTCPIDX4";
 
 /// Compact pre-computed binary catalog stored in `search_index.bin` via `bincode`
 /// so `utcp list`, `utcp search`, and `utcp schema` execute synchronously in microseconds.
@@ -49,8 +49,83 @@ pub struct IndexedTool {
     pub input_schema_json: String,
     /// Pre-serialized JSON string of the tool's `outputs` schema
     pub output_schema_json: String,
-    /// Lowercased searchable text (`qualified_name + description + tags`) for sub-millisecond scoring
-    pub search_blob: String,
+    /// The words [`rank`] scores, computed once when the index is built.
+    pub words: SearchWords,
+}
+
+/// A tool's searchable words, as [`words`] splits them. Each field is one string of words separated by
+/// single spaces, which keeps `search_index.bin` small and quick to load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchWords {
+    /// Words of the tool name, in order (repeats kept: they weigh the name-coverage bonus).
+    pub name: String,
+    /// Words of the description's first sentence, in order.
+    pub summary: String,
+    /// Every word of the description; sorted, no repeats.
+    pub description: String,
+    /// Words of the manual name; sorted, no repeats.
+    pub manual: String,
+    /// Words of the tool's tags and the manual's hint; sorted, no repeats.
+    pub meta: String,
+}
+
+impl SearchWords {
+    pub fn new(manual: &str, tool: &str, description: &str, tags: &[String], hint: &str) -> Self {
+        let meta = format!("{} {hint}", tags.join(" "));
+        Self {
+            name: words(tool).join(" "),
+            summary: words(crate::text::first_sentence(description)).join(" "),
+            description: sorted_set(words(description)),
+            manual: sorted_set(words(manual)),
+            meta: sorted_set(words(&meta)),
+        }
+    }
+}
+
+/// The words of a [`SearchWords`] field.
+fn each(field: &str) -> impl Iterator<Item = &str> {
+    field.split(' ').filter(|w| !w.is_empty())
+}
+
+fn has(field: &str, word: &str) -> bool {
+    each(field).any(|w| w == word)
+}
+
+/// The lowercased words of `text`: runs of letters and digits of any alphabet, split where a lowercase letter
+/// or digit is followed by an uppercase letter (`getRepo`) and before the last capital of a run followed by a
+/// lowercase letter (`HTTPServer`). Only how text is written decides; there are no word lists, so every
+/// manual and language is searched the same way.
+fn words(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        if !word.is_empty() && c.is_uppercase() {
+            let before = chars[i - 1];
+            let lower_next = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if before.is_lowercase() || before.is_numeric() || (before.is_uppercase() && lower_next)
+            {
+                out.push(std::mem::take(&mut word));
+            }
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+fn sorted_set(mut words: Vec<String>) -> String {
+    words.sort_unstable();
+    words.dedup();
+    words.join(" ")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +359,7 @@ fn rank(
 
                 scoped.sort_by(|a, b| {
                     b.0.cmp(&a.0)
+                        .then_with(|| a.1.qualified_name.len().cmp(&b.1.qualified_name.len()))
                         .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
                 });
                 return scoped
@@ -295,62 +371,25 @@ fn rank(
         }
     }
 
-    let terms: Vec<&str> = q_trim
-        .split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-')
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Split the query as typed, before lowercasing, so `getRepo` is two words like the tool names.
+    let mut terms: Vec<String> = Vec::new();
+    for w in words(query) {
+        if !terms.contains(&w) {
+            terms.push(w);
+        }
+    }
+    if terms.is_empty() {
+        return Vec::new();
+    }
 
-    let mut scored: Vec<(i64, &IndexedTool, bool)> = tools
+    let mut scored: Vec<(f64, &IndexedTool, bool)> = tools
         .iter()
-        .filter_map(|&(tool, staged)| {
-            let mut score = 0i64;
-            let qname_lower = tool.qualified_name.to_ascii_lowercase();
-            let tname_lower = tool.tool_name.to_ascii_lowercase();
-
-            if qname_lower == q_trim || tname_lower == q_trim {
-                score += 1000;
-            } else if q_trim.len() >= 3 && qname_lower.contains(&q_trim) {
-                score += 400;
-            } else if q_trim.len() >= 3 && tool.search_blob.contains(&q_trim) {
-                score += 200;
-            }
-
-            for term in &terms {
-                if tname_lower == *term {
-                    score += 150;
-                } else if term.len() <= 2 {
-                    // Short 1-2 char tokens (like "id", "pr", "d2") must match whole word tokens,
-                    // never substrings inside unrelated words like "val[id]ate"!
-                    if tool
-                        .search_blob
-                        .split(|c: char| !c.is_ascii_alphanumeric())
-                        .any(|w| w == *term)
-                    {
-                        score += 60;
-                    }
-                } else if qname_lower.contains(term) {
-                    score += 80;
-                } else if tool
-                    .tags
-                    .iter()
-                    .any(|tag| tag.to_ascii_lowercase().contains(term))
-                {
-                    score += 60;
-                } else if tool.search_blob.contains(term) {
-                    score += 25;
-                }
-            }
-
-            if score > 0 {
-                Some((score, tool, staged))
-            } else {
-                None
-            }
-        })
+        .filter_map(|&(tool, staged)| score(tool, &q_trim, &terms).map(|s| (s, tool, staged)))
         .collect();
 
     scored.sort_by(|a, b| {
-        b.0.cmp(&a.0)
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.qualified_name.len().cmp(&b.1.qualified_name.len()))
             .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
     });
 
@@ -361,19 +400,85 @@ fn rank(
         .collect()
 }
 
+/// How well `tool` answers a query (`None`: no query word matched). `query` is the trimmed, lowercased query,
+/// `terms` its [`words`] (no repeats).
+///
+/// An exact tool or qualified name wins outright. Otherwise each term scores where it matches best: a word of
+/// the manual name 8 (10 when the tool name has it too), of the tool name 10, of the first sentence 6, of the
+/// tags or hint 3, of the rest of the description 1, or the start of a name or first-sentence word (terms of 4+
+/// characters) 2, so `invoice` finds `invoices`. Words otherwise match whole: `id` never matches `validate`,
+/// `port` never matches `report`. The total is scaled by the share of terms that matched, then precision is
+/// added: up to 6 for how much of the tool name the query covers, up to 4 for the first sentence, and 8 more when
+/// the query's words are exactly the first sentence's words (order and repeats ignored), so `get a repository`
+/// finds the tool whose first sentence is "Get a repository." before tools that merely have `repository` in
+/// their names. Callers break ties by the shorter qualified name.
+fn score(tool: &IndexedTool, query: &str, terms: &[String]) -> Option<f64> {
+    if tool.qualified_name.eq_ignore_ascii_case(query) || tool.tool_name.eq_ignore_ascii_case(query)
+    {
+        return Some(1e9);
+    }
+    let w = &tool.words;
+    let mut total = 0.0;
+    let mut matched = 0usize;
+    for term in terms {
+        let term = term.as_str();
+        let points = if has(&w.manual, term) {
+            if has(&w.name, term) {
+                10.0
+            } else {
+                8.0
+            }
+        } else if has(&w.name, term) {
+            10.0
+        } else if has(&w.summary, term) {
+            6.0
+        } else if has(&w.meta, term) {
+            3.0
+        } else if has(&w.description, term) {
+            1.0
+        } else if term.chars().count() >= 4
+            && each(&w.name)
+                .chain(each(&w.summary))
+                .any(|x| x.starts_with(term))
+        {
+            2.0
+        } else {
+            continue;
+        };
+        total += points;
+        matched += 1;
+    }
+    if matched == 0 {
+        return None;
+    }
+    total *= matched as f64 / terms.len() as f64;
+    let coverage = |field: &str| {
+        let (asked, all) = each(field).fold((0usize, 0usize), |(asked, all), x| {
+            (asked + usize::from(terms.iter().any(|t| t == x)), all + 1)
+        });
+        if all == 0 {
+            0.0
+        } else {
+            asked as f64 / all as f64
+        }
+    };
+    total += 6.0 * coverage(&w.name) + 4.0 * coverage(&w.summary);
+    let summary_is_query = !w.summary.is_empty()
+        && each(&w.summary).all(|x| terms.iter().any(|t| t == x))
+        && terms.iter().all(|t| has(&w.summary, t));
+    if summary_is_query {
+        total += 8.0;
+    }
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample_tool(manual: &str, name: &str, desc: &str) -> IndexedTool {
-        let qname = format!("{}.{}", manual, name);
-        let blob = format!(
-            "{} {}",
-            qname.to_ascii_lowercase(),
-            desc.to_ascii_lowercase()
-        );
         IndexedTool {
-            qualified_name: qname,
+            qualified_name: format!("{}.{}", manual, name),
             manual_name: manual.to_string(),
             tool_name: name.to_string(),
             protocol: "http".to_string(),
@@ -381,7 +486,7 @@ mod tests {
             tags: vec![],
             input_schema_json: r#"{"type":"object"}"#.to_string(),
             output_schema_json: r#"{"type":"object"}"#.to_string(),
-            search_blob: blob,
+            words: SearchWords::new(manual, name, desc, &[], ""),
         }
     }
 
@@ -455,6 +560,193 @@ mod tests {
         assert_eq!(short_token[0].name, "context7.resolve-library-id");
     }
 
+    fn tagged_tool(manual: &str, name: &str, desc: &str, tags: &[&str], hint: &str) -> IndexedTool {
+        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        IndexedTool {
+            words: SearchWords::new(manual, name, desc, &tags, hint),
+            tags,
+            ..sample_tool(manual, name, desc)
+        }
+    }
+
+    fn names(idx: &SearchIndex, query: &str) -> Vec<String> {
+        idx.search(query, 50, false)
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    /// Words match whole: `port` never matches `report`, `get` never matches `target`. A term of 4+ letters
+    /// may also match the start of a word, below a whole-word match: `repo` finds `report` after `get_repo`.
+    #[test]
+    fn search_matches_whole_words_not_substrings() {
+        let idx = index_of(vec![
+            sample_tool("store", "get_repo", "Get a repository."),
+            sample_tool("store", "create_report", "Create a report about a target."),
+        ]);
+        assert_eq!(names(&idx, "report"), ["store.create_report"]);
+        assert!(names(&idx, "port").is_empty());
+        assert_eq!(
+            names(&idx, "repo"),
+            ["store.get_repo", "store.create_report"]
+        );
+        assert_eq!(names(&idx, "target"), ["store.create_report"]);
+        assert_eq!(names(&idx, "get"), ["store.get_repo"]);
+        assert!(names(&idx, "zzz nothing").is_empty());
+    }
+
+    /// Names split where they are written apart: `_`, `-`, camelCase (`getRepo`, `HTTPServer`, `v2Items`),
+    /// and letters of any alphabet stay in their word.
+    #[test]
+    fn search_splits_words_by_how_they_are_written_in_any_alphabet() {
+        let idx = index_of(vec![
+            sample_tool("api", "getRepo", "Get a repo."),
+            sample_tool("api", "HTTPServerStatus", "Server status."),
+            sample_tool("api", "list_v2Items", "List items."),
+            sample_tool("api", "get-user", "Get a user."),
+            sample_tool("karten", "größe_ändern", "Ändert die Größe."),
+        ]);
+        assert_eq!(names(&idx, "repo")[0], "api.getRepo");
+        assert_eq!(names(&idx, "get repo")[0], "api.getRepo");
+        assert_eq!(names(&idx, "getRepo")[0], "api.getRepo");
+        assert_eq!(names(&idx, "server")[0], "api.HTTPServerStatus");
+        assert_eq!(names(&idx, "http status")[0], "api.HTTPServerStatus");
+        assert_eq!(names(&idx, "v2")[0], "api.list_v2Items");
+        assert_eq!(names(&idx, "user")[0], "api.get-user");
+        assert_eq!(names(&idx, "größe")[0], "karten.größe_ändern");
+        assert_eq!(names(&idx, "Ändern")[0], "karten.größe_ändern");
+    }
+
+    /// Search knows no words: no stop words, plural rules or abbreviations, in any language. A query word of
+    /// 4+ characters still finds the words it starts, so `invoice` finds `invoices`.
+    #[test]
+    fn search_uses_no_word_lists() {
+        let idx = index_of(vec![
+            sample_tool("store", "list_invoices", "List invoices."),
+            sample_tool("store", "get_policy", "Get a policy."),
+            sample_tool("store", "get_org", "Get an org."),
+            sample_tool("store", "list_all", "List every item."),
+        ]);
+        assert_eq!(names(&idx, "invoice"), ["store.list_invoices"]);
+        assert!(names(&idx, "policies").is_empty());
+        assert!(names(&idx, "organization").is_empty());
+        assert_eq!(names(&idx, "all")[0], "store.list_all");
+        assert_eq!(names(&idx, "an org")[0], "store.get_org");
+    }
+
+    /// A word in the tool name beats the same word in the first sentence, which beats tags and the
+    /// manual's hint, which beat the rest of the description.
+    #[test]
+    fn search_weighs_name_then_first_sentence_then_tags_and_hint_then_description() {
+        let idx = index_of(vec![
+            tagged_tool("crm", "rest", "Other text. Mentions an invoice.", &[], ""),
+            tagged_tool("crm", "tagged", "Other text.", &["invoice"], ""),
+            tagged_tool("crm", "summary", "Send an invoice.", &[], ""),
+            tagged_tool("crm", "send_invoice", "Send it.", &[], ""),
+            tagged_tool("books", "hinted", "Other text.", &[], "invoice and bills"),
+        ]);
+        let hits = names(&idx, "invoice");
+        assert_eq!(
+            &hits[..3],
+            ["crm.send_invoice", "crm.summary", "crm.tagged"]
+        );
+        assert!(hits[3..].contains(&"books.hinted".to_string()));
+        assert_eq!(hits.last().unwrap(), "crm.rest");
+    }
+
+    /// The tool whose name the query covers most ranks first; equal scores go to the shorter name, not the
+    /// alphabetically first.
+    #[test]
+    fn search_prefers_close_names_and_breaks_ties_by_length() {
+        let idx = index_of(vec![
+            sample_tool(
+                "store",
+                "get_repo_ruleset_history",
+                "Get the history of a ruleset.",
+            ),
+            sample_tool("store", "get_repo_secret", "Get a repository secret."),
+            sample_tool("store", "get_repo", "Get a repository."),
+            sample_tool("store", "b_item", "Item."),
+            sample_tool("store", "aa_item", "Item."),
+        ]);
+        assert_eq!(names(&idx, "get a repository")[0], "store.get_repo");
+        assert_eq!(names(&idx, "get repo")[0], "store.get_repo");
+        assert_eq!(names(&idx, "item"), ["store.b_item", "store.aa_item"]);
+    }
+
+    /// A query whose words are exactly the first sentence's words finds that tool before tools that only
+    /// have one of the query words in their names.
+    #[test]
+    fn search_prefers_a_first_sentence_that_is_exactly_the_query() {
+        let idx = index_of(vec![
+            sample_tool(
+                "store",
+                "get_repository_advisory",
+                "Get a repository security advisory.",
+            ),
+            sample_tool(
+                "store",
+                "get_repository_advisory_comment",
+                "Get a comment on a repository security advisory.",
+            ),
+            sample_tool("store", "get_repo", "Get a repository."),
+        ]);
+        assert_eq!(names(&idx, "get a repository")[0], "store.get_repo");
+        assert_eq!(names(&idx, "Repository, get a")[0], "store.get_repo");
+        assert_eq!(
+            names(&idx, "get a repository security advisory")[0],
+            "store.get_repository_advisory"
+        );
+    }
+
+    /// `<manual>.<prefix>` lists the tools starting with the prefix, shortest name first.
+    #[test]
+    fn scoped_search_breaks_ties_by_length() {
+        let idx = index_of(vec![
+            sample_tool("store", "get_branch", "Get a branch."),
+            sample_tool("store", "get_alert_rule", "Get an alert rule."),
+            sample_tool("store", "get_repo", "Get a repository."),
+            sample_tool("store", "get_view", "Get a view."),
+            sample_tool("store", "list_repos", "List repositories."),
+        ]);
+        assert_eq!(
+            names(&idx, "store.get"),
+            [
+                "store.get_repo",
+                "store.get_view",
+                "store.get_branch",
+                "store.get_alert_rule"
+            ]
+        );
+    }
+
+    /// A tool matching every query word beats one matching only some; a word of the manual name counts
+    /// too, so naming the service picks its tool.
+    #[test]
+    fn search_rewards_matching_every_word_including_the_manual_name() {
+        let idx = index_of(vec![
+            sample_tool("shop", "get_order", "Get an order."),
+            sample_tool("warehouse", "get_order", "Get an order."),
+            sample_tool("warehouse", "cancel_order", "Cancel an order."),
+        ]);
+        assert_eq!(names(&idx, "warehouse order")[0], "warehouse.get_order");
+        assert_eq!(names(&idx, "shop order")[0], "shop.get_order");
+        assert_eq!(names(&idx, "cancel order")[0], "warehouse.cancel_order");
+    }
+
+    /// An exact tool or `<manual>.<tool>` name ranks first, ahead of tools that only share its words.
+    #[test]
+    fn search_ranks_exact_names_first() {
+        let idx = index_of(vec![
+            sample_tool("store", "list_all", "List every item."),
+            sample_tool("store", "export", "Export items. Lists all of them."),
+            sample_tool("store", "list", "Other text."),
+        ]);
+        assert_eq!(names(&idx, "every item")[0], "store.list_all");
+        assert_eq!(names(&idx, "list")[0], "store.list");
+        assert_eq!(names(&idx, "store.list")[0], "store.list");
+    }
+
     fn paths_in(root: &std::path::Path) -> UtcpPaths {
         UtcpPaths {
             config_dir: root.join("config"),
@@ -483,10 +775,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = paths_in(tmp.path());
 
-        let mut old = b"UTCPIDX2".to_vec();
-        old.extend_from_slice(&[0u8; 64]);
-        fs::write(&paths.search_index_file, &old).unwrap();
-        assert!(SearchIndex::load_from_disk(&paths).unwrap().is_none());
+        for old in [b"UTCPIDX2", b"UTCPIDX3"] {
+            let mut bytes = old.to_vec();
+            bytes.extend_from_slice(&[0u8; 64]);
+            fs::write(&paths.search_index_file, &bytes).unwrap();
+            assert!(SearchIndex::load_from_disk(&paths).unwrap().is_none());
+        }
 
         let manual = |name: &str, vars: &[&str]| IndexedManual {
             name: name.into(),

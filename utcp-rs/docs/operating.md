@@ -164,7 +164,9 @@ agent loads, so agents know what an unclear name such as `context7` is for.
   utcp import-mcp everything --command npx --arg -y --arg @modelcontextprotocol/server-everything -o everything.utcp.json
   ```
 
-- **Check the result:** `utcp list <name>`, then `utcp search "<keywords>"`.
+- **Check the result:** `utcp list <name>`, then `utcp search "<keywords>"`. Search matches whole words, as written
+  (`get_repo`, `getRepo` and `get-repo` are all `get repo`; no word lists, so `repository` does not find `repo`), and
+  ranks a tool higher the more of its name and first sentence the query covers.
 
 ### Staging: Try a Manual Before Agents See It
 
