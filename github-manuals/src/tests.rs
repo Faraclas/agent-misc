@@ -1198,10 +1198,11 @@ fn shared_summaries_are_qualified() {
         tools["get_zen"]["description"],
         "Get the authenticated user for the meta API."
     );
-    assert_eq!(
-        tools["get_authenticated_user"]["description"],
-        "Get the authenticated user for a user."
-    );
+    // The qualifier follows the summary; the tool's config note comes after it.
+    assert!(tools["get_authenticated_user"]["description"]
+        .as_str()
+        .unwrap()
+        .starts_with("Get the authenticated user for a user. "));
     // Two tools of one category still collide.
     let mut spec = description();
     spec["paths"]["/repos/{owner}/{repo}/contents/{path}"]["get"]["summary"] =

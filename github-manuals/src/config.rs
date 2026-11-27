@@ -1230,6 +1230,15 @@ pub const NOTES: &[(&str, &str)] = &[
         "repos/get-release-asset",
         "To download the asset, use github_repos.download_release_asset.",
     ),
+    // GitHub says "the authenticated user"; agents search for "current user", "me" and "my repositories".
+    (
+        "users/get-authenticated",
+        "The authenticated user is the account the token belongs to: the current user, me.",
+    ),
+    (
+        "repos/list-for-authenticated-user",
+        "These are the current user's repositories (my repositories): their own and the ones shared with them.",
+    ),
     (
         "dependency-graph/generate-sbom-report",
         "To get the SBOM, pass the last part of the answer's sbom_url as sbom_uuid to \

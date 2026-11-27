@@ -75,8 +75,8 @@
       "reads": 3,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2548,
-      "approx_tokens": 637
+      "bytes": 2630,
+      "approx_tokens": 657
     }
   },
   "left_out_summary": [
