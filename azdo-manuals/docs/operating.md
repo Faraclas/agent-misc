@@ -2,8 +2,9 @@
 
 For people who run `azdo-manuals` for their own Azure DevOps organization. The [README](../README.md) covers
 installation and the first setup (generate, PAT, review, test, promote). This guide covers everything after that: the
-files it writes, the PAT, upgrades and rollback, reading the test results, troubleshooting, Windows, and networks with
-a proxy or TLS inspection. How the generator works inside is in the [specification](./azdo-manuals-spec.md).
+files it writes, the PAT, upgrades and rollback, reading the test results, checking that agents find the tools,
+troubleshooting, Windows, and networks with a proxy or TLS inspection. How the generator works inside is in the
+[specification](./azdo-manuals-spec.md).
 
 `azdo-manuals` only writes manuals. Everything an agent does goes through [utcp](../../utcp-rs/): its staging area,
 its secrets and its daemon. The [utcp operating guide](../../utcp-rs/docs/operating.md) is the reference for those.
@@ -85,7 +86,8 @@ PAT makes every call answer 401.
 
 ### Commands that read the PAT from the environment
 
-`read-test` never needs the PAT in your shell: it calls through utcp, which has it. The others read
+`read-test` never needs the PAT in your shell: it calls through utcp, which has it (`search-test` only searches and
+needs no PAT at all). The others read
 `AZURE_DEVOPS_EXT_PAT` from the environment of the shell you run them in, and print tool names, statuses and sizes,
 never the token:
 
@@ -122,7 +124,13 @@ A new version can change the manuals (new tools, fixed parameters, new hints). A
    azdo-manuals read-test --org contoso --project Fabrikam
    ```
 
-4. Make them active:
+4. Check that agents still find the tools with the words they use (read-only; see section 6):
+
+   ```sh
+   azdo-manuals search-test --staged
+   ```
+
+5. Make them active:
 
    ```sh
    utcp promote 'azdo_*'
@@ -225,22 +233,71 @@ file and prints a reference instead of the JSON; `read-test` reads it from there
 with a file (logs, zips, attachments) are saved to a temporary file and deleted once counted; nothing lands in your
 Downloads folder.
 
-## 6. Troubleshooting
+## 6. Checking that agents find the tools
+
+Agents find tools with `utcp search "<words>"`, and only see the first few results. `search-test` runs a list of
+searches an agent would type, each with the tools that count as a right answer, through your utcp, and checks that
+one of them ranks in the top 3 (`--top N`, 1 to 10, changes that). It runs only `utcp list` and `utcp search` and
+changes nothing, and its output names no organization data.
+
+Run it after `generate --stage`, with `--staged` so the staged manuals are searched as if promoted, and before
+`utcp promote 'azdo_*'` (section 3, step 4). Without `--staged` it checks what your agents see now.
+
+```text
+Searching the active and staged manuals (utcp search --staged --limit 10); a case passes with a tool in the top 3.
+query                  rank  tool                                                                 result
+current user              1  github_users.get_authenticated_user                                  PASS
+list builds               2  azdo_pipelines.get_builds                                            PASS
+list projects             -  azdo_core.get_projects                                               KNOWN (Azure DevOps calls it "Get all projects", and search has no synonyms)
+who am i                  -  azdo_core.get_connection_data | github_users.get_authenticated_user  FAIL
+...
+
+20 cases: 20 searched, 0 skipped.
+Found: top-1 13 of 20, top-3 18 of 20, top-5 18 of 20.
+1 known miss; 1 failure (not in the top 3).
+```
+
+| Result | Meaning |
+| :--- | :--- |
+| `PASS` | One of the right tools is in the top 3; `rank` is the best one's place, `tool` names it. |
+| `FAIL` | None is in the top 3. `rank` is `-` when none is in the first 10 results; `tool` then lists the right ones. |
+| `KNOWN` | A known miss: reported, with its reason, but not a failure. |
+| `SKIP` | None of the case's tools belongs to a registered manual (the GitHub tools when `github-manuals` is not registered, or a manual that is only staged when `--staged` is missing). |
+
+It exits with 1 when a case failed, 0 otherwise. The searches are built in (`tests/search-checks.txt` in the source);
+`--cases <file>` uses your own, one per line: `query words -> manual.tool | manual.other_tool`, with
+`[known miss: why]` at the end for a known miss and `#` for comments. A case may list tools of several manual
+families: tools of manuals you have not registered are ignored.
+
+A `FAIL` means one of two things:
+
+- **The manuals do not say what people call the thing.** Microsoft's text names it differently, or not at all
+  (a developer comment instead of a description). Fix it in `src/config.rs`: a `summaries` entry for a first sentence
+  that tells an agent nothing, or a `notes` entry for the words people search for. Never add odd wording just to make
+  a search pass; the text must stay true and read well to an agent.
+- **utcp ranks badly.** The right tool's name and description do contain the words, but other tools rank above it.
+  That is a utcp bug: report it to [utcp-rs](../../utcp-rs/) with the query and the tools.
+
+When a known miss passes, the totals say so: remove its marker.
+
+## 7. Troubleshooting
 
 | You see | Cause | Do |
 | :--- | :--- | :--- |
 | `'<name>' is not a valid Azure DevOps organization name` | `--org` must be the name in `https://dev.azure.com/<org>`: letters, digits and `-`. | Use only the name, not the URL. |
 | `the archive's rate limit (120 requests per hour) is used up; try again after HH:MM` | A first `generate` downloads 46 files; several cold runs in one hour can use up the archive's limit. | Wait until the time it names. Files already downloaded stay cached. |
-| `cannot reach the archive (...)` | No network path to `archive.softwareheritage.org`. | Check the network, proxy and CA (section 8). |
+| `cannot reach the archive (...)` | No network path to `archive.softwareheritage.org`. | Check the network, proxy and CA (section 9). |
 | `<file>: the archive sent content with hash ..., pinned ...` | The download is not the pinned file (a proxy changed it, or the archive is broken). | Retry; if it repeats, report it. Nothing was cached. |
 | `resourceAreas: HTTP 401 (the PAT is not valid for this organization)` (`generate`) | `AZURE_DEVOPS_EXT_PAT` in your shell is wrong, expired, or for another organization. | Fix it, unset it, or run with `--spec-only`. |
-| `cannot download https://codeload.github.com/...` | No network path to GitHub, which serves Microsoft's client libraries. | Check the network and proxy (section 8), or run with `--spec-only`. |
+| `cannot download https://codeload.github.com/...` | No network path to GitHub, which serves Microsoft's client libraries. | Check the network and proxy (section 9), or run with `--spec-only`. |
 | `microsoft/azure-devops-...@<commit>: <file> has hash ..., pinned ...` | GitHub sent a file other than the pinned one. | Retry; if it repeats, report it. |
 | `Analytics left out: Analytics $metadata: HTTP 401` | The PAT lacks "Analytics: Read". | Add it to the PAT; the other manuals are written anyway. |
-| `<path> is utcp 0.2.3; these manuals need utcp 0.2.4 or newer, ...` (`generate --stage`, `read-test`, `write-test`) | The manuals leave out optional URL segments such as `{team}` when they are not passed, which older utcp sends as they are. | Upgrade utcp, or pass `--utcp <newer utcp>`. |
+| `<path> is utcp 0.2.3; these manuals need utcp 0.2.4 or newer, ...` (`generate --stage`, `read-test`, `search-test`, `write-test`) | The manuals leave out optional URL segments such as `{team}` when they are not passed, which older utcp sends as they are. | Upgrade utcp, or pass `--utcp <newer utcp>`. |
 | `utcp stage <manual> failed (output above)` | utcp's own message above says why. | Fix that, then run `generate --stage` again. |
 | `no utcp binary (use --utcp)` | utcp is not on `PATH`. | Put it on `PATH`, or pass `--utcp <path>`. |
 | `utcp has neither a staged nor an active manual named ...` (`read-test`) | The manuals were generated but never staged or registered. | `azdo-manuals generate --org contoso --stage`. |
+| `search-test` shows `SKIP` for every azdo case | The manuals are only staged, and `--staged` is missing (or they are not in utcp at all). | `azdo-manuals search-test --staged`, or stage them first. |
+| `search-test` shows `FAIL` | The right tool is not in the top 3 of `utcp search`. | Section 6. |
 | `utcp doctor` shows `[MISSING] AZURE_DEVOPS_EXT_PAT` | utcp has no value for the secret. | Section 2, then `utcp daemon reload-env`. |
 | Every call answers 401 | The PAT is wrong, expired or revoked, or belongs to another organization. | Make a new PAT (section 2). |
 | Some calls answer 401, others work | The PAT lacks the permission those tools need. | Compare the PAT with `scopes.md`. |
@@ -250,7 +307,7 @@ Downloads folder.
 | 404 on a tool that should work | A disabled feature, a classic pipeline (no YAML), or an id from another project. | See "Failures that are expected" in section 5. |
 | A write answers 400 with a field error | The body differs from what the service accepts. Writes marked `(untested)` were never checked live. | Read the tool's schema (`utcp schema <manual>.<tool>`) and the service's message; report it if the schema is wrong. |
 
-## 7. Windows
+## 8. Windows
 
 - Put `azdo-manuals.exe` in a folder on `PATH`; next to `utcp.exe` (`%LOCALAPPDATA%\Programs\utcp`, where utcp's
   installer puts it) is simplest.
@@ -259,7 +316,7 @@ Downloads folder.
 - utcp's installer starts its daemon at logon through the scheduled task "utcp daemon". After changing the PAT, run
   `utcp daemon reload-env` as on Linux.
 
-## 8. Proxies and TLS inspection
+## 9. Proxies and TLS inspection
 
 `azdo-manuals` and utcp handle the network the same way:
 

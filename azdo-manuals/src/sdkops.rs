@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::generate::Specs;
 use crate::live::{Live, Route, MAIN_HOST};
 use crate::routes::{path_segments, route_segments, segments_match, version_tuple};
-use crate::sdk::{self, Method, Param, Parsed, Place, Sdk, Ty, TypeDef, Types};
+use crate::sdk::{Method, Param, Parsed, Place, Sdk, Ty, TypeDef, Types};
 
 const HTTP_METHODS: [&str; 6] = ["get", "put", "post", "delete", "head", "patch"];
 
@@ -586,15 +586,11 @@ pub fn synthesize(
     }
     let read = method.http_method == "get";
     let (scopes, how) = infer_scopes(&route.guid, read, area, cov);
-    // A method without a doc comment is described by its name (`CreateDocumentByName` -> "Create document by name").
-    let description = if method.description.is_empty() {
-        sdk::upper_first(&crate::text::snake(&method.name).replace('_', " "))
-    } else {
-        method.description.clone()
-    };
     let mut op = json!({
         "operationId": operation_id,
-        "description": description,
+        // A method without a doc comment gets a sentence made from its name later, as a spec operation without a
+        // description does (`generate::tool_description`).
+        "description": method.description,
         "tags": [route.resource],
         "x-ms-vss-method": method.name,
         "parameters": parameters,

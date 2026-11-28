@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::analytics;
 use crate::archive::git_blob_sha1;
-use crate::config::{manual, Config};
+use crate::config::{manual, texts, Config};
 use crate::generate::{generate_with, Extra};
 use crate::http::{Request, Response, Transport};
 use crate::live::{self, Live, Route};
@@ -108,6 +108,17 @@ fn extra_config() -> Config {
     );
     conf.route_areas = vec![("location".into(), "location".into())];
     conf.excluded_route_areas = vec![("clienttrace".into(), "client telemetry".into())];
+    // Client-library operations are named `<Resource>.<Method>`, as in the real configuration.
+    conf.summaries.extend(texts(&[(
+        "location",
+        "ConnectionData.GetConnectionData",
+        "Get the calling user.",
+    )]));
+    conf.notes.extend(texts(&[(
+        "location",
+        "ConnectionData.GetConnectionData",
+        "Who am I.",
+    )]));
     conf
 }
 
@@ -646,6 +657,10 @@ fn join_adds_what_the_spec_lacks() {
     assert_eq!(
         conn["inputs"]["properties"]["connectOptions"]["enum"],
         json!(["none", "includeServices"])
+    );
+    assert_eq!(
+        conn["description"], "Get the calling user. Who am I.",
+        "config summaries and notes reach client-library tools"
     );
 
     // Left out, with reasons.

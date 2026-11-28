@@ -24,8 +24,8 @@
       "reads": 11,
       "writes": 3,
       "untested_writes": 2,
-      "bytes": 9987,
-      "approx_tokens": 2496,
+      "bytes": 9994,
+      "approx_tokens": 2498,
       "scopes": [
         "vso.alpha_write",
         "vso.beta_manage"

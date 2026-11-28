@@ -13,7 +13,10 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::config::Config;
-use crate::text::{compact_ascii, one_line, one_line_default, shown, snake, sorted_map, truthy};
+use crate::text::{
+    compact_ascii, first_sentence_len, name_sentence, one_line, one_line_default, shown, snake,
+    sorted_map, truthy, MAX_DESCRIPTION,
+};
 
 pub const PAT_VAR: &str = "AZURE_DEVOPS_EXT_PAT";
 /// Starts the description of a write that `write-test` does not cover.
@@ -42,6 +45,12 @@ const SCHEMA_FORMATS: [&str; 9] = [
 static ORG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[A-Za-z0-9][A-Za-z0-9-]{0,48}[A-Za-z0-9]?$").unwrap());
 static PREVIEW_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-preview\.\d+$").unwrap());
+/// A first sentence that is a developer's note, not a description: where the code came from ("This was copied and
+/// adapted from TeamFoundationConnectionService.Connect()"), or an example request to a developer's server
+/// ("http://(tfsserver):8080/tfs/DefaultCollection/_apis/...").
+static DEVELOPER_COMMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:copied|adapted|ported)(?: and \w+)? from\b|^https?://").unwrap()
+});
 
 /// area -> parsed spec files, in configuration order.
 pub type Specs = IndexMap<String, Vec<Value>>;
@@ -709,10 +718,12 @@ fn build_tool(
         .and_then(|t| t.first())
         .and_then(Value::as_str)
         .unwrap_or("");
-    let mut description = one_line_default(str_of(op, "description"));
-    if description.is_empty() {
-        description = op_id.replace('_', ": ");
-    }
+    let method_name = op
+        .get("x-ms-vss-method")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty());
+    let mut description =
+        tool_description(str_of(op, "description"), area, op_id, method_name, conf);
     let mut tags = vec![json!("azure-devops"), json!(area)];
     if !tag.is_empty() {
         tags.push(json!(snake(tag)));
@@ -735,10 +746,6 @@ fn build_tool(
     };
     tool.insert("outputs".into(), outputs);
     tool.insert("tool_call_template".into(), Value::Object(template));
-    let method_name = op
-        .get("x-ms-vss-method")
-        .and_then(Value::as_str)
-        .filter(|m| !m.is_empty());
     Ok(Entry {
         area: area.to_string(),
         operation_id: op_id.to_string(),
@@ -758,6 +765,70 @@ fn build_tool(
         name: String::new(),
         tool,
     })
+}
+
+/// A tool's description, before `(untested)`. The operation's own text on one line; config `summaries` replaces its
+/// first sentence, and a first sentence that is a developer comment ([`DEVELOPER_COMMENT`]) goes. When nothing is
+/// left, a sentence made from the tool's name ([`plain_name`]: "Roledefinitions_List" with the method
+/// GetRoleDefinitions -> "Get role definitions"). Config `notes` goes at the end and is kept when the rest is
+/// shortened to MAX_DESCRIPTION characters.
+pub(crate) fn tool_description(
+    text: &str,
+    area: &str,
+    op_id: &str,
+    method_name: Option<&str>,
+    conf: &Config,
+) -> String {
+    let text = one_line(text, usize::MAX);
+    let first = first_sentence_len(&text);
+    let rest = text[first..].trim_start();
+    let configured = |m: &HashMap<String, HashMap<String, String>>| {
+        m.get(area).and_then(|ops| ops.get(op_id)).cloned()
+    };
+    let mut text = match configured(&conf.summaries) {
+        Some(summary) if rest.is_empty() => summary,
+        Some(summary) => format!("{summary} {rest}"),
+        None if DEVELOPER_COMMENT.is_match(&text[..first]) => rest.to_string(),
+        None => text.clone(),
+    };
+    if text.is_empty() {
+        text = name_sentence(&plain_name(conf, area, op_id, method_name));
+    }
+    let Some(note) = configured(&conf.notes) else {
+        return one_line(&text, MAX_DESCRIPTION);
+    };
+    // Room for the note, the space before it and a full stop the text may need.
+    let budget = MAX_DESCRIPTION.saturating_sub(note.chars().count() + 2);
+    let mut text = one_line(&text, budget);
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    format!("{text} {note}").trim_start().to_string()
+}
+
+/// The name a tool gets before name clashes are settled: config `names`, else Microsoft's client method
+/// (`x-ms-vss-method`, the most reliable source: "GetRoleDefinitions" has its words apart where the operation id
+/// "Roledefinitions_List" does not), else the operation id ([`base_name`]).
+pub(crate) fn plain_name(
+    conf: &Config,
+    area: &str,
+    op_id: &str,
+    method_name: Option<&str>,
+) -> String {
+    conf.names
+        .get(area)
+        .and_then(|m| m.get(op_id))
+        .filter(|n| !n.is_empty())
+        .cloned()
+        .unwrap_or_else(|| default_name(method_name, op_id))
+}
+
+/// A tool's name from its client method, else from its operation id.
+fn default_name(method_name: Option<&str>, op_id: &str) -> String {
+    match method_name {
+        Some(m) => snake(m),
+        None => base_name(op_id),
+    }
 }
 
 fn singular(words: &str) -> String {
@@ -815,10 +886,8 @@ pub fn assign_names(manual: &str, entries: &mut [Entry], conf: &Config) -> Resul
             .is_some_and(|m| m.contains_key(&e.operation_id))
     };
     for e in entries.iter_mut() {
-        e.name = overridden(e).unwrap_or_else(|| match &e.method_name {
-            Some(m) => snake(m),
-            None => base_name(&e.operation_id),
-        });
+        e.name = overridden(e)
+            .unwrap_or_else(|| default_name(e.method_name.as_deref(), &e.operation_id));
     }
     let base: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
     let area_order: Vec<String> = conf
@@ -899,10 +968,7 @@ pub fn assign_extra_names(
     };
     let base: Vec<String> = entries
         .iter()
-        .map(|e| match &e.method_name {
-            Some(m) => snake(m),
-            None => base_name(&e.operation_id),
-        })
+        .map(|e| default_name(e.method_name.as_deref(), &e.operation_id))
         .collect();
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for b in &base {

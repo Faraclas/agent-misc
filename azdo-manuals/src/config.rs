@@ -68,6 +68,13 @@ pub struct Config {
     pub route_areas: Vec<(String, String)>,
     /// Route areas whose client-library operations go into no manual, with the reason.
     pub excluded_route_areas: Vec<(String, String)>,
+    /// Hand-written first sentences, per area and operationId, replacing one that tells an agent nothing (a developer
+    /// comment, or a sentence made from a name that leaves out what the operation acts on). Agents find tools by
+    /// name and first sentence, and `utcp list`/`search` print only that.
+    pub summaries: HashMap<String, HashMap<String, String>>,
+    /// Sentences added to the end of a description, per area and operationId, kept when it is shortened: the words
+    /// an agent searches for that Microsoft's text lacks ("me", "current user").
+    pub notes: HashMap<String, HashMap<String, String>>,
 }
 
 pub fn manual(name: &str, areas: &[&str], title: &str, hint: &str) -> ManualConf {
@@ -85,6 +92,17 @@ pub fn list_map(items: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         .iter()
         .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
         .collect()
+}
+
+/// (area, operationId, text) triples as `summaries` and `notes` take them.
+pub fn texts(items: &[(&str, &str, &str)]) -> HashMap<String, HashMap<String, String>> {
+    let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (area, op, text) in items {
+        out.entry(area.to_string())
+            .or_default()
+            .insert(op.to_string(), text.to_string());
+    }
+    out
 }
 
 pub fn nested<T: Clone>(items: &[(&str, &[(&str, T)])]) -> HashMap<String, HashMap<String, T>> {
@@ -160,6 +178,20 @@ impl Config {
             (
                 "body_overrides",
                 self.body_overrides
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect()))
+                    .collect(),
+            ),
+            (
+                "summaries",
+                self.summaries
+                    .iter()
+                    .map(|(a, m)| (a, m.keys().collect()))
+                    .collect(),
+            ),
+            (
+                "notes",
+                self.notes
                     .iter()
                     .map(|(a, m)| (a, m.keys().collect()))
                     .collect(),
@@ -581,6 +613,90 @@ impl Config {
             .iter()
             .map(|(r, a)| (r.to_string(), a.to_string()))
             .collect(),
+            summaries: texts(SUMMARIES),
+            notes: texts(NOTES),
         }
     }
 }
+
+/// Hand-written first sentences (area, operationId, sentence). Only where the operation's own first sentence tells an
+/// agent nothing; each says why. They describe what the spec and its schemas show, never an operation the spec lacks.
+pub const SUMMARIES: &[(&str, &str, &str)] = &[
+    // "This was copied and adapted from TeamFoundationConnectionService.Connect()", a developer comment. The answer
+    // has authenticatedUser, authorizedUser, instanceId and locationServiceData.
+    (
+        "location",
+        "ConnectionData.GetConnectionData",
+        "Get the authenticated user and the organization's connection details.",
+    ),
+    // No description; the name alone ("Get settings.") hides that these are the organization's notification settings
+    // (NotificationAdminSettings: defaultGroupDeliveryPreference, noDelivery or eachMember).
+    (
+        "notification",
+        "Settings_Get",
+        "Get the organization's notification settings: whether notifications to a group go to each of its members \
+         by default.",
+    ),
+    (
+        "notification",
+        "Settings_Update",
+        "Update the organization's notification settings: whether notifications to a group go to each of its \
+         members by default.",
+    ),
+    // No description; the method names (GetColumns, GetWorkItemColumns, ...) leave out the taskboard
+    // (`{team}/_apis/work/taskboardcolumns`, `.../taskboardworkitems/{iterationId}`).
+    (
+        "work",
+        "Taskboard Columns_Get",
+        "Get the columns of a team's taskboard (sprint board) and the work item states mapped to them.",
+    ),
+    (
+        "work",
+        "Taskboard Columns_Update",
+        "Set the columns of a team's taskboard (sprint board) and the work item states mapped to them.",
+    ),
+    (
+        "work",
+        "Taskboard Work Items_List",
+        "List the work items of an iteration on a team's taskboard (sprint board), with the column each is in.",
+    ),
+    (
+        "work",
+        "Taskboard Work Items_Update",
+        "Move a work item to another column of a team's taskboard (sprint board).",
+    ),
+    // No description; the method names (GetContentScopedPackageAsync, UpdatePackageAsync) leave out npm, and the
+    // other package types have tools of the same kind. The update body (PackageVersionDetails) has deprecateMessage
+    // and views.
+    (
+        "artifactsPackageTypes",
+        "Npm_DownloadScopedPackage",
+        "Download a version of a scoped npm package (@scope/name) from a feed.",
+    ),
+    (
+        "artifactsPackageTypes",
+        "Npm_Update Scoped Package",
+        "Update a version of a scoped npm package (@scope/name) in a feed: deprecate it or add it to a view.",
+    ),
+    (
+        "artifactsPackageTypes",
+        "Npm_Update Package",
+        "Update a version of an npm package in a feed: deprecate it or add it to a view.",
+    ),
+];
+
+/// Sentences added to the end of a description (area, operationId, sentences), kept when it is shortened.
+pub const NOTES: &[(&str, &str, &str)] = &[
+    // Agents search for "who am I", "current user" and "me"; the answer only says "authenticatedUser".
+    (
+        "location",
+        "ConnectionData.GetConnectionData",
+        "The authenticated user is the account the PAT belongs to: who am I, the current user, me.",
+    ),
+    // The spec's `id` parameter: "... or 'me' to get the profile of the current authenticated user."
+    (
+        "profile",
+        "Profiles_Get",
+        "With id me, it returns the current user's (my) profile: the account the PAT belongs to.",
+    ),
+];

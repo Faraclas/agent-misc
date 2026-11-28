@@ -50,6 +50,32 @@ pub fn one_line_default(text: &str) -> String {
     one_line(text, MAX_DESCRIPTION)
 }
 
+static SENTENCE_END: LazyLock<Regex> = LazyLock::new(|| Regex::new("[.!?] ").unwrap());
+
+/// Byte length of the first sentence of one-line `text`: up to its first `.`, `!` or `?` that a space follows, else
+/// all of it.
+pub fn first_sentence_len(text: &str) -> usize {
+    SENTENCE_END
+        .find(text)
+        .map_or(text.len(), |m| m.start() + 1)
+}
+
+/// A sentence made from a snake_case tool name: `get_role_definitions` -> "Get role definitions". A last word `async`
+/// (the suffix of .NET method names) is left out. No full stop, as the client-library tools without a doc comment have
+/// always been described ("Get policies").
+pub fn name_sentence(name: &str) -> String {
+    let mut words: Vec<&str> = name.split('_').filter(|w| !w.is_empty()).collect();
+    if words.len() > 1 && words.last() == Some(&"async") {
+        words.pop();
+    }
+    let text = words.join(" ");
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 static CAMEL: LazyLock<Regex> = LazyLock::new(|| Regex::new("([a-z0-9])([A-Z])").unwrap());
 static NON_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new("[^a-z0-9]+").unwrap());
 

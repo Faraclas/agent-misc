@@ -18,6 +18,7 @@ use crate::readtest::{self, ReadTest};
 use crate::routes;
 use crate::sdk;
 use crate::sdkops;
+use crate::searchtest;
 use crate::text::{write_atomic, write_json};
 use crate::utcp::Utcp;
 use crate::writetest::{self, WriteTest};
@@ -76,6 +77,21 @@ one from the list of pull requests. Results go to readtest.json in that folder (
 Example:
   azdo-manuals read-test --org <your-org> --project <a project> --seed repositoryId=<a repository>";
 
+const SEARCH_TEST_LONG: &str = "\
+Check that agents find the right tool with the words they would type (read-only).
+
+Runs each case's query through your utcp (utcp search --json --limit 10, with --staged for the staged manuals as if
+promoted) and passes when one of the case's tools ranks in the top N. Prints one line per case (query, rank, tool,
+result), then how many were found at rank 1, in the top 3 and in the top 5. Exits with 1 when a case that is not a
+known miss failed. Cases whose manuals are not registered are skipped. It only runs utcp list and utcp search.
+
+The built-in cases come from tests/search-checks.txt in the source. A case file has one case per line:
+  query words -> manual.tool | manual.other_tool [known miss: why it is not found yet]
+Any listed tool counts as right; # starts a comment.
+
+Example (after generate --stage, before utcp promote):
+  azdo-manuals search-test --staged";
+
 const WRITE_TEST_LONG: &str = "\
 Maintainers, sandbox organization only: call every write tool through utcp in a throwaway project.
 
@@ -118,6 +134,9 @@ enum Cmd {
     /// Call every read tool through utcp to check the manuals and the PAT (read-only; utcp supplies the PAT)
     #[command(long_about = READ_TEST_LONG)]
     ReadTest(ReadTestArgs),
+    /// Check that utcp search finds the right tool for the words agents type (read-only)
+    #[command(long_about = SEARCH_TEST_LONG)]
+    SearchTest(SearchTestArgs),
     /// Maintainers: record the spec file hashes of an archive revision in a pins file
     Pins(PinsArgs),
     /// Maintainers: record the client library file hashes of a commit in a pins file
@@ -241,6 +260,22 @@ struct ReadTestArgs {
 }
 
 #[derive(Args)]
+struct SearchTestArgs {
+    /// Search the staged manuals too, as if promoted (utcp search --staged)
+    #[arg(long)]
+    staged: bool,
+    /// Case file, lines `query -> manual.tool | manual.tool` [default: the cases built into azdo-manuals]
+    #[arg(long)]
+    cases: Option<PathBuf>,
+    /// A case passes when one of its tools ranks in the top N (1 to 10)
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=10))]
+    top: u8,
+    /// utcp binary [default: utcp on PATH]
+    #[arg(long)]
+    utcp: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct WriteTestArgs {
     /// A sandbox organization of your own, never a work organization
     #[arg(long)]
@@ -284,6 +319,7 @@ pub fn main() -> i32 {
         Cmd::Generate(a) => cmd_generate(a),
         Cmd::CheckRoutes(a) => cmd_check_routes(a),
         Cmd::ReadTest(a) => cmd_read_test(a),
+        Cmd::SearchTest(a) => cmd_search_test(a),
         Cmd::Pins(a) => cmd_pins(a),
         Cmd::PinsSdk(a) => cmd_pins_sdk(a),
         Cmd::RouteGaps(a) => cmd_route_gaps(a),
@@ -1143,6 +1179,36 @@ fn cmd_read_test(args: ReadTestArgs) -> Result<i32, Fail> {
         .values()
         .any(|r| !matches!(r["status"].as_str(), Some("ok" | "not exercised")));
     Ok(if failed { 1 } else { 0 })
+}
+
+fn cmd_search_test(args: SearchTestArgs) -> Result<i32, Fail> {
+    let text = match &args.cases {
+        Some(path) => fs::read_to_string(path).map_err(io_fail(path))?,
+        None => searchtest::DEFAULT_CASES.to_string(),
+    };
+    let source = args
+        .cases
+        .as_ref()
+        .map_or("the built-in cases".to_string(), |p| {
+            p.display().to_string()
+        });
+    let cases = searchtest::parse_cases(&text).map_err(|e| Fail(2, format!("{source}: {e}")))?;
+    if cases.is_empty() {
+        return Err(Fail(2, format!("{source}: no cases")));
+    }
+    let utcp = Utcp::shared(find_utcp(args.utcp)?);
+    let top = usize::from(args.top);
+    println!(
+        "Searching the {} manuals (utcp search{} --limit {}); a case passes with a tool in the top {top}.",
+        if args.staged { "active and staged" } else { "active" },
+        if args.staged { " --staged" } else { "" },
+        searchtest::SEARCH_LIMIT,
+    );
+    let checked = searchtest::run(&utcp, &cases, args.staged, top).map_err(|e| Fail(1, e))?;
+    for line in searchtest::report(&checked, top) {
+        println!("{line}");
+    }
+    Ok(if searchtest::failed(&checked) { 1 } else { 0 })
 }
 
 fn cmd_write_test(args: WriteTestArgs) -> Result<i32, Fail> {

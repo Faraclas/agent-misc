@@ -1,6 +1,6 @@
 # azdo-manuals specification
 
-- **Version:** describes `azdo-manuals` 7.1.4 (REST API 7.1). Keep it in step with the code (see
+- **Version:** describes `azdo-manuals` 7.1.5 (REST API 7.1). Keep it in step with the code (see
   [`AGENTS.md`](../AGENTS.md), "Lockstep docs").
 - **Audience:** maintainers and agents changing the generator. Users start with the [README](../README.md) and the
   [operating guide](./operating.md).
@@ -39,6 +39,7 @@ config (src/config.rs, src/bodies.rs) ------------------------------------------
                                                                                               -> report.json, scopes.md
                                                                                               -> utcp stage (with --stage)
 generated manuals -> check-routes (live route list)   read-test (utcp call)   write-test (sandbox only)
+staged or active manuals + tests/search-checks.txt (built in) -> search-test (utcp search)
 live routes + join + generate -> route-gaps (endpoints without a tool)
 ```
 
@@ -47,6 +48,7 @@ live routes + join + generate -> route-gaps (endpoints without a tool)
 | `generate --org <org> [--out] [--cache] [--stage] [--utcp] [--read-only] [--spec-only]` | archive and GitHub (uncached files only); with the PAT, Azure DevOps (`GET resourceAreas`, `OPTIONS`, Analytics `$metadata`) | optional, from the environment | manuals folder; utcp staging with `--stage` |
 | `check-routes --org <org> [--manuals]` | Azure DevOps, `OPTIONS` only | from the environment | nothing |
 | `read-test (--org <org> or --manuals) --project [--team] [--seed]... [--only]... [--utcp]` | through utcp | utcp's | `readtest.json` |
+| `search-test [--staged] [--cases <file>] [--top N] [--utcp]` | none (`utcp list` and `utcp search` only) | no | nothing |
 | `write-test --org <sandbox> --manuals --create-and-delete-projects [--utcp]` | Azure DevOps, through an isolated utcp | from the environment | a throwaway project; `writetest.json` |
 | `route-gaps --org <org> [--out] [--cache]` (maintainers) | as `generate` with the PAT | from the environment | `route-gaps.json` |
 | `pins [--revision] [--api-version] [--fresh] [--pins]` (maintainers) | archive | no | the pins file (keeps its `sdk` part) |
@@ -55,7 +57,8 @@ live routes + join + generate -> route-gaps (endpoints without a tool)
 
 `azdo-manuals <command> help` is rewritten to `azdo-manuals help <command>` (no command takes a positional argument).
 Errors print as `azdo-manuals: <message>`; exit code 2 for usage problems (missing PAT, no manuals, no utcp), 1 for
-failures, 0 for success. `check-routes`, `read-test` and `write-test` exit with 1 when any tool failed.
+failures, 0 for success. `check-routes`, `read-test` and `write-test` exit with 1 when any tool failed, `search-test`
+when a case that is not a known miss failed.
 
 ## 3. Sources and pinning
 
@@ -131,6 +134,8 @@ in a manual nor in `excluded_areas`.
 | `names` | Tool names set by hand, for clashes or names that say too little. |
 | `body_overrides` | Request body schemas replacing the spec's (`bodies::real()`). |
 | `host_overrides` | Hosts replacing the spec's, per area (`profile` -> `vssps.dev.azure.com`; the spec's host refuses an organization's PAT). A test refuses an area no manual includes. |
+| `summaries` | Hand-written first sentences of tool descriptions, per area and operation id (`SUMMARIES`), each with a comment saying why: only where the operation's own first sentence tells an agent nothing (a developer comment, or a name-made sentence that leaves out what it acts on, such as "Get columns" for a team's taskboard). Section 6, Description. |
+| `notes` | Sentences added to the end of a tool description, per area and operation id (`NOTES`), kept when it is shortened: the words agents search for that Microsoft's text lacks (`get_connection_data`: "who am I, the current user, me"). |
 | `read_only` | Set by `--read-only`: no writes, and no reads that only a write-level scope allows. |
 
 `API_VERSION` (`7.1`) and `ARCHIVE_REVISION` are constants there too. Operations from the client libraries are named
@@ -303,8 +308,24 @@ The body is the input `body` (`"body_field": "body"`), with the first `consumes`
   `{"auth_type": "basic", "username": "pat", "password": "${AZURE_DEVOPS_EXT_PAT}"}`. The one operation outside any
   organization (`status.dev.azure.com`, the public service health) gets none: it would answer 401 to an
   organization-scoped PAT, and must not be sent one anyway.
-- **Description:** the spec's, on one line (else the operation id). Writes not in `tested_writes` start with
-  `(untested)`.
+- **Description:** what agents find a tool by, with its name: `utcp list` and `utcp search` print only its first
+  sentence. `generate::tool_description` builds it (since 7.1.5; before, the spec's text on one line, else the
+  operation id as "Roledefinitions: List"):
+  1. The operation's description on one line (a client-library method's doc comment, section 5a).
+  2. A `summaries` entry replaces its first sentence (up to the first `.`, `!` or `?` that a space follows).
+  3. Else a first sentence that is a developer comment is dropped: one saying where the code was copied, adapted or
+     ported from ("This was copied and adapted from TeamFoundationConnectionService.Connect()"), or one starting with
+     a URL (an example request to "http://(tfsserver):8080/tfs/...").
+  4. When nothing is left, a sentence made from the tool's name before clashes are settled (`plain_name`): a `names`
+     entry, else the client method (`x-ms-vss-method`), else the operation id (`base_name`), with `_` as spaces, the
+     first letter capitalized and a last word `async` (.NET's suffix) left out: "Roledefinitions_List" with the
+     method GetRoleDefinitions -> "Get role definitions". The method is the source because it has its words apart
+     where the operation id glues them ("Roledefinitions", "Agentclouds", "Oidctoken"); every spec operation without
+     a description has one. There is no full stop, as client-library tools without a doc comment have always been
+     described ("Get policies"); the same rule now makes both.
+  5. Cut to 400 characters at a word (`...`). A `notes` entry is added after it, with a full stop before it when the
+     text has none, and the text is cut to leave room for it, so the note is never lost.
+  6. Writes not in `tested_writes` start with `(untested)`, before everything else.
 - **Tags:** `azure-devops`, the area, the operation's first spec tag in snake case, and `untested` for untested
   writes.
 
@@ -464,6 +485,37 @@ has `tool`, `status` (`ok`, `mismatch`, `http NNN`, `error`, `not run`), `args`,
 - Printed output has tool names, statuses and sizes only. `readtest.json` has the arguments, which come from the
   organization.
 
+### `search-test`
+
+Checks that agents find the right tool with the words they would type, against the user's real manuals. It cannot
+run in CI (the real manuals name the organization and are never committed, rule 1 of `AGENTS.md`); the cases can,
+since they hold only queries and generic tool names.
+
+- **Cases:** `tests/search-checks.txt`, embedded with `include_str!` (so the installed binary carries it), or
+  `--cases <file>`. One case per line: `query -> manual.tool | manual.tool`, optionally ending with
+  `[known miss: reason]`. `#` at the start of a line, or after whitespace outside the brackets, starts a comment, so
+  `c# sdk` stays a query. A tool name is `manual.tool` (letters, digits, `_`, `-`). A query may not start with `-`
+  (utcp would read it as an option). A malformed line stops the run with `line N: <what>: <the line>` (exit 2), as
+  does a file without cases.
+- **Registered manuals:** the names in `utcp list --json` whose row is not marked `staged`, plus, with `--staged`,
+  the names in `utcp list --staged --json`. A case's tools of other manuals are ignored; a case with none left is
+  `SKIP` and not searched. One file thereby serves several manual families (azdo and github cases side by side).
+- **Search:** `utcp search --json --limit 10 [--staged] <query>` (`SEARCH_LIMIT`), through the user's utcp and daemon
+  like `read-test`, with the same `MIN_UTCP` check. The answer is a JSON array; its `name`s (`manual.tool`), in order,
+  are the ranks. A failed search stops the run (exit 1).
+- **Judging:** the rank is the best 1-based place of any listed, registered tool. `PASS` when it is at most `--top`
+  (default 3, 1 to 10); otherwise `KNOWN` for a known miss and `FAIL` for the rest, with rank `-` when no listed tool
+  is in the 10 results.
+- **Output:** a header naming what was searched, a table with one line per case (query, rank or `-`, the found tool
+  or else the tools that could have been found, result; `KNOWN` adds its reason), then the totals: cases searched
+  and skipped, how many found at rank 1, in the top 3 and in the top 5 (of those searched), known misses, failures,
+  and the known misses that pass now (their marker should go).
+- **Code:** `src/searchtest.rs`. Parsing (`parse_cases`), judging (`check`, `check_all` with the search passed in as a
+  function) and the report are pure, so `src/tests_search.rs` tests them on canned results; one test searches the
+  fixture manual in an isolated utcp (skipped without utcp, like the load test).
+- **A failure** means either the manuals lack the words people use (fix in `summaries`/`notes`, section 4, never
+  with odd wording just to pass) or utcp ranks badly (a utcp-rs bug).
+
 ### `route-gaps` (maintainers)
 
 The reverse of `check-routes`: which live endpoints have no tool, and why. It reads the inputs as `generate` does with
@@ -526,7 +578,9 @@ endpoints).
   (`extra_manuals_match_expected_bytes`, rewritten the same way). Tarballs are built in the test.
 - With `UTCP_BIN` (utcp 0.2.4 or newer; an older one is skipped), a load test stages the expected manuals in a
   throwaway utcp, checks `schema --staged` and the requests `call --staged --dry-run` builds, and promotes them.
-  Without a binary it is skipped, unless `REQUIRE_UTCP=1` (CI on Linux).
+  `src/tests_search.rs` tests the `search-test` case format and judging offline, and with `UTCP_BIN` searches the
+  fixture manual (registered, and staged under a second name) in a throwaway utcp.
+  Without a binary they are skipped, unless `REQUIRE_UTCP=1` (CI on Linux).
 - `AZDO_TEST_FIXTURES` points a copied test binary at a copy of `tests/fixtures/` (Windows test machines).
 - The live checks (section 9) are run by hand; their output stays private.
 
@@ -557,6 +611,12 @@ in [`AGENTS.md`](../AGENTS.md).
   by hand (rule 8).
 - **Request-side fixes from Microsoft's `vsts-api-patcher` (MIT):** slim bodies for the tested writes, JSON Patch
   bodies as arrays; credited in [`NOTICE`](../NOTICE).
+- **Hand-written description text, not hand-written operations (7.1.5):** rule 2 forbids hand-written operation files,
+  since what an operation is must come from Microsoft's files. A few sentences of description in `summaries` and
+  `notes` are a different thing, like the bodies in `bodies.rs`: they change no URL, input or scope, each has a
+  comment with its reason, and `generate` refuses one that names an operation the specs lack. They are kept few: a
+  rule (the name sentence, the developer-comment check) is preferred wherever it gets the text right, and a short but
+  true summary ("Get policies") stays.
 - **Client libraries plus live routes for what the specs lack (7.1.2):** the published specs are a subset of the
   service (1,791 live GUIDs on one organization; the specs cover about a quarter). The client libraries are generated
   from the service's own route definitions but hold GUIDs, not URLs; the live route list turns GUIDs into URLs. Both

@@ -81,6 +81,13 @@ snapshots, test runs and results, pipeline runs and jobs, ...), taking the OData
 utcp call azdo_analytics.query_test_runs '{"project": "MyProject", "$select": "TestRunId,Title,CompletedDate", "$orderby": "CompletedDate desc", "$top": 10}'
 ```
 
+**Descriptions** are Microsoft's, from the specs and the libraries' doc comments. Where those say nothing an agent
+can use, the generator does instead: an operation without a description gets a sentence made from its tool name
+(`get_role_definitions`: "Get role definitions", not "Roledefinitions: List"), a developer comment as first
+sentence is dropped, and a few tools have a short hand-written first sentence or an added note, listed with their
+reasons in `src/config.rs` (`get_connection_data`: "Get the authenticated user and the organization's connection
+details. ... who am I, the current user, me").
+
 What a manual contains: every operation of its areas, reads and writes, except those listed below. What an agent
 may do is decided by the PAT's permissions (see `generate`'s output and `scopes.md`), not by leaving tools out.
 
@@ -153,9 +160,10 @@ another), and stages each one in utcp under its name and hint. Without `--stage`
 manual names do not contain the organization, so one utcp setup holds the manuals of one organization.
 `azdo-manuals <command> help` and `azdo-manuals help <command>` both print the help for one command.
 
-**After upgrading azdo-manuals**, run step 4 again (step 1 with the PAT), then steps 6 to 8: `utcp diff 'azdo_*'`
-shows what the new version changes, and `utcp rollback <manual>` brings back the previous version if something is
-wrong. The [operating guide](./docs/operating.md) has the details, and what to do when a step fails.
+**After upgrading azdo-manuals**, run step 4 again (step 1 with the PAT), then steps 6 and 7,
+`azdo-manuals search-test --staged` (below), and step 8. `utcp diff 'azdo_*'` shows what the new version changes,
+and `utcp rollback <manual>` brings back the previous version if something is wrong. The
+[operating guide](./docs/operating.md) has the details, and what to do when a step fails.
 
 The manuals contain the organization name in every URL, so keep them private (never in a public repository). The
 downloaded specs and client library files are cached in `~/.cache/azdo-manuals` (`%LOCALAPPDATA%\azdo-manuals\cache`
@@ -214,7 +222,7 @@ health page (`azdo_core.get_service_status`), is sent no PAT.
 
 ## Checking the manuals against a real organization
 
-Both checks are read-only. They print tool names, status codes and sizes, never the token. `check-routes` skips the
+These checks are read-only. They print tool names, status codes and sizes, never the token. `check-routes` skips the
 service health tool (`azdo_core.get_service_status`), whose host lets nobody read its route list, and the Analytics
 OData tools, which have no route list; it says so and leaves those tools to `read-test`.
 
@@ -223,6 +231,8 @@ OData tools, which have no route list; it says so and leaves those tools to `rea
 azdo-manuals check-routes --org <your-org>
 # Call every read tool through utcp, taking ids from earlier responses (needs utcp on PATH or --utcp).
 azdo-manuals read-test --org <your-org> --project <project> --seed repositoryId=<repo-with-pull-requests>
+# Search for the words agents type and check the right tool comes up (--staged: the staged manuals too).
+azdo-manuals search-test --staged
 ```
 
 `read-test` calls the tools through your utcp, exactly as agents do (through the daemon when it runs), with the PAT
@@ -236,6 +246,15 @@ every call's status, size and arguments; that file contains organization data, s
 manuals. Tools it found no ids for are listed as not exercised, and a few reads can fail because of the
 organization's settings or data (an admin-only read, a disabled feature); the
 [operating guide](./docs/operating.md#5-reading-the-read-test-results) lists the known ones.
+
+`search-test` runs a list of searches an agent would type ("who am i", "list builds", "pull request threads")
+through your utcp (`utcp search`, as agents do) and checks that one of the right tools ranks in the top 3 (`--top N`
+changes that). It prints one line per search with the rank, then how many were found at rank 1, in the top 3 and in
+the top 5, and exits with 1 when a search missed. The searches are built in (`tests/search-checks.txt` in the source;
+`--cases <file>` uses your own, same format); those for manuals you have not registered are skipped, so the
+GitHub cases in the same file only count when `github-manuals` is registered too. It runs only `utcp list` and
+`utcp search` and changes nothing. The [operating guide](./docs/operating.md#6-checking-that-agents-find-the-tools)
+says what to do when a search misses.
 
 ### Write test (sandbox organization only)
 
@@ -273,7 +292,7 @@ azdo-manuals write-test --org <sandbox-org> --manuals <folder> --create-and-dele
   tool covers: left out by a rule (with the reason), or described neither by the specs nor by a client library. It
   writes `route-gaps.json` next to the manuals.
 - Tests: `cargo test` (offline; set `UTCP_BIN` to a utcp binary, 0.2.4 or newer, to also stage the manuals in a
-  throwaway utcp).
+  throwaway utcp and search them as `search-test` does).
 - Version: the REST API version plus a counter, so `7.1.x` for API 7.1 (`azdo-manuals --version`).
 - How it works inside, file formats and design decisions: [`docs/azdo-manuals-spec.md`](./docs/azdo-manuals-spec.md).
 - Rules for changes and releases: [`AGENTS.md`](./AGENTS.md).

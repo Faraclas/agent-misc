@@ -15,6 +15,7 @@ pub mod sdk;
 pub mod sdk_go;
 pub mod sdk_node;
 pub mod sdkops;
+pub mod searchtest;
 pub mod text;
 pub mod utcp;
 pub mod writetest;
@@ -23,3 +24,5 @@ pub mod writetest;
 mod tests;
 #[cfg(test)]
 mod tests_sdk;
+#[cfg(test)]
+mod tests_search;

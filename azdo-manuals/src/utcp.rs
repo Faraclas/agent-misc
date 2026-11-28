@@ -1,9 +1,9 @@
 //! Runs utcp for the live tests and `generate --stage`.
 //!
-//! `read-test` uses the user's real utcp, exactly as agents do: through the daemon when it runs, with the secrets
-//! utcp already has, calling the staged manuals with `--staged`. `write-test` (maintainers, sandbox organization only)
-//! uses an isolated utcp setup instead: its own config, cache and state in a temporary folder, so it never touches
-//! the user's manuals, daemon or agent skills, and its PAT comes from the environment.
+//! `read-test` and `search-test` use the user's real utcp, exactly as agents do: through the daemon when it runs,
+//! with the secrets utcp already has, reaching the staged manuals with `--staged`. `write-test` (maintainers, sandbox
+//! organization only) uses an isolated utcp setup instead: its own config, cache and state in a temporary folder, so
+//! it never touches the user's manuals, daemon or agent skills, and its PAT comes from the environment.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -107,22 +107,70 @@ impl Utcp {
         Ok(())
     }
 
+    /// Tests only: run any utcp command in this setup (to stage a manual in an isolated one).
+    #[cfg(test)]
+    pub(crate) fn run_for_test(&self, args: &[&str]) -> Result<String, String> {
+        self.run_ok(args)
+    }
+
     /// The names of the active (or staged) manuals with tools, from `utcp list --json`: one row per manual with
     /// `name`, `tools` and `staged`.
     pub fn manual_names(&self, staged: bool) -> Result<BTreeSet<String>, String> {
-        let args = ["list", "--json"];
-        let out = self.run_ok(&args)?;
-        let manuals: Value = serde_json::from_str(py_strip(&out))
-            .map_err(|e| format!("utcp {} did not print JSON: {e}", args.join(" ")))?;
-        Ok(manuals
-            .as_array()
-            .into_iter()
-            .flatten()
+        Ok(self
+            .json_rows(&["list", "--json"])?
+            .iter()
             .filter(|m| {
                 m["staged"].as_bool() == Some(staged) && m["tools"].as_u64().unwrap_or(0) > 0
             })
             .filter_map(|m| m["name"].as_str().map(String::from))
             .collect())
+    }
+
+    /// The manuals `utcp search [--staged]` searches: the active ones (`utcp list --json`, rows not marked staged),
+    /// and with `staged` also those of `utcp list --staged --json`.
+    pub fn registered(&self, staged: bool) -> Result<BTreeSet<String>, String> {
+        let mut names: BTreeSet<String> = self
+            .json_rows(&["list", "--json"])?
+            .iter()
+            .filter(|m| m["staged"].as_bool() != Some(true))
+            .filter_map(|m| m["name"].as_str().map(String::from))
+            .collect();
+        if staged {
+            names.extend(
+                self.json_rows(&["list", "--staged", "--json"])?
+                    .iter()
+                    .filter_map(|m| m["name"].as_str().map(String::from)),
+            );
+        }
+        Ok(names)
+    }
+
+    /// `utcp search --json --limit <limit> [--staged] <query>`: the `manual.tool` names found, best first.
+    pub fn search(&self, query: &str, staged: bool, limit: usize) -> Result<Vec<String>, String> {
+        let limit = limit.to_string();
+        let mut args = vec!["search", "--json", "--limit", &limit];
+        if staged {
+            args.push("--staged");
+        }
+        args.push(query);
+        Ok(self
+            .json_rows(&args)?
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect())
+    }
+
+    /// The rows of a utcp command that prints a JSON array.
+    fn json_rows(&self, args: &[&str]) -> Result<Vec<Value>, String> {
+        let out = self.run_ok(args)?;
+        match serde_json::from_str(py_strip(&out)) {
+            Ok(Value::Array(rows)) => Ok(rows),
+            Ok(_) => Err(format!(
+                "utcp {} did not print a JSON array",
+                args.join(" ")
+            )),
+            Err(e) => Err(format!("utcp {} did not print JSON: {e}", args.join(" "))),
+        }
     }
 
     /// `utcp call [--staged] <manual>.<tool> --args-stdin`.

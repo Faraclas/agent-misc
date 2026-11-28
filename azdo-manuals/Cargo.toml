@@ -1,6 +1,6 @@
 [package]
 name = "azdo-manuals"
-version = "7.1.4"
+version = "7.1.5"
 edition = "2021"
 license = "MIT"
 authors = ["Elias Faraclas"]

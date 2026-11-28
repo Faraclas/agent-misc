@@ -337,7 +337,7 @@
     },
     {
       "name": "get_connection_data",
-      "description": "Who is calling, and from where.",
+      "description": "Get the calling user. Who am I.",
       "tags": [
         "azure-devops",
         "location",
@@ -621,7 +621,7 @@
     },
     {
       "name": "get_thing_template",
-      "description": "Things: Get Thing Template",
+      "description": "Get thing template",
       "tags": [
         "azure-devops",
         "alpha",
@@ -745,7 +745,7 @@
     },
     {
       "name": "get_zip",
-      "description": "Archive: Get Zip",
+      "description": "Get zip",
       "tags": [
         "azure-devops",
         "alpha",
@@ -805,7 +805,7 @@
     },
     {
       "name": "list_threads",
-      "description": "Lists threads; either scope works.",
+      "description": "List the discussion threads.",
       "tags": [
         "azure-devops",
         "beta",
@@ -1199,7 +1199,7 @@
     },
     {
       "name": "update_widget",
-      "description": "(untested) Updates a widget.",
+      "description": "(untested) Updates a widget. Send only the fields to change.",
       "tags": [
         "azure-devops",
         "alpha",
@@ -1276,7 +1276,7 @@
     },
     {
       "name": "upload_widget",
-      "description": "(untested) Widgets: Upload",
+      "description": "(untested) Upload widget",
       "tags": [
         "azure-devops",
         "alpha",

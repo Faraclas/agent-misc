@@ -17,10 +17,11 @@ Analytics service's OData `$metadata`. A standalone crate with its own `Cargo.to
 - `src/sdk.rs` (library model, pinned tarball download), `src/sdk_go.rs`, `src/sdk_node.rs` (parsers),
   `src/live.rs` (`resourceAreas` and route lists), `src/sdkops.rs` (the join: library methods to one-operation
   specs), `src/analytics.rs` (`$metadata` to OData tools).
-- `src/routes.rs`, `src/readtest.rs`, `src/writetest.rs`: the live checks; `src/utcp.rs` runs utcp for them
-  (`read-test` and `generate --stage` use the user's real utcp; only `write-test` uses an isolated setup).
+- `src/routes.rs`, `src/readtest.rs`, `src/writetest.rs`, `src/searchtest.rs`: the live checks; `src/utcp.rs` runs
+  utcp for them (`read-test`, `search-test` and `generate --stage` use the user's real utcp; only `write-test` uses
+  an isolated setup). `tests/search-checks.txt`: the searches `search-test` runs (built in).
 - `src/cli.rs`: commands (including `route-gaps` and `pins-sdk`). `src/pat.rs`: scope ids as the New Token page names
-  them. `src/tests.rs` and `src/tests_sdk.rs`: the offline tests.
+  them. `src/tests.rs`, `src/tests_sdk.rs` and `src/tests_search.rs`: the offline tests.
 - `docs/operating.md` (for users: PAT, upgrades, test results, troubleshooting) and `docs/azdo-manuals-spec.md` (how
   it works inside, file formats, decisions).
 
@@ -42,7 +43,9 @@ Analytics service's OData `$metadata`. A standalone crate with its own `Cargo.to
    `src/analytics.rs`): run the offline tests, rewrite the expected files with `UPDATE_EXPECTED=1 cargo test`, and
    review that diff before committing. Then regenerate the real manuals with the PAT and check them in utcp:
    `generate --stage`, `utcp diff 'azdo_*'` (what changes; spec tools must not change unless that was the point),
-   `check-routes`, `utcp schema --staged` and `utcp call --staged --dry-run`, and `read-test` (one manual per run);
+   `search-test --staged` (agents still find the tools; a failure is fixed in `summaries`/`notes` or reported to
+   utcp-rs, never with odd wording), `check-routes`, `utcp schema --staged` and `utcp call --staged --dry-run`, and
+   `read-test` (one manual per run);
    `utcp promote 'azdo_*'` only once they are right (`utcp discard 'azdo_*'` otherwise; never a bare or `--all`
    promote, which would also take other staged manuals).
    Never point `UTCP_CONFIG_DIR` or `HOME` at a scratch folder to try manuals: stage them instead.
@@ -80,8 +83,10 @@ Analytics service's OData `$metadata`. A standalone crate with its own `Cargo.to
 - On a machine without the source tree (for example a Windows test machine), copy the compiled test binary with
   `tests/fixtures/` and set `AZDO_TEST_FIXTURES` to that copy.
 - Live checks against a real organization are run by hand: `check-routes` (every tool's URL against the
-  organization's route list), `route-gaps` (live endpoints without a tool) and `read-test` (every read tool called
-  through the user's utcp, `--staged` for staged manuals) are read-only. `write-test` (every tested
+  organization's route list), `route-gaps` (live endpoints without a tool), `read-test` (every read tool called
+  through the user's utcp, `--staged` for staged manuals) and `search-test` (the searches in
+  `tests/search-checks.txt` through the user's `utcp search`, `--staged` for staged manuals) are read-only. Keep
+  `tests/search-checks.txt` free of organization data: queries and generic tool names only. `write-test` (every tested
   write tool, in a throwaway project it creates and deletes) is for the sandbox organization only. Their output
   names the organization's data: keep it next to the generated manuals, never in the repository. When a live check
   shows the spec is wrong, fix it in `src/config.rs` (`required_params`, `skip_gets`) or `src/bodies.rs` with a

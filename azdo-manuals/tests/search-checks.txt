@@ -1,0 +1,23 @@
+# Either family counts: a tool of a manual that is not registered is ignored, and a case with none registered is skipped.
+who am i -> azdo_core.get_connection_data | github_users.get_authenticated_user
+current user -> azdo_core.get_connection_data | github_users.get_authenticated_user
+me -> azdo_core.get_connection_data | github_users.get_authenticated_user
+repository -> azdo_git.get_repository | github_repos.get_repo
+repository details -> azdo_git.get_repository | github_repos.get_repo [known miss: vague; tools named details_for_repo match both words]
+get commit -> azdo_git.get_commit | github_repos.get_commit
+pull requests -> azdo_git.get_pull_requests | github_issues_pulls.list_pull_requests
+create release -> azdo_pipelines.create_release | github_repos.create_release
+
+# Azure DevOps
+work item -> azdo_work.get_work_item
+list builds -> azdo_pipelines.get_builds
+my profile -> azdo_core.get_profile
+list projects -> azdo_core.get_projects [known miss: Azure DevOps calls it "Get all projects", and search has no synonyms]
+query work items wiql -> azdo_work.query_by_wiql
+work item comments -> azdo_work.get_comments
+pipeline runs -> azdo_pipelines.list_runs
+build logs -> azdo_pipelines.get_build_logs
+pull request threads -> azdo_git.get_threads | azdo_git.get_pull_request_thread
+wiki page -> azdo_wiki_search.get_page
+test runs -> azdo_test.test_get_test_runs | azdo_test.get_test_runs
+list pipelines -> azdo_pipelines.list_pipelines

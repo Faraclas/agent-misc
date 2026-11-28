@@ -18,15 +18,17 @@ use serde_json::{json, Map, Value};
 
 use crate::archive::{self, Archive};
 use crate::cli::{help, help_alias, next_steps, permission_lines, scopes_markdown, which};
-use crate::config::{list_map, manual, nested, Config};
+use crate::config::{list_map, manual, nested, texts, Config};
 use crate::generate::{
     api_version_of, assign_names, base_name, can_leave_out, covering_scopes, generate,
-    minimal_scopes, placeholders_named_as_inputs, Entry, Specs,
+    minimal_scopes, placeholders_named_as_inputs, tool_description, Entry, Specs,
 };
 use crate::http::{Request, Response, Transport};
 use crate::readtest::{self, ReadTest};
 use crate::routes;
-use crate::text::{one_line, snake, write_json};
+use crate::text::{
+    first_sentence_len, name_sentence, one_line, snake, write_json, MAX_DESCRIPTION,
+};
 use crate::utcp::Utcp;
 
 const ORG: &str = "contoso";
@@ -77,6 +79,8 @@ pub(crate) fn test_config() -> Config {
         host_overrides: HashMap::new(),
         route_areas: vec![],
         excluded_route_areas: vec![],
+        summaries: texts(&[("beta", "Threads_List", "List the discussion threads.")]),
+        notes: texts(&[("alpha", "Widgets_Update", "Send only the fields to change.")]),
     }
 }
 
@@ -350,6 +354,18 @@ fn config_must_name_real_operations() {
             .unwrap_err()
             .0
     };
+    let mut conf = test_config();
+    conf.summaries = texts(&[("alpha", "Widgets_Lsit", "List widgets.")]);
+    assert_eq!(
+        generate_err(&conf),
+        "config summaries names alpha/Widgets_Lsit, which the specs do not have"
+    );
+    let mut conf = test_config();
+    conf.notes = texts(&[("beta", "Nope_Get", "x.")]);
+    assert_eq!(
+        generate_err(&conf),
+        "config notes names beta/Nope_Get, which the specs do not have"
+    );
     let mut conf = test_config();
     conf.tested_writes = list_map(&[("alpha", &["Widgets_Craete"])]);
     assert_eq!(
@@ -668,7 +684,10 @@ fn untested_writes_are_marked() {
     let (manuals, _) = run_generate();
     let tools = tools_by_name(&manuals);
     let update = &tools["update_widget"];
-    assert_eq!(update["description"], "(untested) Updates a widget.");
+    assert_eq!(
+        update["description"],
+        "(untested) Updates a widget. Send only the fields to change."
+    );
     assert_eq!(
         update["tags"],
         json!(["azure-devops", "alpha", "widgets", "untested"])
@@ -878,6 +897,186 @@ fn base_names() {
         ),
     ] {
         assert_eq!(base_name(op), name);
+    }
+}
+
+#[test]
+fn description_without_text_is_a_sentence_from_the_tool_name() {
+    let conf = test_config();
+    let describe =
+        |op: &str, method: Option<&str>| tool_description("", "alpha", op, method, &conf);
+    // The client method has the words apart where the operation id glues them ("Roledefinitions").
+    assert_eq!(
+        describe("Roledefinitions_List", Some("GetRoleDefinitions")),
+        "Get role definitions"
+    );
+    assert_eq!(
+        describe("Oidctoken_Create", Some("CreateOidcToken")),
+        "Create oidc token"
+    );
+    // .NET's Async suffix says nothing to an agent.
+    assert_eq!(
+        describe(
+            "Npm_DownloadScopedPackage",
+            Some("GetContentScopedPackageAsync")
+        ),
+        "Get content scoped package"
+    );
+    // Without a method, the operation id as the tool name takes it.
+    assert_eq!(describe("Settings_Get", None), "Get setting");
+    assert_eq!(describe("Archive_Get Zip", None), "Get zip");
+    // A `names` entry wins, as it does for the tool's name.
+    let mut named = test_config();
+    named.names = nested(&[(
+        "alpha",
+        &[("Archive_Get Zip", "download_archive".to_string())],
+    )]);
+    assert_eq!(
+        tool_description("   ", "alpha", "Archive_Get Zip", None, &named),
+        "Download archive"
+    );
+    assert_eq!(name_sentence("async"), "Async");
+    assert_eq!(name_sentence(""), "");
+
+    // In the manual: no "Things: Get Thing Template" any more.
+    let (manuals, _) = run_generate();
+    let tools = tools_by_name(&manuals);
+    assert_eq!(
+        tools["get_thing_template"]["description"],
+        "Get thing template"
+    );
+    assert_eq!(
+        tools["upload_widget"]["description"],
+        "(untested) Upload widget"
+    );
+}
+
+#[test]
+fn developer_comments_are_dropped() {
+    let conf = test_config();
+    let describe =
+        |text: &str| tool_description(text, "alpha", "X_Get", Some("GetConnectionData"), &conf);
+    assert_eq!(
+        describe("This was copied and adapted from TeamFoundationConnectionService.Connect()"),
+        "Get connection data"
+    );
+    assert_eq!(
+        describe(
+            "http://(tfsserver):8080/tfs/DefaultCollection/_apis/test/CodeCoverage?buildId=10 Request: Json of code \
+             coverage summary"
+        ),
+        "Get connection data"
+    );
+    // Only the first sentence: what follows it stays.
+    assert_eq!(
+        describe("Ported from the old client. Returns who is calling."),
+        "Returns who is calling."
+    );
+    // Words that only look alike.
+    for kept in [
+        "Gets the release definitions adapted for the stage.",
+        "Copies a test plan. The new plan is ported from the old one.",
+        "Gets a build. See https://example.com for more.",
+    ] {
+        assert_eq!(describe(kept), kept);
+    }
+}
+
+#[test]
+fn summaries_replace_the_first_sentence() {
+    let mut conf = test_config();
+    conf.summaries = texts(&[
+        ("alpha", "Widgets_List", "List the widgets of a project."),
+        ("alpha", "Widgets_Create", "Add a widget."),
+    ]);
+    let describe = |op: &str, text: &str| tool_description(text, "alpha", op, None, &conf);
+    assert_eq!(
+        describe("Widgets_List", "Lists\n widgets. Up to 100 at a time."),
+        "List the widgets of a project. Up to 100 at a time."
+    );
+    // Also a sentence made from the name, and a developer comment.
+    assert_eq!(describe("Widgets_Create", ""), "Add a widget.");
+    assert_eq!(
+        describe(
+            "Widgets_Create",
+            "Copied from WidgetService.Add(). Needs a name."
+        ),
+        "Add a widget. Needs a name."
+    );
+    assert_eq!(first_sentence_len("One. Two."), 4);
+    assert_eq!(first_sentence_len("No end"), 6);
+
+    let (manuals, _) = run_generate();
+    let tools = tools_by_name(&manuals);
+    assert_eq!(
+        tools["list_threads"]["description"],
+        "List the discussion threads."
+    );
+}
+
+#[test]
+fn notes_survive_shortening() {
+    let note =
+        "The authenticated user is the account the PAT belongs to: who am I, the current user, me.";
+    let mut conf = test_config();
+    conf.notes = texts(&[
+        ("alpha", "Widgets_Get", note),
+        ("alpha", "Widgets_List", note),
+    ]);
+    let describe = |op: &str, text: &str| tool_description(text, "alpha", op, None, &conf);
+    let long = "Gets a widget with every one of its many details. ".repeat(20);
+    let text = describe("Widgets_Get", &long);
+    assert!(text.ends_with(&format!("... {note}")), "{text}");
+    assert!(
+        text.chars().count() <= MAX_DESCRIPTION,
+        "{}",
+        text.chars().count()
+    );
+    assert!(text.starts_with("Gets a widget with every one"));
+    // A text without a full stop gets one before the note.
+    assert_eq!(
+        describe("Widgets_List", "Lists widgets"),
+        format!("Lists widgets. {note}")
+    );
+    assert_eq!(
+        describe("Widgets_List", ""),
+        format!("List widgets. {note}")
+    );
+    // Without a note, a long text is cut as before.
+    assert_eq!(
+        describe("Widgets_Create", &long),
+        one_line(&long, MAX_DESCRIPTION)
+    );
+
+    // In the manual, `(untested)` still comes first, and a long description keeps the note.
+    let mut specs = load_fixture_specs();
+    specs["alpha"][0]["paths"]["/{organization}/{project}/_apis/alpha/widgets/{widgetId}"]
+        ["patch"]["description"] = json!(long);
+    let (manuals, _) = generate(&specs, ORG, "7.1", &source(), &test_config()).unwrap();
+    let update = tools_by_name(&manuals)["update_widget"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(update.starts_with("(untested) Gets a widget"), "{update}");
+    assert!(
+        update.ends_with("... Send only the fields to change."),
+        "{update}"
+    );
+    assert!(update.chars().count() <= MAX_DESCRIPTION + "(untested) ".len());
+}
+
+#[test]
+fn real_summaries_and_notes_are_short_sentences() {
+    let conf = Config::real();
+    for (setting, map) in [("summaries", &conf.summaries), ("notes", &conf.notes)] {
+        for (area, ops) in map {
+            for (op, text) in ops {
+                assert!(
+                    text.ends_with('.') && text.chars().count() <= 200 && text.trim() == text,
+                    "{setting} {area}/{op}: {text:?}"
+                );
+            }
+        }
     }
 }
 
@@ -1494,7 +1693,7 @@ fn fill_takes_a_listed_value_for_an_enum_parameter() {
 
 // utcp load test
 
-fn find_utcp() -> Option<PathBuf> {
+pub(crate) fn find_utcp() -> Option<PathBuf> {
     let path = std::env::var_os("UTCP_BIN")
         .map(PathBuf::from)
         .or_else(|| which("utcp"));
