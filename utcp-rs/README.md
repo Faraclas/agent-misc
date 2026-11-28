@@ -68,7 +68,9 @@ A fast, cross-platform (Linux & Windows), Zero-MCP **Universal Tool Calling Prot
 - **Staging:** `utcp stage` adds a manual (or a new version of one) without agents seeing it. `utcp diff` shows the
   tools it adds and removes and what changed in each other tool (description, inputs, method, URL, auth),
   `utcp search --staged` shows whether agents will find them, `utcp call --staged` tests them with the real secrets,
-  `utcp promote <name>` makes it active, and `utcp rollback` brings back the version it replaced.
+  `utcp promote <name>` makes it active, and `utcp rollback` brings back the version it replaced: the last known-good
+  one, for when a promote turned out wrong (`promote --no-keep` keeps nothing when the replaced version was only a
+  test, and `rollback --forget` drops a kept version you would never go back to).
 - **Checks Before Sending:** A call whose `${VAR}` has no value, that lacks a required argument, or that has an
   unknown argument (`did you mean 'repo'?`), a wrong type or a value outside the tool's list is refused before
   anything is sent, so a typo can't come back as a misleading 401, 404 or quietly unfiltered answer. JSON bodies are
@@ -135,6 +137,9 @@ utcp promote petstore
 
 # After a promote replaced an older version of a manual, bring that version back (run it again to undo)
 utcp rollback petstore
+# Promote a staged test or pre-release version without keeping the one it replaces, or drop a kept version
+utcp promote petstore --no-keep
+utcp rollback --forget petstore
 
 # Check paths, the daemon, staged manuals, the secrets command and .env, each secret, and the skills
 utcp doctor

@@ -208,6 +208,9 @@ pub struct CachedToolEntry {
     pub provider: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_template: Option<Value>,
+    /// MCP tool annotations (`readOnlyHint`, ...) as the server sent them, when a JSON object (issues/025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -980,6 +983,7 @@ pub fn convert_bytes_to_cached_manual(
             tags: tool.tags,
             provider: provider_val,
             tool_call_template: None,
+            annotations: crate::tools::object_annotations(tool.annotations),
         });
     }
 
@@ -1145,6 +1149,7 @@ fn normalize_utcp_manual_json(
             tags,
             provider: provider_val,
             tool_call_template: t_obj.get("tool_call_template").map(with_call_template_type),
+            annotations: crate::tools::object_annotations(t_obj.get("annotations").cloned()),
         });
     }
 
@@ -1581,6 +1586,7 @@ async fn discover_mcp_manual(
             },
             provider: provider_json.clone(),
             tool_call_template: Some(call_template.clone()),
+            annotations: crate::tools::object_annotations(t.annotations),
         });
     }
 
@@ -2121,6 +2127,18 @@ pub(crate) fn build_index(
                 entry.hint.as_deref().unwrap_or_default(),
             );
 
+            let read_only = t
+                .tool_call_template
+                .iter()
+                .chain(std::iter::once(&t.provider))
+                .find_map(|v| v.get("http_method").and_then(Value::as_str))
+                .is_some_and(|m| m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD"))
+                || t.annotations
+                    .as_ref()
+                    .and_then(|a| a.get("readOnlyHint"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+
             tools.push(IndexedTool {
                 qualified_name,
                 manual_name: name.clone(),
@@ -2131,11 +2149,14 @@ pub(crate) fn build_index(
                 input_schema_json,
                 output_schema_json,
                 words,
+                read_only,
             });
         }
 
         manuals.push(indexed);
     }
+
+    crate::index::link_word_forms(&mut tools);
 
     let built_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4243,6 +4264,49 @@ mod field_projection_tests {
         .unwrap();
         assert_eq!(again.tools.len(), 1);
     }
+
+    // issues/025: registering a manual file that `import-mcp` saved keeps each tool's `annotations` object (and
+    // drops a value that is not an object), so `readOnlyHint` still counts after a copy is registered.
+    #[test]
+    fn converts_saved_mcp_manual_keeping_annotation_objects() {
+        let mut manual = json!({
+            "manual_version": "1.0.0",
+            "utcp_version": "1.0.0",
+            "info": { "title": "ctx", "version": "1.0.0" },
+            "tools": (["kept", "odd", "none"].map(|name| json!({
+                "name": name,
+                "description": "d",
+                "inputs": { "type": "object" },
+                "outputs": { "type": "object" },
+                "provider": { "name": "ctx", "provider_type": "mcp", "url": "http://127.0.0.1:1/mcp" },
+            }))),
+        });
+        manual["tools"][0]["annotations"] = json!({ "readOnlyHint": true, "newHint": 1 });
+        manual["tools"][1]["annotations"] = json!("yes");
+        let converted = convert_bytes_to_cached_manual(
+            &serde_json::to_vec(&manual).unwrap(),
+            "ctx_copy",
+            "file:///ctx.utcp.json",
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let annotations: Vec<Option<&Value>> = converted
+            .tools
+            .iter()
+            .map(|t| t.annotations.as_ref())
+            .collect();
+        assert_eq!(
+            annotations,
+            [
+                Some(&json!({ "readOnlyHint": true, "newHint": 1 })),
+                None,
+                None
+            ]
+        );
+        let saved = serde_json::to_value(&converted).unwrap();
+        assert!(saved["tools"][2].get("annotations").is_none(), "{saved}");
+    }
 }
 
 #[cfg(test)]
@@ -5362,6 +5426,132 @@ mod hint_tests {
 
         let err = set_manual_hint(&paths, "nope", Some("x")).unwrap_err();
         assert!(format!("{err}").contains("known: context7, old"), "{err}");
+    }
+
+    /// The index marks HTTP `GET` and `HEAD` tools as only reading, from the call template or the provider,
+    /// and links the word forms the manual uses.
+    #[test]
+    fn index_marks_reads_and_links_word_forms() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(&tmp);
+        std::fs::create_dir_all(&paths.manuals_dir).unwrap();
+        let tool = |name: &str, desc: &str, method: &str, in_template: bool| {
+            let call = serde_json::json!({"call_template_type": "http", "url": "http://localhost", "http_method": method});
+            let mut t = serde_json::json!({
+                "name": name,
+                "description": desc,
+                "inputs": { "type": "object" },
+                "outputs": { "type": "object" },
+                "provider": { "provider_type": "http", "url": "http://localhost" },
+            });
+            if in_template {
+                t["tool_call_template"] = call;
+            } else {
+                t["provider"]["http_method"] = serde_json::json!(method);
+            }
+            t
+        };
+        let manual = serde_json::json!({
+            "manual_version": "1.0.0",
+            "utcp_version": "1.0.0",
+            "info": { "title": "vcs", "version": "1", "description": "vcs" },
+            "_meta": {
+                "manual_name": "vcs",
+                "source_url": "https://example.test/vcs.json",
+                "sha256": "00",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "tool_count": 4,
+                "protocols": ["http"],
+                "required_env_vars": [],
+            },
+            "tools": [
+                tool("get_repo", "Get a repository.", "GET", true),
+                tool("check_repo", "Check a repository.", "head", false),
+                tool("delete_repo", "Delete a repository.", "DELETE", true),
+                tool("make_repo", "Make a repository.", "POST", false),
+            ],
+        });
+        std::fs::write(paths.cached_manual_path("vcs"), manual.to_string()).unwrap();
+        let mut reg = UtcpRegistryConfig::default();
+        reg.manuals.insert("vcs".into(), entry("vcs", None));
+        let index = build_index(&paths, &reg.manuals);
+        let read_only: Vec<(&str, bool)> = index
+            .tools
+            .iter()
+            .map(|t| (t.tool_name.as_str(), t.read_only))
+            .collect();
+        assert_eq!(
+            read_only,
+            [
+                ("get_repo", true),
+                ("check_repo", true),
+                ("delete_repo", false),
+                ("make_repo", false)
+            ]
+        );
+        assert_eq!(index.tools[0].words.name_alt, "repository>repo");
+    }
+
+    /// issues/025: an MCP tool whose `annotations.readOnlyHint` is `true` only reads; `false`, a non-boolean, no
+    /// hint or no annotations do not. Manuals saved before `annotations` existed still load.
+    #[test]
+    fn index_marks_mcp_read_only_hint_as_read() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(&tmp);
+        std::fs::create_dir_all(&paths.manuals_dir).unwrap();
+        let tool = |name: &str, annotations: Option<Value>| {
+            let mut t = serde_json::json!({
+                "name": name,
+                "description": "A page tool.",
+                "inputs": { "type": "object" },
+                "outputs": { "type": "object" },
+                "provider": { "provider_type": "mcp", "name": "wiki", "url": "http://localhost/mcp" },
+            });
+            if let Some(a) = annotations {
+                t["annotations"] = a;
+            }
+            t
+        };
+        let manual = serde_json::json!({
+            "manual_version": "1.0.0",
+            "utcp_version": "1.0.0",
+            "info": { "title": "wiki", "version": "1", "description": "wiki" },
+            "_meta": {
+                "manual_name": "wiki",
+                "source_url": "mcp+http://localhost/mcp",
+                "sha256": "00",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "tool_count": 5,
+                "protocols": ["mcp"],
+                "required_env_vars": [],
+            },
+            "tools": [
+                tool("get_page", Some(serde_json::json!({ "readOnlyHint": true, "title": "Get" }))),
+                tool("drop_page", Some(serde_json::json!({ "readOnlyHint": false, "destructiveHint": true }))),
+                tool("odd_page", Some(serde_json::json!({ "readOnlyHint": "true" }))),
+                tool("titled_page", Some(serde_json::json!({ "title": "Titled" }))),
+                tool("old_page", None),
+            ],
+        });
+        std::fs::write(paths.cached_manual_path("wiki"), manual.to_string()).unwrap();
+        let mut reg = UtcpRegistryConfig::default();
+        reg.manuals.insert("wiki".into(), entry("wiki", None));
+        let index = build_index(&paths, &reg.manuals);
+        let read_only: Vec<(&str, bool)> = index
+            .tools
+            .iter()
+            .map(|t| (t.tool_name.as_str(), t.read_only))
+            .collect();
+        assert_eq!(
+            read_only,
+            [
+                ("get_page", true),
+                ("drop_page", false),
+                ("odd_page", false),
+                ("titled_page", false),
+                ("old_page", false)
+            ]
+        );
     }
 
     #[test]

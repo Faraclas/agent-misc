@@ -42,8 +42,10 @@ MCP servers. A change you make here changes them for all agents.
 {{BIN_NAME}} search --staged "<keywords>"        # will agents find the staged tools?
 {{BIN_NAME}} call --staged <manual.tool> '<json>' # test a staged manual
 {{BIN_NAME}} promote <name>...                   # make staged manuals active (--all: every staged one)
+{{BIN_NAME}} promote <name>... --no-keep         # the same, keeping nothing for rollback (test or pre-release)
 {{BIN_NAME}} discard <name>...                   # drop staged manuals (--all: every staged one)
-{{BIN_NAME}} rollback <name>                     # back to the version the last promote replaced
+{{BIN_NAME}} rollback <name>                     # back to the last known-good version the last promote replaced
+{{BIN_NAME}} rollback --forget <name>...         # drop kept versions never to go back to (active ones unchanged)
 {{BIN_NAME}} refresh <name>...                   # read the manual's source again (--all: every manual)
 {{BIN_NAME}} import-mcp <name> --url <url> --register --hint '<few words>' # MCP server over HTTP
 {{BIN_NAME}} import-mcp <name> --command <program> --arg <a> --arg <b> --register --hint '<few words>'
@@ -60,7 +62,10 @@ MCP servers. A change you make here changes them for all agents.
 ```
 
 - `promote`, `discard` and `refresh` need names or `--all`; `--all` changes every manual for every agent. A name
-  ending in `*` takes every manual it starts (`'azdo_*'`, quoted).
+  ending in `*` takes every manual it starts (`'azdo_*'`, quoted); so does `rollback --forget`.
+- Rollback is for going back to the last known-good version after a promote turned out wrong. Use `promote --no-keep`
+  when the replaced version was only a test or pre-release, and `rollback --forget` to drop a kept version the user
+  would never go back to.
 - `import-mcp --command` takes the program only (`--command "npx -y pkg"` fails): pass each argument with its own
   `--arg` and each environment variable with `-e 'KEY=${VAR}'`. A server's `mcpServers` JSON (from its README) maps
   directly: `command` to `--command`, each `args` entry to `--arg`, each `env` entry to `-e`. Remote servers take

@@ -229,6 +229,7 @@ impl ClientTransport for GraphQLTransport {
                                 tags: vec![op_type.to_string()],
                                 average_response_size: None,
                                 provider: None,
+                                annotations: None,
                             });
                         }
                     }

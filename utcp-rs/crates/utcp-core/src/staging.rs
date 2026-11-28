@@ -1,7 +1,8 @@
 //! The staging area: `utcp stage` adds a manual next to the active ones without making it active. A staged manual
 //! is not in `list` or the agent skills, and `search` and calls reach it only with `--staged` (with the same secrets
 //! as the active manuals), so it can be reviewed (`diff`) and tested before `promote` makes it active. `promote` keeps the
-//! registration it replaced for `rollback`. Like git's index: one staging area, at most one staged copy per name.
+//! registration it replaced for `rollback` (unless told not to), and `rollback --forget` drops a kept one. Like git's
+//! index: one staging area, at most one staged copy per name.
 
 use crate::catalog::{
     build_index, convert_bytes_to_cached_manual, fetch_source_bytes, normalize_manual_hint,
@@ -186,6 +187,9 @@ pub struct Promoted {
     pub replaced: Replaces,
     /// Whether the replaced registration was kept for `utcp rollback`.
     pub rollback_available: bool,
+    /// Whether a promote that keeps nothing (`--no-keep`) dropped an older kept version of this manual.
+    #[serde(default)]
+    pub dropped_older: bool,
 }
 
 /// Result of `utcp rollback`.
@@ -217,6 +221,62 @@ fn names_list(names: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 /// The staged names `names` selects (every one when empty); see [`select_manual_names`].
 fn selected(registry: &UtcpRegistryConfig, names: &[String]) -> Result<Vec<String>> {
     select_manual_names(registry.staged.keys(), names, "staged")
+}
+
+/// The error for a name or `prefix*` pattern with no kept previous version, listing the names that have one.
+fn nothing_kept(registry: &UtcpRegistryConfig, pattern: &str) -> anyhow::Error {
+    let what = if pattern.ends_with('*') {
+        format!("No previous version is kept for '{pattern}'")
+    } else {
+        format!("No previous version of '{pattern}' is kept")
+    };
+    anyhow!(
+        "{} (one is kept each time `utcp promote` replaces a manual; with a previous version: {})",
+        what,
+        names_list(registry.previous.keys())
+    )
+}
+
+/// The names with a kept previous version that `names` select (names or `prefix*` patterns, at least one). A
+/// pattern that selects nothing is an error that lists the names with a kept version.
+fn selected_previous(registry: &UtcpRegistryConfig, names: &[String]) -> Result<Vec<String>> {
+    if names.is_empty() {
+        return Err(anyhow!(
+            "Name the manuals whose previous version to drop (with a previous version: {})",
+            names_list(registry.previous.keys())
+        ));
+    }
+    let mut out = BTreeSet::new();
+    for pattern in names {
+        let bad_pattern = pattern.strip_suffix('*').unwrap_or(pattern).contains('*');
+        match select_manual_names(
+            registry.previous.keys(),
+            std::slice::from_ref(pattern),
+            "kept",
+        ) {
+            Ok(found) => out.extend(found),
+            Err(e) if bad_pattern => return Err(e),
+            Err(_) => return Err(nothing_kept(registry, pattern)),
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// The files of `name`'s kept previous version that utcp saved itself: its copy in the cache's `manuals/previous/`
+/// folder, and the entry's own file only when it is in that folder too (never a file elsewhere, such as a source).
+fn saved_previous_files(
+    paths: &UtcpPaths,
+    name: &str,
+    entry: &RegisteredManualEntry,
+) -> Vec<PathBuf> {
+    let own = paths.previous_manual_path(name);
+    let mut files = vec![own.clone()];
+    if let (Some(file), Some(dir)) = (entry.cached_file.as_ref().map(PathBuf::from), own.parent()) {
+        if file.parent() == Some(dir) && file != own {
+            files.push(file);
+        }
+    }
+    files
 }
 
 /// Fetch and convert `source` like `register`, but put it in the staging area. A staged copy of the same name is
@@ -602,10 +662,11 @@ pub fn diff_staged(paths: &UtcpPaths, names: &[String]) -> Result<Vec<ManualDiff
     Ok(out)
 }
 
-/// Make the staged manuals `names` selects (every one when empty) active. The registration each replaces (active or deregistered) is kept
-/// as the previous version for [`rollback_manual`]. Rebuilds the index and refreshes the installed skills; tell a
-/// running daemon to reload.
-pub fn promote_staged(paths: &UtcpPaths, names: &[String]) -> Result<Vec<Promoted>> {
+/// Make the staged manuals `names` selects (every one when empty) active. With `keep`, the registration each replaces
+/// (active or deregistered) is kept as the previous version for [`rollback_manual`]. Without it nothing is kept, and an
+/// older kept version of the name is dropped too, so a later rollback cannot bring back something older than what
+/// this promote replaced. Rebuilds the index and refreshes the installed skills; tell a running daemon to reload.
+pub fn promote_staged(paths: &UtcpPaths, names: &[String], keep: bool) -> Result<Vec<Promoted>> {
     let lock = paths.acquire_write_lock()?;
     let mut registry = UtcpRegistryConfig::load(paths)?;
     let names = selected(&registry, names)?;
@@ -614,6 +675,7 @@ pub fn promote_staged(paths: &UtcpPaths, names: &[String]) -> Result<Vec<Promote
     }
     let mut promoted = Vec::new();
     let mut staged_files = Vec::new();
+    let mut dropped_files = Vec::new();
     for n in names {
         let entry = registry
             .staged
@@ -636,7 +698,13 @@ pub fn promote_staged(paths: &UtcpPaths, names: &[String]) -> Result<Vec<Promote
             .or_else(|| registry.deregistered.get(&n))
             .cloned();
         let mut rollback_available = false;
-        if let Some(old) = old {
+        let mut dropped_older = false;
+        if !keep {
+            if let Some(older) = registry.previous.remove(&n) {
+                dropped_files.extend(saved_previous_files(paths, &n, &older));
+                dropped_older = true;
+            }
+        } else if let Some(old) = old {
             if let Ok(old_bytes) = fs::read(entry_file(paths, &n, &old)) {
                 let previous_path = paths.previous_manual_path(&n);
                 write_atomic(&previous_path, &old_bytes)?;
@@ -666,10 +734,11 @@ pub fn promote_staged(paths: &UtcpPaths, names: &[String]) -> Result<Vec<Promote
             tool_count: manual.tools.len(),
             replaced,
             rollback_available,
+            dropped_older,
         });
     }
     registry.save(paths)?;
-    for f in staged_files {
+    for f in staged_files.into_iter().chain(dropped_files) {
         let _ = fs::remove_file(f);
     }
     rebuild_search_index_locked(paths, &registry)?;
@@ -705,12 +774,7 @@ pub fn rollback_manual(paths: &UtcpPaths, name: &str) -> Result<RolledBack> {
     let lock = paths.acquire_write_lock()?;
     let mut registry = UtcpRegistryConfig::load(paths)?;
     let Some(previous) = registry.previous.remove(name) else {
-        return Err(anyhow!(
-            "No previous version of '{}' is kept (one is kept each time `utcp promote` replaces a manual; \
-             with a previous version: {})",
-            name,
-            names_list(registry.previous.keys())
-        ));
+        return Err(nothing_kept(&registry, name));
     };
     let previous_file = entry_file(paths, name, &previous);
     let previous_bytes = fs::read(&previous_file).with_context(|| {
@@ -768,10 +832,168 @@ pub fn rollback_manual(paths: &UtcpPaths, name: &str) -> Result<RolledBack> {
     })
 }
 
+/// Drop the kept previous versions `names` select (names or `prefix*` patterns, at least one) without changing the
+/// active manuals: their `previous` entries and the copies utcp saved in `manuals/previous/`. Returns the names
+/// dropped. Previous versions are not in the search index, the skills or the daemon, so nothing else changes.
+pub fn forget_previous(paths: &UtcpPaths, names: &[String]) -> Result<Vec<String>> {
+    let _lock = paths.acquire_write_lock()?;
+    let mut registry = UtcpRegistryConfig::load(paths)?;
+    let names = selected_previous(&registry, names)?;
+    let mut files = Vec::new();
+    for n in &names {
+        if let Some(entry) = registry.previous.remove(n) {
+            files.extend(saved_previous_files(paths, n, &entry));
+        }
+    }
+    registry.save(paths)?;
+    for f in files {
+        let _ = fs::remove_file(f);
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{tool_changes, tool_parts};
+    use super::{forget_previous, rollback_manual, tool_changes, tool_parts};
+    use crate::catalog::{RegisteredManualEntry, UtcpRegistryConfig};
+    use crate::paths::{test_support::paths_in, UtcpPaths};
     use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn entry(name: &str, file: &Path) -> RegisteredManualEntry {
+        RegisteredManualEntry {
+            name: name.to_string(),
+            source_url: format!("https://example.test/{name}.json"),
+            cached: true,
+            cached_file: Some(file.to_string_lossy().into_owned()),
+            base_url: None,
+            headers: BTreeMap::new(),
+            hint: None,
+        }
+    }
+
+    /// A setup with `pets` active and a kept previous version of `pets`, `azdo_core` and `azdo_git`, each with its
+    /// saved file.
+    fn kept_versions(tmp: &TempDir) -> UtcpPaths {
+        let paths = paths_in(tmp.path());
+        paths.ensure_dirs().unwrap();
+        let mut registry = UtcpRegistryConfig::default();
+        let active = paths.cached_manual_path("pets");
+        std::fs::write(&active, "{}").unwrap();
+        registry
+            .manuals
+            .insert("pets".into(), entry("pets", &active));
+        for name in ["pets", "azdo_core", "azdo_git"] {
+            let file = paths.previous_manual_path(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "{}").unwrap();
+            registry.previous.insert(name.into(), entry(name, &file));
+        }
+        registry.save(&paths).unwrap();
+        paths
+    }
+
+    fn kept(paths: &UtcpPaths) -> Vec<String> {
+        UtcpRegistryConfig::load(paths)
+            .unwrap()
+            .previous
+            .into_keys()
+            .collect()
+    }
+
+    /// `rollback --forget <name>` drops that kept version and its saved file; the active manual and the other kept
+    /// versions stay.
+    #[test]
+    fn forget_drops_one_kept_version_only() {
+        let tmp = TempDir::new().unwrap();
+        let paths = kept_versions(&tmp);
+        let dropped = forget_previous(&paths, &["pets".into()]).unwrap();
+        assert_eq!(dropped, vec!["pets"]);
+        assert_eq!(kept(&paths), vec!["azdo_core", "azdo_git"]);
+        assert!(!paths.previous_manual_path("pets").exists());
+        assert!(paths.previous_manual_path("azdo_core").exists());
+        let registry = UtcpRegistryConfig::load(&paths).unwrap();
+        assert!(registry.manuals.contains_key("pets"));
+        assert!(paths.cached_manual_path("pets").exists());
+    }
+
+    /// A `prefix*` pattern drops every kept version it selects, like `promote 'azdo_*'`.
+    #[test]
+    fn forget_by_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let paths = kept_versions(&tmp);
+        let dropped = forget_previous(&paths, &["azdo_*".into(), "azdo_git".into()]).unwrap();
+        assert_eq!(dropped, vec!["azdo_core", "azdo_git"]);
+        assert_eq!(kept(&paths), vec!["pets"]);
+        assert!(!paths.previous_manual_path("azdo_git").exists());
+        assert!(paths.previous_manual_path("pets").exists());
+    }
+
+    /// A name or pattern with no kept version is an error that lists the names with one, and nothing changes.
+    #[test]
+    fn forget_with_no_match_errors_and_changes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let paths = kept_versions(&tmp);
+        let err = forget_previous(&paths, &["pets".into(), "nope".into()])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "No previous version of 'nope' is kept (one is kept each time `utcp promote` replaces a manual; \
+             with a previous version: azdo_core, azdo_git, pets)"
+        );
+        let err = forget_previous(&paths, &["gh_*".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("No previous version is kept for 'gh_*' (")
+                && err.ends_with("with a previous version: azdo_core, azdo_git, pets)"),
+            "{err}"
+        );
+        let err = forget_previous(&paths, &["a*o_*".into()]).unwrap_err();
+        assert!(err.to_string().contains("only a trailing *"), "{err}");
+        let err = forget_previous(&paths, &[]).unwrap_err();
+        assert!(err.to_string().starts_with("Name the manuals"), "{err}");
+        assert_eq!(kept(&paths), vec!["azdo_core", "azdo_git", "pets"]);
+        assert!(paths.previous_manual_path("pets").exists());
+    }
+
+    /// Only files utcp saved in `manuals/previous/` are deleted, never a file a kept entry points to elsewhere.
+    #[test]
+    fn forget_never_deletes_a_file_outside_the_previous_folder() {
+        let tmp = TempDir::new().unwrap();
+        let paths = kept_versions(&tmp);
+        let source = tmp.path().join("my-spec.utcp.json");
+        std::fs::write(&source, "{}").unwrap();
+        let mut registry = UtcpRegistryConfig::load(&paths).unwrap();
+        registry
+            .previous
+            .insert("azdo_core".into(), entry("azdo_core", &source));
+        registry.save(&paths).unwrap();
+        forget_previous(&paths, &["azdo_core".into()]).unwrap();
+        assert!(source.exists());
+        assert!(!paths.previous_manual_path("azdo_core").exists());
+    }
+
+    /// After `--forget`, `rollback` says nothing is kept for that name.
+    #[test]
+    fn rollback_after_forget_says_nothing_is_kept() {
+        let tmp = TempDir::new().unwrap();
+        let paths = kept_versions(&tmp);
+        forget_previous(&paths, &["pets".into()]).unwrap();
+        let err = rollback_manual(&paths, "pets").unwrap_err().to_string();
+        assert!(
+            err.starts_with("No previous version of 'pets' is kept")
+                && err.ends_with("with a previous version: azdo_core, azdo_git)"),
+            "{err}"
+        );
+        assert!(UtcpRegistryConfig::load(&paths)
+            .unwrap()
+            .manuals
+            .contains_key("pets"));
+    }
 
     /// `utcp diff` says what changed in a tool, and never shows header or auth values.
     #[test]

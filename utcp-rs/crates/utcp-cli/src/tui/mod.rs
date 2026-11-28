@@ -4002,6 +4002,7 @@ mod tests {
                 protocol: "http".into(),
                 description: "Demo tool.".into(),
                 tags: Vec::new(),
+                read_only: false,
                 input_schema_json: "{}".into(),
                 output_schema_json: "{}".into(),
             }

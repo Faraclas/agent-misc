@@ -40,6 +40,15 @@ pub struct Tool {
     pub average_response_size: Option<i64>,
     #[serde(rename = "tool_provider", skip_serializing_if = "Option::is_none")]
     pub provider: Option<serde_json::Value>,
+    /// MCP tool annotations (`title`, `readOnlyHint`, `destructiveHint`, ...) as the server sent them; only a JSON
+    /// object is kept (see [`object_annotations`]). Not part of upstream rs-utcp's `Tool` (issues/025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+}
+
+/// `annotations` to keep: the whole value when it is a JSON object (unknown hints survive), else `None`.
+pub fn object_annotations(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    value.filter(serde_json::Value::is_object)
 }
 
 /// Strategy abstraction used to search tools by query string.

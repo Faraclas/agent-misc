@@ -1713,13 +1713,30 @@ async fn stdio_mcp_server_tree_is_stopped_after_import_deregister_and_daemon_sto
 }
 
 /// `refresh` on an `import-mcp` manual asks the MCP server again: a tool the server added since
-/// the import becomes callable, and the manual's hint survives.
+/// the import becomes callable, and the manual's hint survives. issues/025: the saved manual keeps
+/// each tool's MCP `annotations` (the fixture marks `stats` `readOnlyHint`) on import and refresh,
+/// and search puts that tool first among equal scores.
 #[test]
 fn refresh_asks_the_mcp_server_again() {
     let env = IsolatedEnv::new();
     let script = mock_mcp_script();
     let extra_file = env.tmp.path().join("extra-tools.txt");
     let extra_env = format!("MOCK_MCP_EXTRA_TOOLS_FILE={}", extra_file.display());
+    let saved = env.tmp.path().join("cache/manuals/growing.utcp.json");
+    let annotations = || -> Vec<(String, Value)> {
+        let manual: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        manual["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["name"].as_str().unwrap().to_string(),
+                    t["annotations"].clone(),
+                )
+            })
+            .collect()
+    };
     let out = run_ok(
         &env,
         &[
@@ -1737,10 +1754,36 @@ fn refresh_asks_the_mcp_server_again() {
         ],
     );
     assert!(out.contains("Tools     : 4"), "{out}");
+    let read_only = json!({ "readOnlyHint": true });
+    let expected = |names: &[&str]| -> Vec<(String, Value)> {
+        names
+            .iter()
+            .map(|n| {
+                let a = if *n == "stats" {
+                    read_only.clone()
+                } else {
+                    Value::Null
+                };
+                (n.to_string(), a)
+            })
+            .collect()
+    };
+    assert_eq!(
+        annotations(),
+        expected(&["echo", "stats", "silent", "crash"])
+    );
+    // Every tool matches `tool` equally ("<name> tool"); the read-only one comes first, not `echo`.
+    let hits = run_ok(&env, &["search", "tool", "--json"]);
+    let first = |name: &str| hits.find(name).unwrap_or(usize::MAX);
+    assert!(first("growing.stats") < first("growing.echo"), "{hits}");
 
     std::fs::write(&extra_file, "fresh_tool").unwrap();
     let out = run_ok(&env, &["refresh", "growing"]);
     assert!(out.contains("Refreshed 'growing' (5 tools"), "{out}");
+    assert_eq!(
+        annotations(),
+        expected(&["echo", "stats", "silent", "crash", "fresh_tool"])
+    );
     let answer = run_ok(&env, &["call", "growing.fresh_tool", r#"{"tag":7}"#]);
     assert_eq!(serde_json::from_str::<Value>(&answer).unwrap()["tag"], 7);
     let config = std::fs::read_to_string(env.tmp.path().join("config/.utcp_config.json")).unwrap();
@@ -2669,6 +2712,143 @@ async fn stage_diff_promote_rollback_and_discard() {
             .join(format!("cache/manuals/{dir}/pets.utcp.json"));
         assert!(!file.exists(), "{}", file.display());
     }
+}
+
+/// `rollback --forget` drops kept versions (one, by prefix) and nothing else; `promote --no-keep` keeps nothing, says
+/// nothing about undoing, and drops an older kept version too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_forget_and_promote_no_keep() {
+    let base_url = spawn_mock_api().await;
+    let env = IsolatedEnv::new();
+    std::fs::create_dir_all(env.tmp.path().join("home")).unwrap();
+    let version = |file: &str, tool: &str| {
+        spec_file(
+            &env,
+            file,
+            &base_url,
+            &[
+                ("get_user", "/users/{user_id}", "Fetch user"),
+                (tool, "/other", "Other"),
+            ],
+        )
+    };
+    let (v1, v2, v3) = (
+        version("v1.json", "old_tool"),
+        version("v2.json", "new_tool"),
+        version("v3.json", "test_tool"),
+    );
+    let previous = |name: &str| {
+        env.tmp
+            .path()
+            .join(format!("cache/manuals/previous/{name}.utcp.json"))
+    };
+    let kept = |env: &IsolatedEnv| -> Vec<String> {
+        read_config(env)
+            .get("previous")
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let names = ["pets", "azdo_core", "azdo_git"];
+    for v in [&v1, &v2] {
+        for name in names {
+            run_ok(&env, &["stage", name, v]);
+        }
+        run_ok(&env, &["promote", "--all"]);
+    }
+    assert_eq!(kept(&env), vec!["azdo_core", "azdo_git", "pets"]);
+
+    // 1. Forget one: only its kept version and saved copy go; the active manual stays.
+    let out = run_ok(&env, &["rollback", "--forget", "pets"]);
+    assert!(
+        out.contains(
+            "Dropped the kept previous version of: pets (the active manuals are unchanged"
+        ),
+        "{out}"
+    );
+    assert_eq!(kept(&env), vec!["azdo_core", "azdo_git"]);
+    assert!(!previous("pets").exists() && previous("azdo_core").exists());
+    assert!(env.tmp.path().join("cache/manuals/pets.utcp.json").exists());
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.new_tool"));
+
+    // 2. Rollback after forget: nothing is kept, and the error lists the names that have a kept version.
+    let err = run_err(&env, &["rollback", "pets"]);
+    assert!(
+        err.contains("No previous version of 'pets' is kept")
+            && err.contains("with a previous version: azdo_core, azdo_git)"),
+        "{err}"
+    );
+
+    // 3. No match: an error that lists the kept names, and nothing changes.
+    let err = run_err(&env, &["rollback", "--forget", "nope"]);
+    assert!(
+        err.contains(
+            "No previous version of 'nope' is kept (one is kept each time `utcp promote` replaces a manual; \
+             with a previous version: azdo_core, azdo_git)"
+        ),
+        "{err}"
+    );
+    let err = run_err(&env, &["rollback", "--forget", "gh_*"]);
+    assert!(
+        err.contains("No previous version is kept for 'gh_*'"),
+        "{err}"
+    );
+    assert!(run_err(&env, &["rollback", "--forget"]).contains("<NAME>"));
+    let err = run_err(&env, &["rollback", "azdo_core", "azdo_git"]);
+    assert!(err.contains("Roll back one manual at a time"), "{err}");
+    assert!(run_err(&env, &["rollback", "azdo_*"]).contains("only with --forget"));
+    assert_eq!(kept(&env), vec!["azdo_core", "azdo_git"]);
+
+    // 4. Forget by prefix.
+    let out = run_ok(&env, &["rollback", "--forget", "azdo_*"]);
+    assert!(
+        out.contains("Dropped the kept previous version of: azdo_core, azdo_git"),
+        "{out}"
+    );
+    assert!(read_config(&env).get("previous").is_none());
+    assert!(!previous("azdo_core").exists() && !previous("azdo_git").exists());
+    let list = run_ok(&env, &["list", "--tools"]);
+    assert!(
+        list.contains("azdo_core.new_tool") && list.contains("azdo_git.new_tool"),
+        "{list}"
+    );
+
+    // 5. `promote --no-keep` keeps nothing and does not offer an undo.
+    run_ok(&env, &["stage", "pets", &v3]);
+    let out = run_ok(&env, &["promote", "pets", "--no-keep"]);
+    assert!(
+        out.contains(
+            "Promoted 'pets' (2 tools, replaced the active one; nothing kept for rollback)"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("undo"), "{out}");
+    assert!(read_config(&env).get("previous").is_none());
+    assert!(!previous("pets").exists());
+    assert!(run_ok(&env, &["list", "--tools"]).contains("pets.test_tool"));
+    assert!(run_err(&env, &["rollback", "pets"]).contains("No previous version of 'pets' is kept"));
+
+    // 6. `promote --no-keep` also drops an older kept version, so rollback cannot bring back v1 after v3.
+    run_ok(&env, &["stage", "azdo_core", &v1]);
+    run_ok(&env, &["promote", "azdo_core"]);
+    assert_eq!(kept(&env), vec!["azdo_core"]);
+    run_ok(&env, &["stage", "azdo_core", &v3]);
+    let out = run_ok(&env, &["promote", "--no-keep", "azdo_*"]);
+    assert!(
+        out.contains("Promoted 'azdo_core' (2 tools, replaced the active one; nothing kept for rollback, older kept version dropped)"),
+        "{out}"
+    );
+    assert!(!out.contains("undo"), "{out}");
+    assert!(read_config(&env).get("previous").is_none());
+    assert!(!previous("azdo_core").exists());
+    assert!(run_ok(&env, &["list", "--tools"]).contains("azdo_core.test_tool"));
+    assert!(
+        run_err(&env, &["rollback", "azdo_core"]).contains("No previous version of 'azdo_core'")
+    );
+    let out = run_ok(&env, &["stage", "zoo", &v1]);
+    assert!(out.contains("Replaces  : nothing"), "{out}");
+    let out = run_ok(&env, &["promote", "zoo", "--no-keep"]);
+    assert!(out.contains("Promoted 'zoo' (2 tools, new)\n"), "{out}");
 }
 
 /// Registering in another setup (another config folder, same home) leaves the skills of the setup that wrote them

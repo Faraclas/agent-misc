@@ -115,6 +115,7 @@ impl ClientTransport for GrpcTransport {
                 tags: vec!["grpc".to_string()],
                 average_response_size: None,
                 provider: None,
+                annotations: None,
             })
             .collect();
 

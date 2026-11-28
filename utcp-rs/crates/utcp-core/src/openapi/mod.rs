@@ -446,6 +446,7 @@ impl OpenApiConverter {
             tags,
             average_response_size: None,
             provider: Some(provider_value),
+            annotations: None,
         }))
     }
 

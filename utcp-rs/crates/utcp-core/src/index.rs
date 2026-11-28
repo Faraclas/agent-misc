@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 /// Format tag at the start of `search_index.bin`. Bump it whenever the layout or the meaning of a field changes (`4`:
-/// precomputed [`SearchWords`] replace the lowercased `search_blob`): a file with another tag is treated as missing
-/// and rebuilt from the registry instead of failing to decode or giving stale results.
-pub const SEARCH_INDEX_MAGIC: [u8; 8] = *b"UTCPIDX4";
+/// precomputed [`SearchWords`] replace the lowercased `search_blob`; `5`: `read_only`, `SearchWords::name_alt`, no
+/// repeated words): a file with another tag is treated as missing and rebuilt from the registry instead of failing to
+/// decode or giving stale results.
+pub const SEARCH_INDEX_MAGIC: [u8; 8] = *b"UTCPIDX5";
 
 /// Compact pre-computed binary catalog stored in `search_index.bin` via `bincode`
 /// so `utcp list`, `utcp search`, and `utcp schema` execute synchronously in microseconds.
@@ -51,15 +52,18 @@ pub struct IndexedTool {
     pub output_schema_json: String,
     /// The words [`rank`] scores, computed once when the index is built.
     pub words: SearchWords,
+    /// The tool only reads: an HTTP `GET` or `HEAD`. Equal scores rank it before tools that change things.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// A tool's searchable words, as [`words`] splits them. Each field is one string of words separated by
 /// single spaces, which keeps `search_index.bin` small and quick to load.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchWords {
-    /// Words of the tool name, in order (repeats kept: they weigh the name-coverage bonus).
+    /// Words of the tool name, in order, each once.
     pub name: String,
-    /// Words of the description's first sentence, in order.
+    /// Words of the description's first sentence, in order, each once.
     pub summary: String,
     /// Every word of the description; sorted, no repeats.
     pub description: String,
@@ -67,18 +71,65 @@ pub struct SearchWords {
     pub manual: String,
     /// Words of the tool's tags and the manual's hint; sorted, no repeats.
     pub meta: String,
+    /// Other forms of the name's words that the tool's manual uses, as `other>name_word` (`repository>repo`);
+    /// sorted. Filled by [`link_word_forms`].
+    #[serde(default)]
+    pub name_alt: String,
 }
 
 impl SearchWords {
     pub fn new(manual: &str, tool: &str, description: &str, tags: &[String], hint: &str) -> Self {
         let meta = format!("{} {hint}", tags.join(" "));
         Self {
-            name: words(tool).join(" "),
-            summary: words(crate::text::first_sentence(description)).join(" "),
+            name: distinct(words(tool)),
+            summary: distinct(words(crate::text::first_sentence(description))),
             description: sorted_set(words(description)),
             manual: sorted_set(words(manual)),
             meta: sorted_set(words(&meta)),
+            name_alt: String::new(),
         }
+    }
+}
+
+/// Links the short and long forms each manual itself uses for one word, and fills every tool's
+/// [`SearchWords::name_alt`] with them.
+///
+/// A manual shows a pair when one of its tools has a word of 3+ letters in its name and a longer word starting
+/// with it in its first sentence: `get_repo`, "Get a repository." pairs `repo` with `repository`, and `list_issue`,
+/// "List issues." pairs `issue` with `issues`. Pairs work both ways and only inside the manual that shows them,
+/// so one manual's wording never changes how another's tools rank. There are no word lists: the pairs come from
+/// the manuals' own text, and the same manuals always give the same pairs.
+pub fn link_word_forms(tools: &mut [IndexedTool]) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut forms: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for t in tools.iter() {
+        let w = &t.words;
+        for short in each(&w.name).filter(|s| s.chars().count() >= 3) {
+            for long in each(&w.summary) {
+                if long.len() > short.len() && long.starts_with(short) && !has(&w.name, long) {
+                    let manual = t.manual_name.clone();
+                    forms
+                        .entry((manual.clone(), short.to_string()))
+                        .or_default()
+                        .insert(long.to_string());
+                    forms
+                        .entry((manual, long.to_string()))
+                        .or_default()
+                        .insert(short.to_string());
+                }
+            }
+        }
+    }
+    for t in tools.iter_mut() {
+        let mut alt = BTreeSet::new();
+        for word in each(&t.words.name) {
+            if let Some(others) = forms.get(&(t.manual_name.clone(), word.to_string())) {
+                for other in others.iter().filter(|o| !has(&t.words.name, o)) {
+                    alt.insert(format!("{other}>{word}"));
+                }
+            }
+        }
+        t.words.name_alt = alt.into_iter().collect::<Vec<_>>().join(" ");
     }
 }
 
@@ -120,6 +171,21 @@ fn words(text: &str) -> Vec<String> {
         out.push(word);
     }
     out
+}
+
+/// The `(other form, name word)` pairs of a [`SearchWords::name_alt`].
+fn alt_forms(field: &str) -> impl Iterator<Item = (&str, &str)> {
+    each(field).filter_map(|x| x.split_once('>'))
+}
+
+fn distinct(words: Vec<String>) -> String {
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    for w in words {
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out.join(" ")
 }
 
 fn sorted_set(mut words: Vec<String>) -> String {
@@ -357,11 +423,7 @@ fn rank(
                     })
                     .collect();
 
-                scoped.sort_by(|a, b| {
-                    b.0.cmp(&a.0)
-                        .then_with(|| a.1.qualified_name.len().cmp(&b.1.qualified_name.len()))
-                        .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
-                });
+                scoped.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| tie_break(a.1, b.1)));
                 return scoped
                     .into_iter()
                     .take(limit)
@@ -387,11 +449,7 @@ fn rank(
         .filter_map(|&(tool, staged)| score(tool, &q_trim, &terms).map(|s| (s, tool, staged)))
         .collect();
 
-    scored.sort_by(|a, b| {
-        b.0.total_cmp(&a.0)
-            .then_with(|| a.1.qualified_name.len().cmp(&b.1.qualified_name.len()))
-            .then_with(|| a.1.qualified_name.cmp(&b.1.qualified_name))
-    });
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| tie_break(a.1, b.1)));
 
     scored
         .into_iter()
@@ -400,15 +458,25 @@ fn rank(
         .collect()
 }
 
+/// Order of tools with equal scores: tools that only read first, then the shorter qualified name, then the name.
+fn tie_break(a: &IndexedTool, b: &IndexedTool) -> std::cmp::Ordering {
+    b.read_only
+        .cmp(&a.read_only)
+        .then_with(|| a.qualified_name.len().cmp(&b.qualified_name.len()))
+        .then_with(|| a.qualified_name.cmp(&b.qualified_name))
+}
+
 /// How well `tool` answers a query (`None`: no query word matched). `query` is the trimmed, lowercased query,
 /// `terms` its [`words`] (no repeats).
 ///
 /// An exact tool or qualified name wins outright. Otherwise each term scores where it matches best: a word of
-/// the manual name 8 (10 when the tool name has it too), of the tool name 10, of the first sentence 6, of the
+/// the manual name 8 (10 when the tool name has it too), of the tool name 10, another form of a tool-name word
+/// that the manual uses 9 ([`link_word_forms`]: `repository` for `get_repo`), of the first sentence 6, of the
 /// tags or hint 3, of the rest of the description 1, or the start of a name or first-sentence word (terms of 4+
 /// characters) 2, so `invoice` finds `invoices`. Words otherwise match whole: `id` never matches `validate`,
 /// `port` never matches `report`. The total is scaled by the share of terms that matched, then precision is
-/// added: up to 6 for how much of the tool name the query covers, up to 4 for the first sentence, and 8 more when
+/// added: up to 6 for how much of the tool name the query covers (each word once; another form counts), up to 4
+/// for the first sentence, and 8 more when
 /// the query's words are exactly the first sentence's words (order and repeats ignored), so `get a repository`
 /// finds the tool whose first sentence is "Get a repository." before tools that merely have `repository` in
 /// their names. Callers break ties by the shorter qualified name.
@@ -430,6 +498,8 @@ fn score(tool: &IndexedTool, query: &str, terms: &[String]) -> Option<f64> {
             }
         } else if has(&w.name, term) {
             10.0
+        } else if alt_forms(&w.name_alt).any(|(alt, _)| alt == term) {
+            9.0
         } else if has(&w.summary, term) {
             6.0
         } else if has(&w.meta, term) {
@@ -452,9 +522,13 @@ fn score(tool: &IndexedTool, query: &str, terms: &[String]) -> Option<f64> {
         return None;
     }
     total *= matched as f64 / terms.len() as f64;
+    let asked_for = |x: &str| {
+        terms.iter().any(|t| t == x)
+            || alt_forms(&w.name_alt).any(|(alt, word)| word == x && terms.iter().any(|t| t == alt))
+    };
     let coverage = |field: &str| {
         let (asked, all) = each(field).fold((0usize, 0usize), |(asked, all), x| {
-            (asked + usize::from(terms.iter().any(|t| t == x)), all + 1)
+            (asked + usize::from(asked_for(x)), all + 1)
         });
         if all == 0 {
             0.0
@@ -487,10 +561,12 @@ mod tests {
             input_schema_json: r#"{"type":"object"}"#.to_string(),
             output_schema_json: r#"{"type":"object"}"#.to_string(),
             words: SearchWords::new(manual, name, desc, &[], ""),
+            read_only: false,
         }
     }
 
-    fn index_of(tools: Vec<IndexedTool>) -> SearchIndex {
+    fn index_of(mut tools: Vec<IndexedTool>) -> SearchIndex {
+        link_word_forms(&mut tools);
         SearchIndex {
             tools,
             ..SearchIndex::default()
@@ -696,6 +772,65 @@ mod tests {
         assert_eq!(
             names(&idx, "get a repository security advisory")[0],
             "store.get_repository_advisory"
+        );
+    }
+
+    /// A manual's own text links the short and long forms of a word: `get_repo` says "Get a repository.", so in
+    /// that manual `repository` finds `repo` tools and `repo` finds `repository` tools, scored just below the
+    /// name word itself. Other manuals are not affected.
+    #[test]
+    fn search_links_the_word_forms_each_manual_uses() {
+        let idx = index_of(vec![
+            sample_tool("vcs", "get_repo", "Get a repository."),
+            sample_tool("vcs", "list_repos", "List repositories."),
+            sample_tool("vcs", "get_repository_rule", "Get a repository rule."),
+            sample_tool("vcs", "get_report", "Get a report."),
+            sample_tool("vcs", "list_org_teams", "List an organization's teams."),
+            sample_tool("shop", "get_org", "Get an org."),
+        ]);
+        assert_eq!(names(&idx, "get repository")[0], "vcs.get_repo");
+        assert_eq!(names(&idx, "repositories")[0], "vcs.list_repos");
+        let repo = names(&idx, "repo");
+        assert_eq!(&repo[..2], ["vcs.get_repo", "vcs.get_repository_rule"]);
+        assert_eq!(names(&idx, "organization"), ["vcs.list_org_teams"]);
+    }
+
+    /// The name-coverage bonus counts each word of the name once, so a name that repeats a query word does
+    /// not beat the closer name.
+    #[test]
+    fn search_counts_each_name_word_once() {
+        let idx = index_of(vec![
+            sample_tool(
+                "vcs",
+                "request_pull_request_reviewers",
+                "Request reviewers for a pull request.",
+            ),
+            sample_tool("vcs", "get_pull_request", "Get a pull request."),
+        ]);
+        assert_eq!(names(&idx, "pull request")[0], "vcs.get_pull_request");
+    }
+
+    /// Equal scores go to the tool that only reads before the one that changes things, then to the shorter
+    /// name; the `<manual>.<prefix>` listing does the same.
+    #[test]
+    fn equal_scores_rank_tools_that_only_read_first() {
+        let read = |manual: &str, name: &str, desc: &str| IndexedTool {
+            read_only: true,
+            ..sample_tool(manual, name, desc)
+        };
+        let idx = index_of(vec![
+            sample_tool("ci", "delete_run_logs", "Delete run logs."),
+            read("ci", "download_run_logs", "Download run logs."),
+            sample_tool("ci", "stop_run", "Stop a run."),
+            read("ci", "get_run", "Get a run."),
+        ]);
+        assert_eq!(
+            &names(&idx, "run logs")[..2],
+            ["ci.download_run_logs", "ci.delete_run_logs"]
+        );
+        assert_eq!(
+            names(&idx, "ci.")[..2],
+            ["ci.get_run", "ci.download_run_logs"]
         );
     }
 

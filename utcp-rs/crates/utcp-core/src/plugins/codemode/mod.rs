@@ -177,6 +177,7 @@ impl CodeModeUtcp {
             tags: vec!["codemode".to_string(), "utcp".to_string()],
             average_response_size: None,
             provider: None,
+            annotations: None,
         }
     }
 

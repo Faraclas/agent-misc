@@ -279,6 +279,7 @@ async fn test_call_tool_validates_allowed_protocols() {
         tags: vec![],
         average_response_size: None,
         provider: None,
+        annotations: None,
     };
 
     // Register the provider with tools

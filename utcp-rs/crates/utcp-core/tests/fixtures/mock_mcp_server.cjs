@@ -18,7 +18,7 @@
 //   echo   answers after a random 0-30 ms delay with {tag, pid}, so concurrent answers come back
 //          out of order. Before each answer it prints a non-JSON line, a blank line, a
 //          notification and a `ping` request, which the client must skip or answer.
-//   stats  reports {pingsSent, pingsAnswered, pid}.
+//   stats  reports {pingsSent, pingsAnswered, pid}. Listed with `annotations: {readOnlyHint: true}`.
 //   silent never answers.
 //   crash  exits the process.
 const flags = process.argv.slice(2);
@@ -71,6 +71,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       name,
       description: name + " tool",
       inputSchema: { type: "object", properties: { tag: { type: "integer" } } },
+      ...(name === "stats" ? { annotations: { readOnlyHint: true } } : {}),
     });
     const extraFile = process.env.MOCK_MCP_EXTRA_TOOLS_FILE;
     const fs = require("fs");

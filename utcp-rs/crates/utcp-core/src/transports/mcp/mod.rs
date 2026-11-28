@@ -891,7 +891,8 @@ impl ClientTransport for McpTransport {
 
             if let Some(tools) = result.get("tools").and_then(|v| v.as_array()) {
                 for tool in tools {
-                    if let Ok(t) = serde_json::from_value::<Tool>(tool.clone()) {
+                    if let Ok(mut t) = serde_json::from_value::<Tool>(tool.clone()) {
+                        t.annotations = crate::tools::object_annotations(t.annotations);
                         parsed.push(t);
                     } else if let Some(obj) = tool.as_object() {
                         // Standard MCP `tools/list` schema uses `inputSchema` + optional `outputSchema`
@@ -949,6 +950,9 @@ impl ClientTransport for McpTransport {
                             tags: vec!["mcp".to_string()],
                             average_response_size: None,
                             provider: serde_json::to_value(mcp_prov).ok(),
+                            annotations: crate::tools::object_annotations(
+                                obj.get("annotations").cloned(),
+                            ),
                         });
                     }
                 }
@@ -1207,6 +1211,118 @@ mod tests {
         assert_eq!(stream.next().await.unwrap().unwrap(), json!({"idx":1}));
         assert_eq!(stream.next().await.unwrap().unwrap(), json!({"idx":2}));
         stream.close().await.unwrap();
+    }
+
+    /// issues/025: `tools/list` keeps each tool's `annotations` object as the server sent it (unknown hints
+    /// too), in both the MCP `inputSchema` shape and the UTCP `inputs` shape; anything but an object is dropped.
+    #[tokio::test]
+    async fn tools_list_keeps_annotation_objects() {
+        async fn handler(Json(payload): Json<Value>) -> Json<Value> {
+            let method = payload.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            match method {
+                "tools/list" => Json(json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "get_page",
+                                "description": "Read a page",
+                                "inputSchema": { "type": "object" },
+                                "annotations": {
+                                    "title": "Get page",
+                                    "readOnlyHint": true,
+                                    "openWorldHint": false,
+                                    "futureHint": { "level": 2 }
+                                }
+                            },
+                            {
+                                "name": "drop_page",
+                                "description": "Delete a page",
+                                "inputSchema": { "type": "object" },
+                                "annotations": "not an object"
+                            },
+                            {
+                                "name": "plain",
+                                "description": "No annotations",
+                                "inputSchema": { "type": "object" }
+                            },
+                            {
+                                "name": "utcp_shaped",
+                                "description": "UTCP tool shape",
+                                "inputs": { "type": "object" },
+                                "outputs": { "type": "object" },
+                                "tags": [],
+                                "annotations": { "destructiveHint": true }
+                            },
+                            {
+                                "name": "utcp_shaped_bad",
+                                "description": "UTCP tool shape",
+                                "inputs": { "type": "object" },
+                                "outputs": { "type": "object" },
+                                "tags": [],
+                                "annotations": [true]
+                            }
+                        ]
+                    },
+                    "id": 1
+                })),
+                _ => Json(json!({ "jsonrpc": "2.0", "result": {}, "id": 1 })),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/", post(handler)))
+                .await
+                .unwrap();
+        });
+
+        let prov = McpProvider {
+            base: BaseProvider {
+                name: "annotated".to_string(),
+                provider_type: ProviderType::Mcp,
+                auth: None,
+                allowed_communication_protocols: None,
+            },
+            url: Some(format!("http://{}", addr)),
+            headers: None,
+            command: None,
+            args: None,
+            env_vars: None,
+        };
+
+        let tools = McpTransport::new()
+            .register_tool_provider(&prov)
+            .await
+            .expect("register");
+        let annotations: Vec<(&str, Option<&Value>)> = tools
+            .iter()
+            .map(|t| (t.name.as_str(), t.annotations.as_ref()))
+            .collect();
+        assert_eq!(
+            annotations,
+            [
+                (
+                    "get_page",
+                    Some(&json!({
+                        "title": "Get page",
+                        "readOnlyHint": true,
+                        "openWorldHint": false,
+                        "futureHint": { "level": 2 }
+                    }))
+                ),
+                ("drop_page", None),
+                ("plain", None),
+                ("utcp_shaped", Some(&json!({ "destructiveHint": true }))),
+                ("utcp_shaped_bad", None),
+            ]
+        );
+        // The Tool JSON leaves the field out when there is nothing to keep.
+        assert!(serde_json::to_value(&tools[2])
+            .unwrap()
+            .get("annotations")
+            .is_none());
     }
 
     #[tokio::test]

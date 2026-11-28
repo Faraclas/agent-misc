@@ -61,8 +61,8 @@ use utcp_core::skills::{
     sync_ide_skills,
 };
 use utcp_core::staging::{
-    diff_staged, diff_staged_tool, discard_staged, list_staged, promote_staged, rollback_manual,
-    stage_manual, ManualDiff, Replaces, ToolDiff, ToolStatus,
+    diff_staged, diff_staged_tool, discard_staged, forget_previous, list_staged, promote_staged,
+    rollback_manual, stage_manual, ManualDiff, Replaces, ToolDiff, ToolStatus,
 };
 use utcp_core::transfer::{DownloadFolderSource, OutTarget};
 
@@ -389,7 +389,7 @@ enum Commands {
         json: bool,
     },
     /// Make staged manuals active (rebuilds search, refreshes the skills, reloads the daemon). The
-    /// version each replaces is kept for `utcp rollback`
+    /// version each replaces is kept for `utcp rollback`, unless `--no-keep`
     Promote {
         /// Staged manual names, or prefixes such as 'azdo_*' (quote them for the shell)
         #[arg(conflicts_with = "all")]
@@ -397,6 +397,10 @@ enum Commands {
         /// Promote every staged manual
         #[arg(long)]
         all: bool,
+        /// Keep nothing for `utcp rollback`, and drop any older kept version of these manuals: for when the
+        /// replaced version was only a test or pre-release, not one to go back to
+        #[arg(long)]
+        no_keep: bool,
     },
     /// Drop staged manuals without making them active
     Discard {
@@ -407,10 +411,16 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
-    /// Make the version a `utcp promote` replaced active again. Run it twice to undo it
+    /// Make the version a `utcp promote` replaced active again: back to the last known-good version after a
+    /// promote turned out wrong. Run it twice to undo it. With `--forget`, drop kept versions instead
     Rollback {
-        /// Manual namespace name
-        name: String,
+        /// Manual namespace name; with `--forget`, names or prefixes such as 'azdo_*' (quote them for the shell)
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+        /// Drop the kept previous version (and its saved copy) without changing the active manual, for a
+        /// version you would never go back to
+        #[arg(long)]
+        forget: bool,
     },
     /// Set or clear a manual's hint: the few words shown next to its name in the agent skill's
     /// description, so agents know what an unclear name is for. Refreshes installed skills
@@ -1570,9 +1580,13 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
-        Commands::Promote { names, all } => {
+        Commands::Promote {
+            names,
+            all,
+            no_keep,
+        } => {
             require_target(&paths, "promote", &names, all)?;
-            let promoted = promote_staged(&paths, &names)?;
+            let promoted = promote_staged(&paths, &names, !no_keep)?;
             if promoted.is_empty() {
                 println!("Nothing is staged.");
                 return Ok(());
@@ -1588,6 +1602,16 @@ fn run_cli() -> Result<()> {
                     println!(
                         "Promoted '{}' ({} tools, {}; undo with: utcp rollback {})",
                         p.name, p.tool_count, replaced, p.name
+                    );
+                } else if no_keep && p.dropped_older {
+                    println!(
+                        "Promoted '{}' ({} tools, {}; nothing kept for rollback, older kept version dropped)",
+                        p.name, p.tool_count, replaced
+                    );
+                } else if no_keep && p.replaced != Replaces::Nothing {
+                    println!(
+                        "Promoted '{}' ({} tools, {}; nothing kept for rollback)",
+                        p.name, p.tool_count, replaced
                     );
                 } else {
                     println!(
@@ -1612,8 +1636,23 @@ fn run_cli() -> Result<()> {
             Ok(())
         }
 
-        Commands::Rollback { name } => {
-            let r = rollback_manual(&paths, &name)?;
+        Commands::Rollback { names, forget } => {
+            if forget {
+                let dropped = forget_previous(&paths, &names)?;
+                println!(
+                    "Dropped the kept previous version of: {} (the active manuals are unchanged; rollback can no longer bring it back)",
+                    dropped.join(", ")
+                );
+                return Ok(());
+            }
+            let name = match names.as_slice() {
+                [one] if !one.contains('*') => one,
+                _ => anyhow::bail!(
+                    "Roll back one manual at a time: utcp rollback <name> (several names and prefixes such as \
+                     'azdo_*' only with --forget)"
+                ),
+            };
+            let r = rollback_manual(&paths, name)?;
             notify_daemon_reload(&paths);
             if r.undo_available {
                 println!(

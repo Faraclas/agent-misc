@@ -165,8 +165,32 @@ agent loads, so agents know what an unclear name such as `context7` is for.
   ```
 
 - **Check the result:** `utcp list <name>`, then `utcp search "<keywords>"`. Search matches whole words, as written
-  (`get_repo`, `getRepo` and `get-repo` are all `get repo`; no word lists, so `repository` does not find `repo`), and
-  ranks a tool higher the more of its name and first sentence the query covers.
+  (`get_repo`, `getRepo` and `get-repo` are all `get repo`), with no word lists. A manual's own text links short and
+  long forms: when `get_repo` says "Get a repository.", `repository` finds that manual's `repo` tools. It ranks a tool
+  higher the more of its name and first sentence the query covers, and on equal scores puts tools that only read
+  first (HTTP `GET` or `HEAD`, or MCP tools whose server marks them `readOnlyHint`).
+
+### Describing Tools So Agents Find Them
+
+For anyone who writes or generates manuals. Search has no word lists and no synonyms: an agent finds a tool only
+through the words its manual uses. Write those words for people, not for one search engine:
+
+- **Name:** a verb and the thing it acts on, in the API's own words (`get_repo`, `list_issues`). Agents remember
+  names, so treat them as an interface and rename only on purpose.
+- **First sentence:** what the tool does, short and plain ("Get a repository."). `utcp list` and `utcp search`
+  show only this sentence, and search weighs it just below the name. Never a developer's note, a URL or an empty
+  "Settings: Get".
+- **Spell out short forms once:** a name may say `repo` when its first sentence says "repository"; search then
+  treats the two as one word for that manual.
+- **Add the words people use that the API's text lacks,** as a plain sentence at the end: the account a token
+  belongs to is "who am I, my user, the current user, me"; creating an issue is also "opening" one. A sentence, not
+  a list of keywords.
+- **Mark tools that only read:** HTTP `GET`, or `readOnlyHint` in an MCP server's tool annotations.
+- **Tags and the manual's hint:** a few words for the area (`issues`, `library docs`).
+
+To see what an agent will find, stage the manual and try the searches an agent would type:
+`utcp search --staged '<words>'`. There is no list to pass; a miss means either the manual does not say what people
+call the thing, or a ranking bug to report.
 
 ### Staging: Try a Manual Before Agents See It
 
@@ -180,9 +204,10 @@ utcp diff <manual>.<tool>...              # one changed tool: old (-) against ne
 utcp list [<name>] --staged               # the staged manuals (or one manual's tools)
 utcp search --staged '<keywords>'         # will agents find it? active and staged manuals together
 utcp call --staged <manual.tool> '<json>' # call one (also schema --staged, batch --staged)
-utcp promote <name>...                    # make them active (--all: everything staged)
+utcp promote <name>... [--no-keep]        # make them active (--all: everything staged; --no-keep: no rollback)
 utcp discard <name>...                    # drop them instead (--all: everything staged)
 utcp rollback <name>                      # back to the version the last promote replaced; again to undo
+utcp rollback --forget <name>...          # drop kept versions you would never go back to (active ones unchanged)
 ```
 
 - `diff` says what changed in each changed tool: `~ get_user: description; inputs added: since`. To review a
@@ -200,11 +225,16 @@ utcp rollback <name>                      # back to the version the last promote
   command is also asked for the names staged manuals read, and `utcp doctor` lists their secrets, marked `(staged)`.
 - There is one staging area, with at most one staged copy per name; staging a name again replaces its staged copy.
   `doctor` shows how many manuals are staged.
-- `diff`, `promote`, `discard` and `refresh` take several names, and a name ending in `*` takes every manual it
-  starts: `utcp promote 'azdo_*'` (quote it for the shell). A name or pattern that matches nothing is an error and
-  nothing changes. `diff` ends with the promote and discard commands for exactly the manuals it showed.
+- `diff`, `promote`, `discard`, `rollback --forget` and `refresh` take several names, and a name ending in `*` takes
+  every manual it starts: `utcp promote 'azdo_*'` (quote it for the shell). A name or pattern that matches nothing is
+  an error and nothing changes. `diff` ends with the promote and discard commands for exactly the manuals it showed.
 - `promote` is the only step that changes what agents see: it rebuilds search, reloads the daemon and rewrites the
   installed skills. It keeps the version it replaced (one per name), which `rollback` brings back.
+- Rollback is for going back to the last known-good version after a promote turned out wrong. Use `promote --no-keep`
+  when the replaced version was only a test or pre-release: it keeps nothing and also drops an older kept version of
+  that name, so `rollback` never brings back something older. Use `rollback --forget` to drop a kept version you
+  would never go back to: it deletes only utcp's own copy in the cache's `manuals/previous/` folder and leaves the
+  active manual, search and the skills as they are.
 - Without `--hint`, a staged manual keeps the hint of the manual it replaces.
 
 ### Secrets

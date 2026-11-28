@@ -161,6 +161,7 @@ impl ClientTransport for WebSocketTransport {
                                 tags: vec![],
                                 average_response_size: None,
                                 provider: None,
+                                annotations: None,
                             });
                         }
                     }

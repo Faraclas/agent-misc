@@ -167,6 +167,7 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             average_response_size: None,
             provider: None,
+            annotations: None,
         }
     }
 
