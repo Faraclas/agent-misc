@@ -62,7 +62,8 @@ server.
   drops the writes. `generate` prints what was left out and why, and the PAT permissions for every tool and for
   reads only.
 - **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area; `utcp diff` shows
-  what changes, `read-test` calls every read tool through utcp, and `utcp promote 'azdo_*'` makes them active.
+  what changes, `read-test` calls every read tool through utcp, `search-test` checks that agents' searches find the
+  right tools, and `utcp promote 'azdo_*'` makes them active.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows. Versions follow the REST
   API: `7.1.x` for API 7.1.
 
@@ -83,7 +84,8 @@ A generator that turns GitHub's OpenAPI description of the REST API (version 202
   grants, webhooks, protection, security settings, secrets) are left out; `generate` prints what was left out and why,
   and the README lists each group.
 - **Review before agents see them:** `generate --stage` puts the manuals in utcp's staging area;
-  `utcp diff 'github_*'` shows what changes, and `utcp promote 'github_*'` makes them active.
+  `utcp diff 'github_*'` shows what changes, `search-test` checks that agents' searches find the right tools, and
+  `utcp promote 'github_*'` makes them active.
 - **One static binary** (Rust), offline tests in CI, release archives for Linux and Windows.
 
 Docs: [README](./github-manuals/README.md), [operating guide](./github-manuals/docs/operating.md),
