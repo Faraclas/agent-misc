@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "get_authenticated_user",
-      "description": "Get the authenticated user. The authenticated user is the account the token belongs to: the current user, me.",
+      "description": "Get the authenticated user. The authenticated user is the account the token belongs to: who am I, my user, the current user, me.",
       "tags": [
         "github",
         "users"

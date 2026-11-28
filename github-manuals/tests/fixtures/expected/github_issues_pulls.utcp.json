@@ -82,7 +82,7 @@
     },
     {
       "name": "create_issue",
-      "description": "(untested) Create an issue. Any user with pull access can create an issue.",
+      "description": "(untested) Create (open) an issue. Any user with pull access can create an issue.",
       "tags": [
         "github",
         "issues",

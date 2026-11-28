@@ -87,16 +87,19 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   pointer to a left-out operation or to a guide keeps only its text; an `/orgs/` alternative ("and `GET
   /orgs/{org}/...` for organizations") is dropped when organization administration is left out. `generate` fails
   when a description names a tool that does not exist.
-- **Descriptions:** summary (with `Config::summary_qualifiers` for its category, such as "for Dependabot", when
-  another kept operation has the same summary, so every first sentence differs), then the description up to
-  GitHub's fine-grained-token section or its list of custom media types (the fixed `Accept` header does not ask for
-  those), then `Config::notes`. As plain text: links become their text (or a tool, above), images their alt text,
-  lists, tables, headings and code blocks paragraphs (a short list after a colon joins its line), and alert
-  markers, "Note:", HTML tags and Markdown emphasis go; a search's URL query in a code span becomes the JSON
-  arguments the tool takes. `Config::sentence_fixes` then replace GitHub's text where it is wrong or names pages;
-  a fix whose text GitHub no longer has fails `generate`. Then, sentence by sentence (a paragraph always ends one;
-  a split never follows `e.g.`, `i.e.`, `etc.` or `vs.`, and before a lowercase word only a word of three letters
-  or more ends one):
+- **Descriptions:** summary (GitHub's, or `Config::summaries`' replacement where GitHub's misses the words people
+  use, such as "Get the contents of a file or directory in a repository" for "Get repository content"; with
+  `Config::summary_qualifiers` for its category, such as "for Dependabot", when another kept operation has the same
+  summary, so every first sentence differs), then the description up to GitHub's fine-grained-token section or its
+  list of custom media types (the fixed `Accept` header does not ask for those), then `Config::notes` (such as the
+  words people use for "the authenticated user": who am I, the current user, me). As plain text: links become their
+  text (or a tool, above), images their alt text, lists, tables, headings and code blocks paragraphs (a short list
+  after a colon joins its line), and alert markers, "Note:", HTML tags and Markdown emphasis go; a search's URL query
+  in a code span becomes the JSON arguments the tool takes. `Config::sentence_fixes` then replace GitHub's text where
+  it is wrong or names pages; a fix whose text GitHub no longer has fails `generate`, and so does a replacement
+  summary for an operation the description lacks or one equal to GitHub's own. Tool names never come from summaries,
+  so a replacement renames nothing. Then, sentence by sentence (a paragraph always ends one; a split never follows
+  `e.g.`, `i.e.`, `etc.` or `vs.`, and before a lowercase word only a word of three letters or more ends one):
   - Dropped: pointers to GitHub's docs ("For more information", "See ..."), since agents cannot follow them; HTTP
     details utcp takes care of (headers, media types, redirects, upload URLs, client advice); which plans have a
     feature, and what holds only on GitHub Enterprise Server; a sentence equal to the one before; a first sentence
@@ -146,6 +149,27 @@ Everything else becomes a tool in the manual of its `x-github` category, or of i
   reads, writes, untested writes, bytes, approximate tokens), `left_out_summary` (count per reason), `left_out`
   (every operation with method, path, category, subcategory and reason), and `tools` (every tool with its manual,
   operationId, method and path; a variant has its operation's).
+
+## Search check (`search-test`)
+
+- **Cases:** `tests/search-checks.txt`, embedded at build time (`include_str!`), so the installed binary carries
+  them; `--cases <file>` reads another. One case per line, `<query> -> <manual>.<tool> | <manual>.<tool>`, an
+  optional trailing `[known miss: <reason>]`; `#` starts a comment (anywhere on a line), blank lines are ignored. A
+  line without `->`, with an empty query, a name that is not `<manual>.<tool>`, or any other `[...]` is an error
+  naming the line. The file holds only queries and tool names, so it is committed.
+- **Run:** the utcp from `--utcp` or PATH, with the same minimum version as `--stage` (0.2.4 added `search --staged`
+  and `list --staged`). Registered manuals: the rows of `utcp list --json` that are not staged, plus, with
+  `--staged`, the rows of `utcp list --staged --json`. Each case with a listed tool of a registered manual runs
+  `utcp search --json --limit <max(10, N)> [--staged] -- <query>` and takes the results' `name`s in order; the others
+  are skipped without searching. Only `list` and `search` are run.
+- **Judging** (`search_test::evaluate`, pure, so the tests use canned results): tools of unregistered manuals are
+  ignored; the rank is the best 1-based position of a remaining tool. `PASS` when it is at most N (default 3), else
+  `KNOWN` for a known miss and `FAIL` otherwise; `SKIP` when no listed manual is registered. Totals count the searched
+  cases in the top 1, 3 and 5, the failures and the known misses. Exit 1 when there is a failure; 2 for a bad cases
+  file or a missing or too old utcp.
+- **Not in CI:** the real manuals are build output and the fixtures are a hand-made sample, so the check is run by
+  hand after `generate --stage`. The tests cover the parsing and judging offline, and, with `UTCP_BIN`, a run
+  against the expected fixture manuals staged in a throwaway utcp.
 
 ## Decisions
 

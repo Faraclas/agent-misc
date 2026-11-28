@@ -9,7 +9,7 @@
   "tools": [
     {
       "name": "get_content",
-      "description": "Get repository content. Gets the contents of a file. For a file's content as it is, instead of base64, use github_repos.get_raw_content.",
+      "description": "Get the contents of a file or directory in a repository. For a file's content as it is, instead of base64, use github_repos.get_raw_content.",
       "tags": [
         "github",
         "repos",

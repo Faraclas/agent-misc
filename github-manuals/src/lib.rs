@@ -6,6 +6,7 @@ pub mod generate;
 pub mod http;
 pub mod links;
 pub mod names;
+pub mod search_test;
 pub mod source;
 pub mod text;
 pub mod utcp;

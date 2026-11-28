@@ -1,4 +1,5 @@
-//! The utcp version check for `generate --stage`, and whether utcp already has the token.
+//! The utcp version check for `generate --stage` and `search-test`, whether utcp already has the token, and running
+//! utcp for its output.
 
 use std::path::Path;
 use std::process::Command;
@@ -41,6 +42,22 @@ pub fn check_version(bin: &Path) -> Result<(), String> {
             min_version_text()
         )),
     }
+}
+
+/// What `bin args` prints on standard output, or why it could not run or failed (with utcp's error output).
+pub fn output(bin: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "utcp {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
 }
 
 /// Whether utcp (its daemon, when one runs) has the secret `var`, from `utcp doctor --json`. `None` when doctor

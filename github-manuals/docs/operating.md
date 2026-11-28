@@ -12,7 +12,8 @@ is in the [specification](./github-manuals-spec.md).
    `.env` file, or the store a "Secrets Command" reads from (add the name to its allowlist if it has one). Then
    `utcp daemon reload-env` and `utcp doctor` (it should show `[SET] GITHUB_MANUALS_PAT`).
 3. Try the staged manuals: `utcp diff 'github_*'`, `utcp schema --staged github_repos.get_repo`,
-   `utcp call --staged github_users.get_authenticated_user`.
+   `utcp call --staged github_users.get_authenticated_user`, and check that agents find them:
+   `github-manuals search-test --staged` (see [Checking search](#checking-search)).
 4. Promote them: `utcp promote 'github_*'`. The pattern leaves manuals that others staged alone.
 
 ## The token
@@ -75,8 +76,33 @@ that the token lacks something:
 ## Upgrading
 
 After installing a new github-manuals: `github-manuals generate --stage`, then `utcp diff 'github_*'` (renamed or
-removed tools are listed there and in the release notes), try a few tools, and `utcp promote 'github_*'`. A new
-release may pin a newer commit of the description; the first run downloads it once.
+removed tools are listed there and in the release notes), `github-manuals search-test --staged`, try a few tools, and
+`utcp promote 'github_*'`. A new release may pin a newer commit of the description; the first run downloads it once.
+
+## Checking search
+
+Agents find tools with `utcp search "<words>"`, so a tool they cannot find is as good as missing.
+`github-manuals search-test` runs a list of searches an agent would type (built in; source `tests/search-checks.txt`)
+through your utcp and checks that one of the right tools is in the top 3 (`--top N` to change it).
+
+- **When:** after `generate --stage`, with `--staged` (it then searches as if the staged manuals were promoted), and
+  before `utcp promote 'github_*'`. Without `--staged` it checks the active manuals. It only reads (`utcp list`,
+  `utcp search`) and never stages, promotes or changes anything. It needs the real manuals, so it is run by hand, not
+  in CI.
+- **Either family counts:** a case may list GitHub and Azure DevOps tools (`azdo_*`, from azdo-manuals); tools of
+  manuals you have not registered are ignored, and a case with none registered is `SKIP`.
+- **Reading it:** one line per case (query, rank or `-` when not in the results, the tool, `PASS`, `FAIL`, `KNOWN` or
+  `SKIP`; a miss also shows what came first), then the top 1, top 3 and top 5 counts and the failures. It exits with
+  1 when a case is `FAIL`.
+- **A `FAIL` means one of two things:**
+  - The manuals do not say what people call the thing ("open an issue" when the summary says "Create an issue"). Fix
+    the description in `src/config.rs`: `SUMMARIES` replaces GitHub's summary (the first sentence, which search
+    weighs most), `NOTES` adds sentences such as the words people use. Use the words people really use; never add
+    odd wording just to make a case pass.
+  - utcp ranks badly although the words are there (an exact name or summary match below unrelated tools). That is a
+    utcp ranking bug: report it to utcp-rs with the query and the ranks, rather than working around it here.
+- **Known misses:** a case that cannot pass yet (waiting for a utcp fix) can end with `[known miss: <reason>]`; it is
+  reported as `KNOWN` and does not fail the run. Remove the marker once it passes (the line then says so).
 
 ## Troubleshooting
 
@@ -84,9 +110,9 @@ release may pin a newer commit of the description; the first run downloads it on
   changed. Nothing was used or cached. Retry; if it persists, report it.
 - **"category ... has no manual"**: only with a pins file other than the built-in one. GitHub added an area that has
   not been reviewed; use the built-in pins.
-- **"utcp 0.2.4 or newer is needed"**: `generate --stage` checks `utcp --version` first, because older utcp
-  versions drop the body of a DELETE, cannot send a text body, silently return only the first page of a list, and
-  cannot take the `'github_*'` pattern.
+- **"utcp 0.2.4 or newer is needed"**: `generate --stage` and `search-test` check `utcp --version` first, because
+  older utcp versions drop the body of a DELETE, cannot send a text body, silently return only the first page of a
+  list, cannot take the `'github_*'` pattern, and cannot search or list the staged manuals.
   Upgrade utcp, or use `--utcp` to point at a newer one.
 - **Proxies:** set `HTTPS_PROXY` (both github-manuals and utcp read it). Trusted CAs come from the system store, so a
   company root CA for TLS inspection works.

@@ -15,8 +15,8 @@
       "reads": 3,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 4976,
-      "approx_tokens": 1244
+      "bytes": 4980,
+      "approx_tokens": 1245
     },
     "github_issues_pulls": {
       "title": "GitHub issues and pull requests",
@@ -25,8 +25,8 @@
       "reads": 2,
       "writes": 5,
       "untested_writes": 4,
-      "bytes": 7895,
-      "approx_tokens": 1973
+      "bytes": 7902,
+      "approx_tokens": 1975
     },
     "github_actions": {
       "title": "GitHub Actions, checks, deployments, packages and Pages",
@@ -75,8 +75,8 @@
       "reads": 3,
       "writes": 1,
       "untested_writes": 1,
-      "bytes": 2630,
-      "approx_tokens": 657
+      "bytes": 2649,
+      "approx_tokens": 662
     }
   },
   "left_out_summary": [

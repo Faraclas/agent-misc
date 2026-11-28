@@ -82,6 +82,27 @@ The pattern names only these seven manuals, so manuals that others staged stay s
 write tool. After upgrading github-manuals, run `generate --stage` again and check `utcp diff 'github_*'` before
 promoting.
 
+### Checking that agents find the tools
+
+```sh
+github-manuals search-test --staged [--cases <file>] [--top N]
+```
+
+Agents find tools with `utcp search "<words>"`. `search-test` runs, through your utcp, the searches an agent would
+type and checks that a right tool comes back in the top N (default 3). The cases are built into the binary (source:
+[`tests/search-checks.txt`](./tests/search-checks.txt)), one per line:
+
+```text
+who am i -> github_users.get_authenticated_user | azdo_core.get_connection_data
+open an issue -> github_issues_pulls.create_issue [known miss: <reason>]
+```
+
+Any listed tool counts; tools of manuals that are not registered are ignored, and a case with none registered is
+skipped. It prints one line per case (query, rank or `-`, tool, `PASS`/`FAIL`/`KNOWN`/`SKIP`) and the totals (top 1,
+top 3, top 5, failures), and exits with 1 when a case not marked `[known miss: ...]` is outside the top N. Without
+`--staged` it searches the active manuals only. It only reads (`utcp list`, `utcp search`): nothing is staged,
+promoted or changed. When to run it and what a failure means: [operating guide](./docs/operating.md#checking-search).
+
 ## The token
 
 The manuals send `Authorization: Bearer ${GITHUB_MANUALS_PAT}`. Use a token of its own under that name, not
@@ -195,7 +216,9 @@ Remove the old manual once the new ones are promoted and tried: `utcp deregister
 ## Maintainers
 
 - `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` (offline; set
-  `UTCP_BIN` to a utcp binary to include the load test).
+  `UTCP_BIN` to a utcp binary to include the load and `search-test` tests).
+- After changing what is generated: `generate --stage`, `utcp diff 'github_*'`, then
+  `github-manuals search-test --staged` against the real manuals (they are not committed, so CI cannot run it).
 - Moving to a newer commit of the description: `github-manuals pins --commit <sha>` rewrites `pins.json`; rebuild,
   regenerate, review `utcp diff`. A new API version also changes `config::API_VERSION`.
 - Contributor rules: [`AGENTS.md`](./AGENTS.md).

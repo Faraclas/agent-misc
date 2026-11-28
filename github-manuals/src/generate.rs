@@ -527,7 +527,7 @@ pub(crate) fn outputs(spec: &Value, o: &Operation) -> Result<Value> {
     }
     let alike = answers.iter().all(|(_, d)| d.trim() == description.trim());
     let mut description = if alike {
-        answer_description(description, &format!("{} {}", summary(o), o.path))
+        answer_description(description, &format!("{} {}", github_summary(o), o.path))
     } else {
         String::new()
     };
@@ -550,10 +550,18 @@ fn upload_schema() -> Value {
 }
 
 /// GitHub's summary of an operation as one line of plain text, without a final period.
-fn summary(o: &Operation) -> String {
+fn github_summary(o: &Operation) -> String {
     one_line(&plain(str_of(o.op, "summary")), MAX_DESCRIPTION)
         .trim_end_matches('.')
         .to_string()
+}
+
+/// The summary a tool description starts with, without a final period: config `summaries`' replacement, or GitHub's.
+fn summary(o: &Operation, conf: &Config) -> String {
+    match conf.summaries.get(o.op_id) {
+        Some(s) => s.trim_end_matches('.').to_string(),
+        None => github_summary(o),
+    }
 }
 
 /// The caution for a DELETE whose summary deletes, removes or disables something. One that undoes the user's own
@@ -567,7 +575,8 @@ pub(crate) fn delete_note(summary: &str) -> Option<String> {
     }
 }
 
-/// The summary (with `qualifier` when other tools have the same summary), then GitHub's description in whole
+/// The summary (config `summaries`' replacement or GitHub's, with `qualifier` when other tools have the same
+/// summary), then GitHub's description in whole
 /// sentences with config `sentence_fixes` applied, then config `notes`, all within MAX_DESCRIPTION characters. A
 /// `yes_no` check (a GET that answers with no content) ends with [`YES_NO`] unless its description already says when
 /// it fails with 404.
@@ -578,7 +587,13 @@ fn tool_description(
     qualifier: Option<&str>,
     conf: &Config,
 ) -> Result<String> {
-    let summary = summary(o);
+    let summary = summary(o, conf);
+    if conf.summaries.contains_key(o.op_id) && summary.eq_ignore_ascii_case(&github_summary(o)) {
+        return err(format!(
+            "{}: GitHub's summary is now \"{summary}\"; remove it from config summaries",
+            o.op_id
+        ));
+    }
     let mut detail = str_of(o.op, "description");
     for end in DESCRIPTION_ENDS {
         if let Some(i) = detail.find(end) {
@@ -937,6 +952,7 @@ fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
         .chain(conf.input_descriptions.keys().map(|(id, _)| id))
         .chain(conf.sentence_fixes.iter().map(|(id, ..)| id))
         .chain(conf.notes.keys())
+        .chain(conf.summaries.keys())
         .chain(conf.variants.iter().map(|v| &v.op_id))
         .collect();
     named.sort();
@@ -954,7 +970,7 @@ fn check_config_names(spec: &Value, conf: &Config) -> Result<()> {
 /// has the same summary ("Get a repository secret" for Actions, Dependabot and the Copilot coding agent), so every
 /// tool's first sentence, which is all `utcp search` shows, is different.
 fn qualifiers<'a>(ops: &[Operation], conf: &'a Config) -> Result<Vec<Option<&'a str>>> {
-    let key = |o: &Operation| summary(o).to_lowercase();
+    let key = |o: &Operation| summary(o, conf).to_lowercase();
     let mut count: BTreeMap<String, usize> = BTreeMap::new();
     for o in ops {
         *count.entry(key(o)).or_default() += 1;
@@ -972,7 +988,7 @@ fn qualifiers<'a>(ops: &[Operation], conf: &'a Config) -> Result<Vec<Option<&'a 
             return err(format!(
                 "{}: other tools have the same summary \"{}\"; add category '{}' to config summary_qualifiers",
                 o.op_id,
-                summary(o),
+                summary(o, conf),
                 o.category
             ));
         };

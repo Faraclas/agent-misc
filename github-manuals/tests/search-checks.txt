@@ -1,0 +1,45 @@
+# Either family counts: a tool of a manual that is not registered is ignored, and a case with none registered is skipped.
+who am i -> github_users.get_authenticated_user | azdo_core.get_connection_data
+current user -> github_users.get_authenticated_user | azdo_core.get_connection_data
+me -> github_users.get_authenticated_user | azdo_core.get_connection_data
+repository -> github_repos.get_repo | azdo_git.get_repository
+repository details -> github_repos.get_repo | azdo_git.get_repository [known miss: vague; tools named details_for_repo match both words]
+get commit -> github_repos.get_commit | azdo_git.get_commit
+pull requests -> github_issues_pulls.list_pull_requests | azdo_git.get_pull_requests
+create release -> github_repos.create_release | azdo_pipelines.create_release
+
+# GitHub
+read a file from a repository -> github_repos.get_content | github_repos.get_raw_content [known miss: no stop words, so "a" and "from" match tool names; needs rarer words to weigh more]
+get file contents -> github_repos.get_content | github_repos.get_raw_content
+github repository -> github_repos.get_repo
+file contents -> github_repos.get_content
+notifications -> github_users.list_notifications_for_authenticated_user | azdo_admin.query_notifications
+my notifications -> github_users.list_notifications_for_authenticated_user
+open an issue -> github_issues_pulls.create_issue
+list issues -> github_issues_pulls.list_issues_for_repo
+comment on an issue -> github_issues_pulls.create_issue_comment
+github pull request -> github_issues_pulls.get_pull_request
+create pull request -> github_issues_pulls.create_pull_request
+get a repository -> github_repos.get_repo
+get repo -> github_repos.get_repo
+github issue -> github_issues_pulls.get_issue | github_issues_pulls.create_issue | github_issues_pulls.list_issues_for_repo
+authenticated user -> github_users.get_authenticated_user
+my github user -> github_users.get_authenticated_user
+my repositories -> github_repos.list_repos_for_authenticated_user
+list my repos -> github_repos.list_repos_for_authenticated_user
+list pull requests -> github_issues_pulls.list_pull_requests
+failed jobs -> github_actions.list_jobs_for_workflow_run | github_actions.re_run_workflow_failed_jobs
+check runs -> github_actions.list_check_runs_for_ref
+star a repository -> github_users.star_repo_for_authenticated_user
+getRepo -> github_repos.get_repo
+get-repo -> github_repos.get_repo
+github_repos.get -> github_repos.get_repo
+workflow run logs -> github_actions.download_workflow_run_logs
+rerun failed jobs -> github_actions.re_run_workflow_failed_jobs
+issue labels -> github_issues_pulls.list_labels_on_issue
+add labels to an issue -> github_issues_pulls.add_issue_labels
+compare two commits -> github_repos.compare_commits
+dependabot alerts -> github_security.list_dependabot_alerts_for_repo
+code scanning alerts -> github_security.list_code_scanning_alerts_for_repo
+secret scanning alerts -> github_security.list_secret_scanning_alerts_for_repo
+copilot agent task -> github_copilot.create_agent_task | github_copilot.list_agent_tasks

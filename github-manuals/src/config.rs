@@ -97,6 +97,9 @@ pub struct Config {
     /// HTTP details utcp takes care of. The text is matched in GitHub's description as plain text with each paragraph
     /// on one line; a fix whose text is not there fails `generate`, so it cannot go stale.
     pub sentence_fixes: Vec<(String, String, String)>,
+    /// operationId -> the summary a tool description starts with, instead of GitHub's ([`SUMMARIES`]). An entry for
+    /// an operation the description does not have, or equal to GitHub's summary, fails `generate`.
+    pub summaries: HashMap<String, String>,
     /// operationId -> sentences added to the end of a tool description and kept when it is shortened, such as a
     /// pointer to a variant.
     pub notes: HashMap<String, String>,
@@ -641,6 +644,7 @@ impl Config {
                 .map(|(id, from, to)| (id.to_string(), from.to_string(), to.to_string()))
                 .collect(),
             notes: pairs(NOTES),
+            summaries: pairs(SUMMARIES),
             variants: variants(),
             read_only: false,
         }
@@ -1230,14 +1234,19 @@ pub const NOTES: &[(&str, &str)] = &[
         "repos/get-release-asset",
         "To download the asset, use github_repos.download_release_asset.",
     ),
-    // GitHub says "the authenticated user"; agents search for "current user", "me" and "my repositories".
+    // GitHub says "the authenticated user"; agents search for "current user", "me", "who am I", "my user", "my
+    // repositories" and "my notifications".
     (
         "users/get-authenticated",
-        "The authenticated user is the account the token belongs to: the current user, me.",
+        "The authenticated user is the account the token belongs to: who am I, my user, the current user, me.",
     ),
     (
         "repos/list-for-authenticated-user",
         "These are the current user's repositories (my repositories): their own and the ones shared with them.",
+    ),
+    (
+        "activity/list-notifications-for-authenticated-user",
+        "These are the current user's notifications (my notifications).",
     ),
     (
         "dependency-graph/generate-sbom-report",
@@ -1270,6 +1279,18 @@ pub const NOTES: &[(&str, &str)] = &[
 const STATS_NOTE: &str =
     "When GitHub has not computed the statistics yet, the answer is {} and GitHub starts \
     computing them; call again after a few seconds. An empty repository answers null.";
+
+/// Summaries that replace GitHub's (operationId, summary) as the first sentence of a tool description, the one
+/// `utcp search` shows, in the words people use for the task. Tool names do not change.
+pub const SUMMARIES: &[(&str, &str)] = &[
+    // GitHub's "Get repository content" hides that it reads a file ("file contents", "read a file").
+    (
+        "repos/get-content",
+        "Get the contents of a file or directory in a repository",
+    ),
+    // People open an issue; utcp search matches whole words, so "Opens" later on would not be found.
+    ("issues/create", "Create (open) an issue"),
+];
 
 /// Tools that ask for another media type than JSON. Checked live (2026-11-25) with utcp 0.2.5.
 fn variants() -> Vec<Variant> {

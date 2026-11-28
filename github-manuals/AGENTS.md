@@ -11,7 +11,8 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
 - `src/config.rs`: the manuals, which category goes where, every rule that leaves operations out (with its reason),
   and the naming tables. `src/names.rs`: tool names. `src/generate.rs`: description to manuals and report (no network).
 - `src/source.rs`: the pinned description (`pins.json`, embedded at build time), its hash-checked download and cache,
-  the default folders, and `pins`. `src/http.rs`: the blocking HTTP layer. `src/utcp.rs`: runs utcp for `--stage`.
+  the default folders, and `pins`. `src/http.rs`: the blocking HTTP layer. `src/utcp.rs`: runs utcp for `--stage`
+  and `search-test`. `src/search_test.rs`: `search-test`, with its cases in `tests/search-checks.txt`.
 - `src/cli.rs`: commands. `src/tests.rs`: the offline tests, with the hand-made description in `tests/fixtures/`.
 - `docs/operating.md` (for users: token, upgrades, troubleshooting) and `docs/github-manuals-spec.md` (how it works
   inside, decisions).
@@ -30,9 +31,11 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
    `generate` fail until it is placed or left out.
 3. **Changing what is generated** (`src/config.rs`, `src/names.rs`, `src/generate.rs`): run the offline tests,
    rewrite the expected files with `UPDATE_EXPECTED=1 cargo test`, and review that diff before committing. Then
-   regenerate the real manuals and check them in utcp: `generate --stage`, `utcp diff`, `utcp schema --staged` and
-   `utcp call --staged --dry-run`. Never point `UTCP_CONFIG_DIR` or `HOME` at a scratch folder to try manuals: stage
-   them instead. Staging is shared: promote or discard by name (`utcp discard github_repos`), never everything.
+   regenerate the real manuals and check them in utcp: `generate --stage`, `utcp diff`, `search-test --staged`,
+   `utcp schema --staged` and `utcp call --staged --dry-run`. A `search-test` failure is fixed with the words people
+   use (`SUMMARIES`, `NOTES`) or reported to utcp-rs as a ranking bug, never with odd wording to pass. Never point
+   `UTCP_CONFIG_DIR` or `HOME` at a scratch folder to try manuals: stage them instead. Staging is shared: promote or
+   discard by name (`utcp discard github_repos`), never everything.
 4. **Tool names are an interface.** Renaming a tool breaks agents that learned it. Change the naming rules or
    `Config::names` only on purpose, and list renamed tools in the release notes. A clash is an error, never resolved
    silently.
@@ -48,7 +51,8 @@ one file per API version) into utcp HTTP manuals plus a report. A standalone cra
 
 - Offline (CI, `.github/workflows/github-manuals.yml`): `cargo fmt --check`,
   `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Set `UTCP_BIN` to a utcp binary
-  (0.2.4 or newer) to include the load test; CI uses the latest `utcp-rs` release on Linux and sets `REQUIRE_UTCP=1`.
+  (0.2.4 or newer) to include the load and `search-test` tests; CI uses the latest `utcp-rs` release on Linux and sets
+  `REQUIRE_UTCP=1`. `search-test` itself needs the real manuals, so it is run by hand (rule 3), not in CI.
 - On a machine without the source tree (a Windows test machine), copy the compiled test binary with
   `tests/fixtures/` and set `GITHUB_MANUALS_TEST_FIXTURES` to that copy.
 - Live checks use a real token and real repositories: reads against public repositories (any owner) are fine; writes

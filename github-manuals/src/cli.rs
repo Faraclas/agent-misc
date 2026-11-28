@@ -1,4 +1,4 @@
-//! Command line: `github-manuals generate [--out <dir>] [--stage]`.
+//! Command line: `github-manuals generate [--out <dir>] [--stage]`, `github-manuals search-test [--staged]`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::config::{Config, PAT_VAR};
 use crate::generate::{self, GenerateError};
 use crate::http::ureq_transport;
+use crate::search_test::{self, Totals};
 use crate::source::{self, Pins, SourceError};
 use crate::text::write_json;
 use crate::utcp;
@@ -48,6 +49,19 @@ Example (writes, stages, and prints what to do next):
 
 Run it again to update the manuals, for example after upgrading github-manuals.";
 
+const SEARCH_TEST_LONG: &str = "\
+Check that agents find the right tools with utcp search (read-only).
+
+Runs utcp search for each case (a query and the tools that count as a right answer) and prints the rank of the best
+one, then the totals. A case whose manuals are not registered in utcp is skipped. Exits with 1 when a case that is
+not marked as a known miss is not in the top N. It only reads: nothing is staged, promoted or changed.
+
+Cases file format, one case per line (# starts a comment):
+  <query> -> <manual>.<tool> | <manual>.<tool> [known miss: <reason>]
+
+Example (after generate --stage, before utcp promote):
+  github-manuals search-test --staged";
+
 /// Generate utcp HTTP manuals for the GitHub REST API from GitHub's OpenAPI description.
 #[derive(Parser)]
 #[command(
@@ -69,6 +83,9 @@ enum Cmd {
     /// Write the manuals (no token needed)
     #[command(long_about = GENERATE_LONG)]
     Generate(GenerateArgs),
+    /// Check that agents find the right tools with utcp search (read-only)
+    #[command(long_about = SEARCH_TEST_LONG)]
+    SearchTest(SearchTestArgs),
     /// Maintainers: pin another commit of GitHub's description in a pins file
     Pins(PinsArgs),
     /// Print this message, or the help for one command
@@ -100,6 +117,22 @@ struct GenerateArgs {
     /// A pins file to use instead of the one built in (maintainers)
     #[arg(long, hide = true)]
     pins: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct SearchTestArgs {
+    /// Search the staged manuals too, as if they were promoted (utcp search --staged)
+    #[arg(long)]
+    staged: bool,
+    /// Cases file [default: the cases built in, tests/search-checks.txt in the source]
+    #[arg(long)]
+    cases: Option<PathBuf>,
+    /// A case passes when one of its tools is among the first N results (1 to 100)
+    #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=100))]
+    top: u64,
+    /// utcp binary [default: utcp on PATH]
+    #[arg(long)]
+    utcp: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -141,6 +174,7 @@ pub fn main() -> i32 {
     };
     let result = match cli.command {
         Cmd::Generate(a) => cmd_generate(a),
+        Cmd::SearchTest(a) => cmd_search_test(a),
         Cmd::Pins(a) => cmd_pins(a),
         Cmd::Help { command } => help(command.as_deref()).exit(),
     };
@@ -352,6 +386,40 @@ pub(crate) fn next_steps(token_set: bool) -> Vec<String> {
         "Make them active for your agents: utcp promote 'github_*'".to_string(),
     ]);
     steps
+}
+
+fn cmd_search_test(args: SearchTestArgs) -> Result<i32, Fail> {
+    let (text, source) = match &args.cases {
+        Some(path) => (
+            fs::read_to_string(path).map_err(io_fail(path))?,
+            path.display().to_string(),
+        ),
+        None => (
+            search_test::CASES.to_string(),
+            "the built-in cases".to_string(),
+        ),
+    };
+    let cases = search_test::parse_cases(&text).map_err(|e| Fail(2, format!("{source}: {e}")))?;
+    let utcp = find_utcp(args.utcp)?;
+    let top = usize::try_from(args.top).unwrap_or(usize::MAX);
+    let mut run = |a: &[&str]| utcp::output(&utcp, a);
+    let rows =
+        search_test::run_cases(&cases, &mut run, args.staged, top).map_err(|e| Fail(1, e))?;
+    let which = if args.staged {
+        "the active and staged manuals"
+    } else {
+        "the active manuals"
+    };
+    println!("utcp search over {which}, {source}; a case passes in the top {top}:");
+    for line in search_test::row_lines(&rows) {
+        println!("{line}");
+    }
+    println!();
+    let totals = Totals::of(&rows);
+    for line in totals.lines(top) {
+        println!("{line}");
+    }
+    Ok(if totals.failures > 0 { 1 } else { 0 })
 }
 
 fn cmd_pins(args: PinsArgs) -> Result<i32, Fail> {

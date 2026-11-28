@@ -1,13 +1,13 @@
 //! Offline tests: a hand-made description in, exact manuals out. No network.
 //!
 //! Set UPDATE_EXPECTED=1 to rewrite tests/fixtures/expected/ after an intended change (then review the diff).
-//! The utcp load test runs the `utcp` from UTCP_BIN, else from PATH, and is skipped when there is none or it is
-//! older than 0.2.4 (CI sets REQUIRE_UTCP=1 on Linux to make it fail instead).
+//! The utcp tests (load, search-test) run the `utcp` from UTCP_BIN, else from PATH, in a throwaway setup, and are
+//! skipped when there is none or it is older than 0.2.4 (CI sets REQUIRE_UTCP=1 on Linux to make them fail instead).
 //! GITHUB_MANUALS_TEST_FIXTURES points the compiled test binary at a copy of tests/fixtures/, so it can run on a
 //! machine without the source tree (a Windows test machine).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +21,7 @@ use crate::config::{why, Config, API_VERSION, PAT_VAR};
 use crate::generate::{generate, DELETE_NOTE, FILE_ANSWER, UNTESTED, UTCP_MAX_HINT_CHARS};
 use crate::http::{Request, Response, Transport};
 use crate::names;
+use crate::search_test::{self, parse_cases, Case, Outcome, Row, Totals};
 use crate::source::{self, sha256_hex, Pins, PINS};
 use crate::text::{
     end_sentence, fit, one_line, plain, restates, sentences, snake, tidy, tidy_sentences,
@@ -62,6 +63,7 @@ fn test_config() -> Config {
         .retain(|(op, _), _| ids.contains(op));
     conf.optional_path.retain(|(op, ..)| ids.contains(op));
     conf.notes.retain(|op, _| ids.contains(op));
+    conf.summaries.retain(|op, _| ids.contains(op));
     conf.variants.retain(|v| ids.contains(&v.op_id));
     // The real fixes match GitHub's real text, which the hand-made description does not have.
     conf.sentence_fixes.clear();
@@ -402,16 +404,20 @@ fn descriptions() {
         repo,
         "Get a repository. To read a file, use github_repos.get_content."
     );
+    // Config summaries replace GitHub's "Get repository content" and "Create an issue"; GitHub's first sentence
+    // "Gets the contents of a file." now restates the summary and goes.
     let content = tools["get_content"]["description"].as_str().unwrap();
     assert_eq!(
         content,
-        "Get repository content. Gets the contents of a file. For a file's content as it is, instead of base64, \
+        "Get the contents of a file or directory in a repository. For a file's content as it is, instead of base64, \
          use github_repos.get_raw_content."
     );
     let issue = tools["create_issue"]["description"].as_str().unwrap();
     assert_eq!(
         issue,
-        format!("{UNTESTED} Create an issue. Any user with pull access can create an issue.")
+        format!(
+            "{UNTESTED} Create (open) an issue. Any user with pull access can create an issue."
+        )
     );
     // The classic-token scope is shortened in place; "e.g." does not end a sentence.
     assert_eq!(
@@ -1058,6 +1064,19 @@ fn config_mistakes_fail() {
     conf.notes.insert("repos/no-such".into(), "x".into());
     let e = fails(&conf);
     assert!(e.contains("config names repos/no-such"), "{e}");
+    let mut conf = test_config();
+    conf.summaries.insert("repos/no-such".into(), "x".into());
+    let e = fails(&conf);
+    assert!(e.contains("config names repos/no-such"), "{e}");
+    // A summary GitHub now has itself.
+    let mut conf = test_config();
+    conf.summaries
+        .insert("repos/get".into(), "Get a repository.".into());
+    let e = fails(&conf);
+    assert!(
+        e.contains("repos/get: GitHub's summary is now \"Get a repository\"; remove it from config summaries"),
+        "{e}"
+    );
     // A variant of a left-out operation.
     let mut conf = test_config();
     let mut v = conf.variants[0].clone();
@@ -1203,11 +1222,11 @@ fn shared_summaries_are_qualified() {
         .as_str()
         .unwrap()
         .starts_with("Get the authenticated user for a user. "));
-    // Two tools of one category still collide.
-    let mut spec = description();
-    spec["paths"]["/repos/{owner}/{repo}/contents/{path}"]["get"]["summary"] =
-        json!("Get a repository");
-    let e = generate(&spec, API_VERSION, &source_json(), &test_config()).unwrap_err();
+    // Two tools of one category still collide, also through a config summary.
+    let mut conf = test_config();
+    conf.summaries
+        .insert("repos/get-content".into(), "Get a repository".into());
+    let e = generate(&description(), API_VERSION, &source_json(), &conf).unwrap_err();
     assert!(e.0.contains("still have the same summary"), "{}", e.0);
 }
 
@@ -1358,6 +1377,264 @@ fn help_and_next_steps() {
     assert_eq!(set_in(&json!({}), PAT_VAR), None);
 }
 
+// search-test
+
+fn case(query: &str, tools: &[&str], known_miss: Option<&str>) -> Case {
+    Case {
+        line: 0,
+        query: query.into(),
+        tools: tools.iter().map(|t| t.to_string()).collect(),
+        known_miss: known_miss.map(String::from),
+    }
+}
+
+fn manual_set(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+fn names_of(tools: &[&str]) -> Vec<String> {
+    tools.iter().map(|t| t.to_string()).collect()
+}
+
+#[test]
+fn search_cases_parse() {
+    let text = "\
+# a comment
+
+  who am i -> a_users.me | b_core.whoami   # trailing comment
+get repo -> a_repos.get_repo [known miss: ranks fourth]
+x.y -> a_repos.get
+";
+    let cases = parse_cases(text).unwrap();
+    assert_eq!(
+        cases,
+        vec![
+            Case {
+                line: 3,
+                query: "who am i".into(),
+                tools: names_of(&["a_users.me", "b_core.whoami"]),
+                known_miss: None
+            },
+            Case {
+                line: 4,
+                query: "get repo".into(),
+                tools: names_of(&["a_repos.get_repo"]),
+                known_miss: Some("ranks fourth".into())
+            },
+            Case {
+                line: 5,
+                query: "x.y".into(),
+                tools: names_of(&["a_repos.get"]),
+                known_miss: None
+            },
+        ]
+    );
+    let bad = |text: &str, says: &str| {
+        let e = parse_cases(text).unwrap_err();
+        assert!(e.contains(says), "{text:?}: {e}");
+    };
+    bad(
+        "ok -> a.b\nno arrow a.b\n",
+        "line 2: expected <query> -> <tool>",
+    );
+    bad(" -> a.b", "line 1: the query is empty");
+    bad("q -> a.b -> c.d", "line 1: more than one ->");
+    bad("q -> a.b |", "line 1: '' is not a tool name");
+    bad("q -> get_repo", "line 1: 'get_repo' is not a tool name");
+    bad("q -> a.b.c", "'a.b.c' is not a tool name");
+    bad("q -> a b.c", "'a b.c' is not a tool name");
+    bad("#\nq -> a.b [known miss:]", "line 2: a '[' must start");
+    bad("q -> a.b [known miss: x] c.d", "a '[' must start");
+    bad("q -> a.b [skip]", "a '[' must start");
+    bad("# only comments\n\n", "no cases");
+    // The built-in cases: well formed, and every github_* manual they name is a real one.
+    let cases = parse_cases(search_test::CASES).unwrap();
+    assert_eq!(cases.len(), 42);
+    let real: HashSet<String> = Config::real().manuals.into_iter().map(|m| m.name).collect();
+    for c in &cases {
+        for t in &c.tools {
+            let manual = search_test::manual_of(t);
+            assert!(
+                !manual.starts_with("github_") || real.contains(manual),
+                "line {}: {t}",
+                c.line
+            );
+        }
+    }
+}
+
+#[test]
+fn search_cases_pass_fail_skip() {
+    let registered = manual_set(&["a_users", "a_repos"]);
+    let results = names_of(&["x.one", "a_repos.get_repo", "x.three", "a_users.me"]);
+    fn judge<'a>(
+        c: &'a Case,
+        results: &[String],
+        registered: &BTreeSet<String>,
+        top: usize,
+    ) -> Row<'a> {
+        search_test::evaluate(c, results, registered, top)
+    }
+    let judge = |c, top| judge(c, &results, &registered, top);
+    // The best rank of any listed tool counts; a tool of an unregistered manual is ignored.
+    let c = case(
+        "q",
+        &["b_core.whoami", "a_users.me", "a_repos.get_repo"],
+        None,
+    );
+    let row = judge(&c, 3);
+    assert_eq!(
+        (row.rank, row.tool, row.outcome, row.first),
+        (Some(2), "a_repos.get_repo", Outcome::Pass, None)
+    );
+    // Rank 4 is outside the top 3: a failure, or a known miss when marked.
+    let c = case("q", &["a_users.me"], None);
+    let row = judge(&c, 3);
+    assert_eq!(
+        (row.rank, row.outcome, row.first.as_deref()),
+        (Some(4), Outcome::Fail, Some("x.one"))
+    );
+    assert_eq!(judge(&c, 4).outcome, Outcome::Pass);
+    let k = case("q", &["a_users.me"], Some("why"));
+    assert_eq!(judge(&k, 3).outcome, Outcome::Known);
+    assert_eq!(judge(&k, 4).outcome, Outcome::Pass);
+    // Not found at all: rank none, the first registered tool is shown.
+    let c = case("q", &["b_core.whoami", "a_users.other"], None);
+    let row = judge(&c, 3);
+    assert_eq!(
+        (row.rank, row.tool, row.outcome),
+        (None, "a_users.other", Outcome::Fail)
+    );
+    // No listed manual registered: skipped, even when a listed tool came back.
+    let c = case("q", &["b_core.whoami", "x.one"], None);
+    let row = judge(&c, 3);
+    assert_eq!(
+        (row.rank, row.tool, row.outcome),
+        (None, "b_core.whoami", Outcome::Skip)
+    );
+    // Totals and the printed lines.
+    let cases = [
+        case("first", &["x.one"], None),
+        case("second", &["a_repos.get_repo"], None),
+        case("fourth", &["a_users.me"], None),
+        case("fourth known", &["a_users.me"], Some("ranks low")),
+        case("skipped", &["b_core.whoami"], None),
+    ];
+    let registered = manual_set(&["x", "a_users", "a_repos"]);
+    let rows: Vec<_> = cases
+        .iter()
+        .map(|c| search_test::evaluate(c, &results, &registered, 3))
+        .collect();
+    let totals = Totals::of(&rows);
+    assert_eq!(
+        totals,
+        Totals {
+            cases: 5,
+            skipped: 1,
+            top1: 1,
+            top3: 2,
+            top5: 4,
+            failures: 1,
+            known: 1
+        }
+    );
+    assert_eq!(
+        totals.lines(3),
+        [
+            "5 cases: 4 searched, 1 skipped (no manual of theirs registered).",
+            "Top 1: 1/4, top 3: 2/4, top 5: 4/4.",
+            "Failures (not in the top 3): 1; known misses: 1.",
+        ]
+    );
+    assert_eq!(
+        search_test::row_lines(&rows),
+        [
+            "query         rank  tool              result",
+            "first            1  x.one             PASS",
+            "second           2  a_repos.get_repo  PASS",
+            "fourth           4  a_users.me        FAIL  (first: x.one)",
+            "fourth known     4  a_users.me        KNOWN  (known miss: ranks low; first: x.one)",
+            "skipped          -  b_core.whoami     SKIP  (no manual of its tools is registered)",
+        ]
+    );
+}
+
+/// The utcp commands search-test runs (only list and search), on canned answers.
+#[test]
+fn search_cases_run_only_list_and_search() {
+    let cases = parse_cases(
+        "me -> a_users.me\nstaged -> s_new.tool\nother -> b_core.whoami\n-dash -> a_users.me\n",
+    )
+    .unwrap();
+    for staged in [false, true] {
+        let calls = RefCell::new(Vec::<Vec<String>>::new());
+        let mut run = |args: &[&str]| -> Result<Vec<u8>, String> {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            let out = match args {
+                ["list", "--json"] => json!([
+                    {"name": "a_users", "tools": 1, "staged": false},
+                    {"name": "s_new", "tools": 1, "staged": true}
+                ]),
+                ["list", "--staged", "--json"] => {
+                    json!([{"name": "s_new", "tools": 1, "staged": true}])
+                }
+                ["search", ..] => json!([{"name": "a_users.me"}, {"name": "s_new.tool"}]),
+                _ => return Err(format!("unexpected {args:?}")),
+            };
+            Ok(out.to_string().into_bytes())
+        };
+        let rows = search_test::run_cases(&cases, &mut run, staged, 20).unwrap();
+        let outcomes: Vec<_> = rows.iter().map(|r| r.outcome).collect();
+        let calls = calls.into_inner();
+        let flag = |args: &[&str]| -> Vec<String> {
+            let mut v: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            if staged {
+                v.insert(4, "--staged".into());
+            }
+            v
+        };
+        let search = |q: &str| flag(&["search", "--json", "--limit", "20", "--", q]);
+        if staged {
+            assert_eq!(
+                outcomes,
+                [Outcome::Pass, Outcome::Pass, Outcome::Skip, Outcome::Pass]
+            );
+            assert_eq!(
+                calls,
+                [
+                    names_of(&["list", "--json"]),
+                    names_of(&["list", "--staged", "--json"]),
+                    search("me"),
+                    search("staged"),
+                    search("-dash"),
+                ]
+            );
+        } else {
+            // A manual that is only staged is not searched without --staged.
+            assert_eq!(
+                outcomes,
+                [Outcome::Pass, Outcome::Skip, Outcome::Skip, Outcome::Pass]
+            );
+            assert_eq!(
+                calls,
+                [names_of(&["list", "--json"]), search("me"), search("-dash")]
+            );
+        }
+    }
+    // A utcp failure or an answer that is not a JSON array stops the run with the reason.
+    let mut failing = |_: &[&str]| -> Result<Vec<u8>, String> { Err("utcp list failed".into()) };
+    assert_eq!(
+        search_test::run_cases(&cases, &mut failing, false, 3).unwrap_err(),
+        "utcp list failed"
+    );
+    let mut garbled = |_: &[&str]| -> Result<Vec<u8>, String> { Ok(b"{}".to_vec()) };
+    assert!(search_test::run_cases(&cases, &mut garbled, false, 3)
+        .unwrap_err()
+        .contains("utcp list --json did not print a JSON array"));
+}
+
 // utcp load test
 
 fn find_utcp() -> Option<PathBuf> {
@@ -1381,6 +1658,16 @@ fn find_utcp() -> Option<PathBuf> {
     }
 }
 
+/// A utcp command whose configuration, cache and state live in `dir`, with a fake token.
+fn isolated_utcp(utcp: &Path, dir: &Path) -> Command {
+    let mut cmd = Command::new(utcp);
+    cmd.env(PAT_VAR, "not-a-real-token");
+    for name in ["config", "cache", "state"] {
+        cmd.env(format!("UTCP_{}_DIR", name.to_uppercase()), dir.join(name));
+    }
+    cmd
+}
+
 /// The expected manuals stage in a throwaway utcp, staged dry runs build the right requests, and they promote.
 #[test]
 fn utcp_stage_schema_dry_run_promote() {
@@ -1391,16 +1678,8 @@ fn utcp_stage_schema_dry_run_promote() {
     let run = |args: &[&str], stdin: Option<&str>| -> String {
         use std::io::Write;
         use std::process::Stdio;
-        let mut cmd = Command::new(&utcp);
-        cmd.args(args)
-            .arg("--direct")
-            .env(PAT_VAR, "not-a-real-token");
-        for name in ["config", "cache", "state"] {
-            cmd.env(
-                format!("UTCP_{}_DIR", name.to_uppercase()),
-                tmp.path().join(name),
-            );
-        }
+        let mut cmd = isolated_utcp(&utcp, tmp.path());
+        cmd.args(args).arg("--direct");
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1496,4 +1775,65 @@ fn utcp_stage_schema_dry_run_promote() {
     run(&["promote", "github_*"], None);
     listed(false);
     run(&["schema", "github_repos.get_repo"], None);
+}
+
+/// search-test against a throwaway utcp with the expected manuals staged: staged search finds the fixture tools, and
+/// without --staged every case is skipped. Nothing is promoted.
+#[test]
+fn utcp_search_test() {
+    let Some(utcp) = find_utcp() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut run = |args: &[&str]| -> Result<Vec<u8>, String> {
+        let mut cmd = isolated_utcp(&utcp, tmp.path());
+        // --direct right after the command: search ends with `-- <query>`.
+        cmd.arg(args[0]).arg("--direct").args(&args[1..]);
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!(
+                "utcp {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(out.stdout)
+    };
+    let (manuals, _) = run_generate();
+    for name in manuals.keys() {
+        let file = expected_dir().join(format!("{name}.utcp.json"));
+        run(&["stage", name, file.to_str().unwrap(), "--hint", "test"]).unwrap();
+    }
+    let cases = parse_cases(
+        "\
+who am i -> github_users.get_authenticated_user | azdo_core.get_connection_data
+open an issue -> github_issues_pulls.create_issue
+file contents -> github_repos.get_content | github_repos.get_raw_content
+repository -> azdo_git.get_repository
+xyzzy plugh -> github_repos.get_repo [known miss: no tool says that]
+xyzzy plugh -> github_repos.get_repo
+",
+    )
+    .unwrap();
+    let rows = search_test::run_cases(&cases, &mut run, true, 3).unwrap();
+    let outcomes: Vec<_> = rows.iter().map(|r| r.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            Outcome::Pass,
+            Outcome::Pass,
+            Outcome::Pass,
+            Outcome::Skip,
+            Outcome::Known,
+            Outcome::Fail
+        ],
+        "{}",
+        search_test::row_lines(&rows).join("\n")
+    );
+    let rows = search_test::run_cases(&cases, &mut run, false, 3).unwrap();
+    assert!(rows.iter().all(|r| r.outcome == Outcome::Skip), "{rows:?}");
+    let list: Value = serde_json::from_slice(&run(&["list", "--json"]).unwrap()).unwrap();
+    assert!(
+        list.as_array().unwrap().iter().all(|m| m["staged"] == true),
+        "{list}"
+    );
 }
